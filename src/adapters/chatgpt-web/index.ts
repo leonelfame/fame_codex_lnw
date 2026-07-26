@@ -11,6 +11,7 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
 import { ChatGptReasoningFeed, ChatGptTextFeed, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
+import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -159,6 +160,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     baseUrl: provider.baseUrl,
     chatgptWeb: provider.chatgptWeb ?? {},
   })).digest("hex");
+  const environmentStore = new ChatGptThreadEnvironmentStore(
+    provider.chatgptWeb?.threadEnvironmentStatePath
+      ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
+      : undefined,
+  );
 
   const startRuntime = (
     parsed: CodexParsedRequest,
@@ -242,7 +248,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
-          environment = extractChatGptTurnEnvironment(parsed);
+          environment = environmentStore.resolve(parsed);
         } catch (error) {
           const identity = extractChatGptTurnIdentity(parsed);
           console.warn(

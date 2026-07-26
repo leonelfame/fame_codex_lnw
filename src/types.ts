@@ -304,6 +304,8 @@ export interface CodexProviderConfig {
     chromeExecutablePath?: string;
     /** Unix socket bridging the turn-bound MCP capability into outer Codex tools. */
     brokerSocketPath?: string;
+    /** Persisted, trusted Codex task authority used for follow-up turns that omit the envelope. */
+    threadEnvironmentStatePath?: string;
     /** Maximum duration of one complete browser response. */
     turnTimeoutMs?: number;
     /** Keep the single controlled browser visible. */

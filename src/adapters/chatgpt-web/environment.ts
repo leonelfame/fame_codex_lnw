@@ -20,6 +20,13 @@ export interface ChatGptTurnIdentity {
   promptCacheKey?: string;
 }
 
+export class MissingTrustedCodexEnvironmentError extends Error {
+  constructor(field: string) {
+    super(`ChatGPT web turn is missing ${field} in trusted Codex environment context`);
+    this.name = "MissingTrustedCodexEnvironmentError";
+  }
+}
+
 function contentText(content: string | CodexContentPart[]): string {
   if (typeof content === "string") return content;
   return content.filter(part => part.type === "text").map(part => part.text).join("\n");
@@ -206,7 +213,7 @@ function decodeXmlText(value: string): string {
 
 function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
-  if (decoded.length === 0) throw new Error(`ChatGPT web turn is missing ${field} in trusted Codex environment context`);
+  if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
   if (decoded.some(path => !isAbsolute(path))) throw new Error(`ChatGPT web ${field} must contain absolute paths`);
   return [...new Set(decoded.map(path => resolve(path)))];
 }

@@ -2,7 +2,7 @@
 set -eu
 
 REPOSITORY="${CODEX_CHATGPT_WEB_REPOSITORY:-miuuyy/codex-chatgpt-web}"
-VERSION="${CODEX_CHATGPT_WEB_VERSION:-0.1.3}"
+VERSION="${CODEX_CHATGPT_WEB_VERSION:-0.1.4}"
 BIN_DIR="${CODEX_CHATGPT_WEB_BIN_DIR:-$HOME/.local/bin}"
 LIB_DIR="${CODEX_CHATGPT_WEB_LIB_DIR:-$HOME/.local/lib/codex-chatgpt-web}"
 DOC_DIR="${CODEX_CHATGPT_WEB_DOC_DIR:-$HOME/.local/share/doc/codex-chatgpt-web}"
@@ -68,6 +68,7 @@ fi
 
 ln -sfn "$TARGET_DIR/bin/codex-chatgpt-web" "$BIN_DIR/.codex-chatgpt-web.next"
 mv -f "$BIN_DIR/.codex-chatgpt-web.next" "$BIN_DIR/codex-chatgpt-web"
+rm -f "$BIN_DIR/codex-chatgpt-web.legacy-standalone"
 for DOC in LICENSE NOTICE.md OpenCodex-MIT.txt Bun-1.3.11.md THIRD_PARTY_NOTICES.txt; do
   install -m 0644 "$TEMP_DIR/$DOC" "$DOC_DIR/$DOC"
 done

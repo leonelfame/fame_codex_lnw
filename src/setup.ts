@@ -12,7 +12,7 @@ import {
 import { installCodexIntegration } from "./codex-integration";
 import { assertServiceIdle, getServiceStatus, installService, removeLegacyRuntimeArtifacts, restartService } from "./service";
 import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, stopTunnel, waitForTunnelReady } from "./tunnel";
-import { getTunnelServiceStatus, installTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
+import { getTunnelServiceStatus, installTunnelService, restartTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 
 export interface SetupOptions {
@@ -79,6 +79,13 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     runtimeCommand: after.runtimeCommand,
     tunnel: after.tunnel,
   });
+}
+
+export function tunnelWorkerRuntimeChanged(before: AppConfig | undefined, after: AppConfig): boolean {
+  if (!before || before.mode !== "full" || after.mode !== "full") return false;
+  return before.releaseVersion !== after.releaseVersion
+    || JSON.stringify(before.runtimeCommand) !== JSON.stringify(after.runtimeCommand)
+    || before.brokerSocketPath !== after.brokerSocketPath;
 }
 
 async function assertPortAvailable(host: string, port: number): Promise<void> {
@@ -163,6 +170,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   }
   const existing = loadExistingConfig();
   const config = baseConfig(existing, options);
+  const refreshTunnelWorker = tunnelWorkerRuntimeChanged(existing, config);
   if (existing && options.restartService) config.controlToken = randomBytes(32).toString("base64url");
   const beforeService = getServiceStatus();
   if (beforeService.loaded && !existing) {
@@ -234,6 +242,9 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       if (!bootstrapStatus.ok) throw new Error(`Temporary tunnel bootstrap did not become healthy and ready: ${bootstrapStatus.detail}`);
       stopTunnel(config);
       installTunnelService(config);
+    } else if (refreshTunnelWorker) {
+      await assertServiceIdle(config);
+      await restartTunnelService();
     }
     const status = await waitForTunnelReady(config);
     if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);

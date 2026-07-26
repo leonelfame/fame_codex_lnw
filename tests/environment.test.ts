@@ -1,9 +1,17 @@
-import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { extractChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environment";
-import type { CodexParsedRequest } from "../src/types";
+import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
+import type { CodexParsedRequest, CodexTool } from "../src/types";
 
 const root = resolve(process.cwd());
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+  for (const path of temporaryRoots.splice(0)) rmSync(path, { recursive: true, force: true });
+});
 const environmentXml = `<environment_context>
   <cwd>${root}</cwd>
   <filesystem><workspace_roots><root>${root}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
@@ -71,5 +79,61 @@ describe("trusted current Codex environment envelope", () => {
   test("rejects unprovenanced adjacent user content without native item ids", () => {
     expect(() => extractChatGptTurnEnvironment(currentWire({ includeIds: false })))
       .toThrow("missing cwd");
+  });
+});
+
+describe("trusted Codex task environment continuity", () => {
+  test("persists the trusted first-turn authority and refreshes tools from every follow-up", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-thread-environment-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    const first = currentWire();
+    const firstTools: CodexTool[] = [{ name: "first_tool", description: "first", parameters: { type: "object" } }];
+    first.context.tools = firstTools;
+
+    expect(new ChatGptThreadEnvironmentStore(statePath).resolve(first).tools).toEqual(firstTools);
+    const onDisk = readFileSync(statePath, "utf8");
+    expect(onDisk).toContain('"thread_current"');
+    expect(onDisk).not.toContain("first_tool");
+
+    const next = currentWire();
+    const nextTools: CodexTool[] = [{ name: "next_tool", description: "next", parameters: { type: "object" } }];
+    next.context.tools = nextTools;
+    next._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_current", turn_id: "turn_next" }),
+      },
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue the same task" }],
+      }],
+    };
+
+    expect(new ChatGptThreadEnvironmentStore(statePath).resolve(next)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: nextTools,
+    });
+  });
+
+  test("does not borrow authority across threads or hide an invalid trusted update", () => {
+    const store = new ChatGptThreadEnvironmentStore();
+    store.resolve(currentWire());
+
+    const unrelated = currentWire();
+    unrelated._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_unrelated", turn_id: "turn_next" }),
+      },
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Continue" }] }],
+    };
+    expect(() => store.resolve(unrelated)).toThrow("missing cwd");
+
+    const invalidUpdate = currentWire({ sandbox: "read-only" });
+    invalidUpdate.context.systemPrompt = [`<environment_context><cwd>${root}</cwd></environment_context>`];
+    expect(() => store.resolve(invalidUpdate)).toThrow("requires one explicit trusted Codex sandbox mode");
   });
 });

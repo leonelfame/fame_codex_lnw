@@ -230,17 +230,40 @@ export class ChatGptBrowserWorker {
     const currentEffort = page.getByRole("button", {
       name: /^(?:Instant(?:\s+5\.5)?|Medium|High|Extra High|Pro)$/,
     }).last();
-    await currentEffort.waitFor({ state: "visible", timeout: 15_000 });
+    try {
+      await currentEffort.waitFor({ state: "visible", timeout: 35_000 });
+    } catch {
+      throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
+    }
     if (chatGptEffortLabelsMatch(await currentEffort.innerText(), mode.uiEffortLabel)) return mode;
     await currentEffort.click();
     const effortChoice = page.getByRole("menuitem", { name: mode.uiEffortLabel, exact: true }).or(
       page.getByRole("menuitemradio", { name: mode.uiEffortLabel, exact: true }),
     ).last();
-    await effortChoice.waitFor({ state: "visible", timeout: 5_000 });
+    try {
+      await effortChoice.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      const choices = (await page.locator('[role="menuitem"], [role="menuitemradio"]').allInnerTexts().catch(() => []))
+        .map(value => value.replace(/\s+/g, " ").trim())
+        .filter(value => /^(?:Instant(?: 5\.5)?|Medium|High|Extra High|Pro)$/.test(value));
+      throw new Error(
+        `ChatGPT effort ${JSON.stringify(mode.uiEffortLabel)} is unavailable in the authenticated account UI`
+        + (choices.length > 0 ? `; available: ${choices.join(", ")}` : ""),
+      );
+    }
     await effortChoice.click();
-    await effortChoice.waitFor({ state: "hidden", timeout: 5_000 });
-    await page.getByRole("button", { name: mode.uiEffortLabel, exact: true }).last()
-      .waitFor({ state: "visible", timeout: 5_000 });
+    try {
+      await page.getByRole("button", { name: mode.uiEffortLabel, exact: true }).last()
+        .waitFor({ state: "visible", timeout: 20_000 });
+    } catch {
+      const visible = await page.getByRole("button", {
+        name: /^(?:Instant(?:\s+5\.5)?|Medium|High|Extra High|Pro)$/,
+      }).allInnerTexts().catch(() => []);
+      throw new Error(
+        `ChatGPT did not confirm effort ${JSON.stringify(mode.uiEffortLabel)}`
+        + (visible.length > 0 ? `; visible effort control: ${visible.at(-1)!.replace(/\s+/g, " ").trim()}` : ""),
+      );
+    }
     return mode;
   }
 
@@ -387,7 +410,7 @@ export class ChatGptBrowserWorker {
         await assertAuthenticatedChatGptPage(page);
         await assertTemporaryChatPage(page);
       });
-      const mode = await this.runStage(turn.traceId, "effort_selection", 20_000, () => (
+      const mode = await this.runStage(turn.traceId, "effort_selection", 60_000, () => (
         this.selectModelAndEffort(page, turn.modelId, turn.reasoning, turn.capabilities)
       ));
       await this.runStage(turn.traceId, "prompt_attachment", 30_000, () => this.attachPrompt(page, prepared.text, mode.localTools));

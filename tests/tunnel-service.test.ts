@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { defaultConfig } from "../src/config";
 import { createTunnelConfig } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
+import { tunnelWorkerRuntimeChanged } from "../src/setup";
 
 const roots: string[] = [];
 
@@ -40,5 +41,24 @@ describe("tunnel launchd ownership", () => {
     expect(definition).not.toContain("/bin/sh");
     expect(definition).not.toContain(config.tunnel.tunnelId);
     expect(definition).not.toContain(key);
+  });
+
+  test("restarts the long-lived MCP worker when the installed release changes", () => {
+    const root = join(tmpdir(), `codex-chatgpt-web-tunnel-runtime-${process.pid}-${Date.now()}`);
+    roots.push(root);
+    process.env.CODEX_CHATGPT_WEB_HOME = root;
+    const runtime = join(root, "bin", "codex-chatgpt-web");
+    mkdirSync(join(root, "bin"), { recursive: true });
+    writeFileSync(runtime, "runtime");
+    const before = defaultConfig("browser-only");
+    before.mode = "full";
+    before.releaseVersion = "0.1.3";
+    before.runtimeCommand = [runtime];
+    const after = structuredClone(before);
+    after.releaseVersion = "0.1.4";
+
+    expect(tunnelWorkerRuntimeChanged(before, after)).toBe(true);
+    after.releaseVersion = before.releaseVersion;
+    expect(tunnelWorkerRuntimeChanged(before, after)).toBe(false);
   });
 });

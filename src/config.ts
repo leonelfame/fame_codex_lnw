@@ -207,6 +207,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       storageStatePath: config.storageStatePath,
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
+      threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
       proAvailable: config.proAvailable,
