@@ -5,8 +5,6 @@ import { dirname, join, resolve } from "node:path";
 import type { AppConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 
-const STANDARD_MODEL = "chatgpt-web/gpt-5.6-sol";
-const LEGACY_PRO_MODEL = "chatgpt-web/gpt-5.6-sol-pro";
 const MANAGED_COMMENT = "# Managed by codex-chatgpt-web; `codex-chatgpt-web uninstall` restores prior values.";
 
 interface PreviousAssignment {
@@ -151,20 +149,12 @@ function removeManagedComment(lines: string[]): void {
   }
 }
 
-function migrateLegacyDefaultModel(lines: string[]): void {
-  const current = findTopLevelAssignment(lines, "model");
-  if (current.index !== undefined && current.value === LEGACY_PRO_MODEL) {
-    lines[current.index] = `model = ${JSON.stringify(STANDARD_MODEL)}`;
-  }
-}
-
 function installRoute(
   text: string,
   installedUrl: string,
   replaceExistingRoute: boolean,
 ): { text: string; previous: CodexIntegrationJournal["previous"] } {
   const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
-  migrateLegacyDefaultModel(lines);
   const previous = assignments(lines);
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([, assignment]) => assignment.present)

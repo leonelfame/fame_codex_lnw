@@ -2,12 +2,14 @@ import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import { modelsRequest } from "../src/server";
 
-test("proxies official /models auth and query, then appends ChatGPT Web", async () => {
+test("proxies official /models auth and query, then appends the fixed ChatGPT Web models", async () => {
   const request = new Request("http://127.0.0.1:17841/v1/models?client_version=1.2.3", {
     headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "native-etag" },
   });
   let upstream: Request | undefined;
-  const response = await modelsRequest(request, defaultConfig("full"), async input => {
+  const config = defaultConfig("full");
+  config.proAvailable = true;
+  const response = await modelsRequest(request, config, async input => {
     upstream = input;
     return Response.json({
       models: [{
@@ -25,5 +27,12 @@ test("proxies official /models auth and query, then appends ChatGPT Web", async 
   expect(upstream!.headers.get("if-none-match")).toBeNull();
   expect(response.headers.get("etag")).not.toBe("native-etag");
   const body = await response.json() as { models: Array<{ slug: string }> };
-  expect(body.models.map(model => model.slug)).toEqual(["gpt-5.6-sol", "chatgpt-web/gpt-5.6-sol"]);
+  expect(body.models.map(model => model.slug)).toEqual([
+    "gpt-5.6-sol",
+    "chatgpt-web/light",
+    "chatgpt-web/medium",
+    "chatgpt-web/high",
+    "chatgpt-web/extra-high",
+    "chatgpt-web/pro",
+  ]);
 });

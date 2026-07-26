@@ -1,7 +1,12 @@
 import type { AppConfig } from "./config";
+import {
+  availableChatGptWebModelRoutes,
+  CHATGPT_WEB_BACKEND_MODEL,
+  CHATGPT_WEB_MODEL_PREFIX,
+  type ChatGptWebModelRoute,
+} from "./chatgpt-web-models";
 
-export const CHATGPT_WEB_ROUTED_MODEL = "chatgpt-web/gpt-5.6-sol";
-const NATIVE_TEMPLATE_MODEL = "gpt-5.6-sol";
+const NATIVE_TEMPLATE_MODEL = CHATGPT_WEB_BACKEND_MODEL;
 
 type JsonObject = Record<string, unknown>;
 
@@ -26,29 +31,27 @@ function reasoningLevel(template: JsonObject, effort: string, description: strin
   return { ...(source ? structuredClone(source) : {}), effort, description };
 }
 
-export function buildChatGptWebModel(templateValue: unknown, config: AppConfig): JsonObject {
+export function buildChatGptWebModel(
+  templateValue: unknown,
+  route: ChatGptWebModelRoute,
+  config: AppConfig,
+): JsonObject {
   const template = object(templateValue, `native ${NATIVE_TEMPLATE_MODEL} model`);
   if (slug(template) !== NATIVE_TEMPLATE_MODEL) {
     throw new Error(`ChatGPT Web model template must be ${NATIVE_TEMPLATE_MODEL}`);
   }
   const model: JsonObject = {
     ...structuredClone(template),
-    slug: CHATGPT_WEB_ROUTED_MODEL,
-    display_name: "ChatGPT Web",
-    description: "ChatGPT web through the native Codex harness. Light through Extra High map directly; Codex's Ultra option maps to account-gated ChatGPT Pro.",
+    slug: route.slug,
+    display_name: route.displayName,
+    description: route.description,
     input_modalities: ["text", "image"],
     visibility: "list",
     supported_in_api: false,
-    tool_mode: config.mode === "full" ? template.tool_mode : null,
+    tool_mode: config.mode === "full" && !route.requiresPro ? template.tool_mode : null,
     upgrade: null,
-    default_reasoning_level: "high",
-    supported_reasoning_levels: [
-      reasoningLevel(template, "low", "Light — ChatGPT Instant 5.5"),
-      reasoningLevel(template, "medium", "Medium"),
-      reasoningLevel(template, "high", "High"),
-      reasoningLevel(template, "xhigh", "Extra High"),
-      ...(config.proAvailable ? [reasoningLevel(template, "ultra", "Pro")] : []),
-    ],
+    default_reasoning_level: route.codexEffort,
+    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
     // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],
@@ -74,9 +77,11 @@ export function augmentNativeModelCatalog(value: unknown, config: AppConfig): Js
   if (!template) {
     throw new Error(`Native Codex models response is missing ${NATIVE_TEMPLATE_MODEL}`);
   }
-  const nativeModels = catalog.models.filter(model => slug(model) !== CHATGPT_WEB_ROUTED_MODEL);
+  const nativeModels = catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX));
+  const webModels = availableChatGptWebModelRoutes(config.proAvailable)
+    .map(route => buildChatGptWebModel(template, route, config));
   return {
     ...structuredClone(catalog),
-    models: [...structuredClone(nativeModels), buildChatGptWebModel(template, config)],
+    models: [...structuredClone(nativeModels), ...webModels],
   };
 }

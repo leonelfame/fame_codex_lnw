@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 
-test("one ChatGPT Web model maps explicit efforts to the visible ChatGPT modes", () => {
+test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, proAvailable: true };
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", capabilities)).toMatchObject({
     uiEffortLabel: "Instant 5.5",

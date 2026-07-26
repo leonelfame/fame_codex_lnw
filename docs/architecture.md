@@ -5,7 +5,7 @@ Codex app / CLI
       │ Responses API on loopback
       ▼
 codex-chatgpt-web daemon
-  ├─ official /models passthrough + one appended ChatGPT Web model
+  ├─ official /models passthrough + fixed ChatGPT Web models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ ChatGPT browser worker (one Chrome process, one turn at a time)
   ├─ capability broker (full mode only)
@@ -20,16 +20,17 @@ codex-chatgpt-web daemon
 
 ### `browser-only`
 
-- Exposes one `chatgpt-web/gpt-5.6-sol` model with Light, Medium, High, Extra High, and Pro efforts.
-  Codex Desktop currently labels the protocol's Pro-mapped `ultra` effort as **Ultra**.
+- Exposes `chatgpt-web/light`, `medium`, `high`, and `extra-high`; each model advertises exactly one
+  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
+  the authenticated account exposes Pro.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
 - Never starts the broker, tunnel, or MCP server.
-- Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected effort.
+- Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
 
 ### `full`
 
-- Exposes the same single model and effort list; Light through Extra High are tool-capable, while
-  Pro remains read-only.
+- Exposes the same fixed models; Light through Extra High are tool-capable, while Pro remains
+  read-only.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
@@ -40,8 +41,8 @@ Playwright CLI is a development/debugging tool and is not part of the runtime. T
 long-lived Chrome process. A Codex turn gets a fresh Temporary Chat page; the preceding page is
 closed. This prevents transcript leakage without creating a new Chrome window per tool call.
 
-ChatGPT owns context compaction inside that browser response. The appended model intentionally
-advertises no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
+ChatGPT owns context compaction inside that browser response. The appended models intentionally
+advertise no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
 fail explicitly instead of opening a second summarizer turn. A prompt-level checkpoint marker is
 translated into a visible Codex trace item; tool-capable turns re-bind the same capability after
 that checkpoint. Visible ChatGPT status rows become reasoning summaries, while stable prose between
@@ -60,7 +61,8 @@ launchd service that runs `tunnel-client` directly from its generated profile. B
 and `KeepAlive`; no shell, terminal, tmux session, or manual post-login command owns production
 lifecycle. Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url` after
 required services report healthy and ready. The daemon forwards the authenticated official model
-catalog and appends one routed model; no static catalog is installed.
+catalog and appends only the routed models owned by the `chatgpt-web/` namespace; no static catalog
+is installed.
 
 The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
 HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky
@@ -82,7 +84,8 @@ malformed, or non-idle, the operation fails closed and resumes the old daemon wh
 - Store browser state and tunnel credentials under the application home with mode `0600`.
 - Protect lifecycle control endpoints with a random application-owned bearer token.
 - Never place secret values in command-line arguments, logs, generated profiles, or Git.
-- Serialize browser turns and reject unsupported models or efforts explicitly.
+- Serialize browser turns and reject unsupported models explicitly. The selected routed model fixes
+  the adapter effort; a conflicting request effort cannot change it.
 - Do not retry or switch modes to evade product usage limits.
 
 See the complete [security model](security-model.md).

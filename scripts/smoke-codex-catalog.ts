@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { defaultConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
@@ -37,13 +38,16 @@ writeFileSync(join(process.env.CODEX_HOME, "config.toml"), `model_catalog_json =
 try {
   const result = runCodex(["debug", "models"], { ...process.env, CODEX_HOME: process.env.CODEX_HOME });
   const catalog = JSON.parse(result.stdout) as { models?: Array<{ slug?: string; supported_reasoning_levels?: unknown[] }> };
-  const web = catalog.models?.find(model => model.slug === "chatgpt-web/gpt-5.6-sol");
-  if (!web) throw new Error("Codex did not expose the generated ChatGPT Web model");
-  const efforts = Array.isArray(web.supported_reasoning_levels)
-    ? (web.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
-    : [];
-  if (JSON.stringify(efforts) !== JSON.stringify(["low", "medium", "high", "xhigh", "ultra"])) {
-    throw new Error(`Codex did not preserve the ChatGPT Web effort contract: ${JSON.stringify(efforts)}`);
+  const web = catalog.models?.filter(model => model.slug?.startsWith("chatgpt-web/")) ?? [];
+  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => ({ slug: route.slug, effort: route.codexEffort }));
+  const actual = web.map(model => ({
+    slug: model.slug,
+    effort: Array.isArray(model.supported_reasoning_levels)
+      ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort).join(",")
+      : "",
+  }));
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`Codex did not preserve the fixed ChatGPT Web model contract: ${JSON.stringify(actual)}`);
   }
   process.stdout.write("NATIVE_CODEX_CATALOG_SMOKE_OK\n");
 } finally {

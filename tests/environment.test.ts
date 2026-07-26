@@ -28,7 +28,7 @@ function currentWire(options: { workspace?: string; sandbox?: string; includeIds
     workspaces: { [workspace]: { has_changes: true } },
   };
   return {
-    modelId: "chatgpt-web/gpt-5.6-sol",
+    modelId: "gpt-5.6-sol",
     stream: true,
     context: { messages: [{ role: "user", content: "Inspect the workspace", timestamp: 1 }] },
     options: { reasoning: "high" },

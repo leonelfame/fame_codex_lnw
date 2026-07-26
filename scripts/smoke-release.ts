@@ -20,11 +20,11 @@ for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/codex-
 }
 
 const manifest = JSON.parse(readFileSync(join(runtimeRoot, "manifest.json"), "utf8")) as Record<string, unknown>;
-if (manifest.schemaVersion !== 1 || manifest.appVersion !== "0.1.5" || manifest.playwright !== "1.62.0") {
+if (manifest.schemaVersion !== 1 || manifest.appVersion !== "0.1.6" || manifest.playwright !== "1.62.0") {
   throw new Error(`Unexpected runtime manifest: ${JSON.stringify(manifest)}`);
 }
 const version = Bun.spawnSync([launcher, "--version"], { stdout: "pipe", stderr: "pipe" });
-if (version.exitCode !== 0 || version.stdout.toString().trim() !== "0.1.5") {
+if (version.exitCode !== 0 || version.stdout.toString().trim() !== "0.1.6") {
   throw new Error(`Relocated launcher failed: ${version.stderr.toString()}`);
 }
 
@@ -37,7 +37,7 @@ const port = portServer.port;
 portServer.stop();
 const config = {
   version: 2,
-  releaseVersion: "0.1.5",
+  releaseVersion: "0.1.6",
   mode: "browser-only",
   host: "127.0.0.1",
   port,
@@ -109,7 +109,7 @@ try {
   const rejectedWhileDraining = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", reasoning: { effort: "high" }, input: "test", stream: false }),
+    body: JSON.stringify({ model: "chatgpt-web/high", reasoning: { effort: "high" }, input: "test", stream: false }),
   });
   if (rejectedWhileDraining.status !== 503) {
     throw new Error(`daemon accepted a new turn while draining: HTTP ${rejectedWhileDraining.status}`);

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
-import { augmentNativeModelCatalog, CHATGPT_WEB_ROUTED_MODEL } from "../src/model-catalog";
+import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
+import { augmentNativeModelCatalog } from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
   return {
@@ -36,7 +37,7 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
-  test("preserves every native model in order and appends exactly one ChatGPT Web model", () => {
+  test("preserves every native model in order and appends one fixed model per ChatGPT Web mode", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig("full");
@@ -46,40 +47,45 @@ describe("native /models augmentation", () => {
 
     expect(native).toEqual(nativeSnapshot);
     expect(models.slice(0, 3)).toEqual(nativeSnapshot.models as Array<Record<string, unknown>>);
-    expect(models.filter(model => model.slug === CHATGPT_WEB_ROUTED_MODEL)).toHaveLength(1);
-    expect(models[3]).toMatchObject({
-      slug: CHATGPT_WEB_ROUTED_MODEL,
-      display_name: "ChatGPT Web",
-      tool_mode: "code_mode_only",
-      additional_speed_tiers: [],
-      service_tiers: [],
-      default_service_tier: null,
-    });
-    expect(models[3]).not.toHaveProperty("context_window");
-    expect(models[3]).not.toHaveProperty("max_context_window");
-    expect(models[3]).not.toHaveProperty("auto_compact_token_limit");
-    expect(models[3]).not.toHaveProperty("comp_hash");
-    expect((models[3]!.supported_reasoning_levels as Array<{ effort: string; description: string }>))
-      .toEqual([
-        { effort: "low", description: "Light — ChatGPT Instant 5.5" },
-        { effort: "medium", description: "Medium" },
-        { effort: "high", description: "High" },
-        { effort: "xhigh", description: "Extra High" },
-        { effort: "ultra", description: "Pro" },
-      ]);
+    const web = models.slice(3);
+    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
+    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
+    for (const [index, model] of web.entries()) {
+      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+      expect(model).toMatchObject({
+        slug: route.slug,
+        display_name: route.displayName,
+        tool_mode: route.requiresPro ? null : "code_mode_only",
+        default_reasoning_level: route.codexEffort,
+        supported_reasoning_levels: [{ effort: route.codexEffort, description: route.displayName }],
+        additional_speed_tiers: [],
+        service_tiers: [],
+        default_service_tier: null,
+      });
+      expect(model).not.toHaveProperty("context_window");
+      expect(model).not.toHaveProperty("max_context_window");
+      expect(model).not.toHaveProperty("auto_compact_token_limit");
+      expect(model).not.toHaveProperty("comp_hash");
+    }
   });
 
-  test("is idempotent and omits account-gated Pro when unavailable", () => {
+  test("owns only its namespace, is idempotent, and omits account-gated Pro when unavailable", () => {
     const config = defaultConfig("browser-only");
     config.proAvailable = false;
-    const first = augmentNativeModelCatalog(source(), config);
+    const polluted = source();
+    (polluted.models as unknown[]).push(
+      { slug: "chatgpt-web/gpt-5.6-sol", display_name: "legacy generic route" },
+      { slug: "chatgpt-web/pro", display_name: "stale Pro route" },
+    );
+    const first = augmentNativeModelCatalog(polluted, config);
     const second = augmentNativeModelCatalog(first, config);
     const models = second.models as Array<Record<string, unknown>>;
-    expect(models.filter(model => model.slug === CHATGPT_WEB_ROUTED_MODEL)).toHaveLength(1);
-    const web = models.find(model => model.slug === CHATGPT_WEB_ROUTED_MODEL)!;
-    expect((web.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
-      .toEqual(["low", "medium", "high", "xhigh"]);
-    expect(web.tool_mode).toBeNull();
+    const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
+    expect(web.map(model => model.slug)).toEqual(
+      CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro).map(route => route.slug),
+    );
+    expect(web.every(model => model.tool_mode === null)).toBe(true);
+    expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
   });
 
   test("fails closed when the official native template is absent", () => {

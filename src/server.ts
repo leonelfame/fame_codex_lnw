@@ -8,28 +8,23 @@ import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
+import {
+  CHATGPT_WEB_BACKEND_MODEL,
+  isChatGptWebModelSlug,
+  requireChatGptWebModelRoute,
+  type ChatGptWebModelRoute,
+} from "./chatgpt-web-models";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import { parseRequest } from "./responses/parser";
 import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
 import { VERSION } from "./version";
 
-const ROUTED_PREFIX = "chatgpt-web/";
-const WEB_MODEL = "gpt-5.6-sol";
-
-function routeModel(parsed: CodexParsedRequest, config: AppConfig): string {
-  const requested = parsed.modelId.startsWith(ROUTED_PREFIX)
-    ? parsed.modelId.slice(ROUTED_PREFIX.length)
-    : parsed.modelId;
-  if (requested !== WEB_MODEL) throw new Error(`ChatGPT web model is not enabled: ${parsed.modelId}`);
-  if (parsed.options.reasoning === "max" && !config.proAvailable) {
-    throw new Error("ChatGPT Pro effort is not available for this account");
-  }
-  parsed.modelId = requested;
-  if (parsed._rawBody && typeof parsed._rawBody === "object") {
-    (parsed._rawBody as { model?: string }).model = requested;
-  }
-  return requested;
+export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
+  const route = requireChatGptWebModelRoute(parsed.modelId, config.proAvailable);
+  parsed.modelId = CHATGPT_WEB_BACKEND_MODEL;
+  parsed.options.reasoning = route.adapterEffort;
+  return route;
 }
 
 export async function modelsRequest(req: Request, config: AppConfig, fetchUpstream?: NativeFetch): Promise<Response> {
@@ -86,7 +81,7 @@ export async function responseRequest(req: Request, config: AppConfig): Promise<
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
-  if (typeof requestedModel === "string" && !requestedModel.startsWith(ROUTED_PREFIX)) {
+  if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses");
     } catch (error) {
@@ -95,9 +90,10 @@ export async function responseRequest(req: Request, config: AppConfig): Promise<
   }
   const expanded = expandPreviousResponseInput(raw);
   let parsed: CodexParsedRequest;
+  let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
-    routeModel(parsed, config);
+    route = routeChatGptWebRequest(parsed, config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -125,7 +121,7 @@ export async function responseRequest(req: Request, config: AppConfig): Promise<
     }
   };
   const maps = toolBridgeMaps(parsed);
-  const responseModel = `${ROUTED_PREFIX}${parsed.modelId}`;
+  const responseModel = route.slug;
 
   if (parsed.stream) {
     void run();
@@ -181,12 +177,17 @@ export async function compactRequest(req: Request, _config: AppConfig): Promise<
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
-  if (!raw.model.startsWith(ROUTED_PREFIX)) {
+  if (!isChatGptWebModelSlug(raw.model)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact");
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
+  }
+  try {
+    requireChatGptWebModelRoute(raw.model, _config.proAvailable);
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   return formatErrorResponse(
     400,

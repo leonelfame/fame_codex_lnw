@@ -1,7 +1,7 @@
 <h1 align="center">codex-chatgpt-web</h1>
 
 <p align="center">
-  <strong>Use ChatGPT Web—including Pro—as one native Codex model.</strong><br>
+  <strong>Use ChatGPT Web—including Pro—as native Codex models.</strong><br>
   Keep Codex's model picker, complete context, images, streaming, tracing, and task history. Change the model—not your workflow.
 </p>
 
@@ -17,8 +17,9 @@
 
 **Codex has the harness. ChatGPT has Pro. This connects them.**
 
-Open a normal Codex task, choose **ChatGPT Web** in the native model picker, select an effort from
-Light through Extra High or Pro, and keep working in the same Codex UI. The bridge replays the complete task
+Open a normal Codex task, choose **ChatGPT Web — Light**, **Medium**, **High**, **Extra High**, or
+**Pro** in the native model picker, and keep working in the same Codex UI. Each model has one fixed
+browser mode. The bridge replays the complete task
 context into a fresh ChatGPT Temporary Chat and streams the result back through Codex's native
 Responses protocol.
 
@@ -32,11 +33,13 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled bro
 
 | Mode | Native picker | Context and images | Local Codex tools | Tunnel |
 | --- | --- | --- | --- | --- |
-| **Browser-only** | `ChatGPT Web` · Light through Pro | Full | No, with a visible warning | None |
-| **Full harness** | The same `ChatGPT Web` model and efforts | Full | Light–Extra High: yes; Pro: read-only | Official OpenAI tunnel-client |
+| **Browser-only** | Four fixed models + Pro when available | Full | No, with a visible warning | None |
+| **Full harness** | The same fixed models | Full | Light–Extra High: yes; Pro: read-only | Official OpenAI tunnel-client |
 
-Codex Desktop currently renders the protocol effort id `ultra` as **Ultra**; the bridge maps that
-option to ChatGPT **Pro**. Pro is intentionally read-only with respect to the local computer: it receives all context already
+Codex Desktop always renders an Effort row for custom models. Every ChatGPT Web model therefore
+advertises exactly one immutable protocol effort; the model selection is authoritative. The Pro
+model uses Codex's `ultra` wire value and binds explicitly to ChatGPT **Pro**. Pro is intentionally
+read-only with respect to the local computer: it receives all context already
 collected by Codex, but it cannot request another local tool call. Full harness mode attaches the
 Codex tool loop to Light, Medium, High, and Extra High. The selected model never changes silently.
 
@@ -55,13 +58,15 @@ Then:
 1. Sign in to ChatGPT in the single Chrome window opened by setup.
 2. Let setup finish.
 3. Restart the Codex app once.
-4. Pick **ChatGPT Web** and choose **Ultra** (mapped to ChatGPT **Pro**).
+4. Pick one of the **ChatGPT Web — …** models. **ChatGPT Web — Pro** appears only when setup
+   detected that Pro is available in the authenticated account.
 
 That command downloads one checksum-verified, versioned runtime bundle, stores private browser
 state under `~/.codex-chatgpt-web`, installs a user launchd service, and applies a reversible Codex
 `openai_base_url` route. The proxy forwards Codex's official `/models` response unchanged and
-appends exactly one `ChatGPT Web` entry; it never generates or replaces the native catalog. The
-service starts after macOS login and restarts after a crash; normal
+appends four fixed ChatGPT Web entries plus the account-gated Pro entry when available; it never
+generates or replaces the native catalog. The service starts after macOS login and restarts after
+a crash; normal
 use requires no terminal command. It does **not** require a system Node/Bun/Go runtime, OpenCodex,
 or a Playwright browser download.
 
@@ -173,9 +178,10 @@ Maintainer details:
 
 - ChatGPT UI selectors can change without notice. UI drift fails explicitly; the runtime never
   silently changes model, effort, or transport.
-- Current Codex Desktop hardcodes the visible `ultra` label as **Ultra** and always shows a
-  **Standard** speed row. The model catalog cannot rename or hide either control; ChatGPT Web sends
-  no service tier, and the bridge maps `ultra` to Pro. Patching the signed desktop app is out of scope.
+- Current Codex Desktop always shows an Effort row and hardcodes `ultra` as **Ultra**. Each routed
+  model exposes only its one fixed value, so the row cannot change the selected browser mode. The
+  app also always shows a **Standard** speed row even though ChatGPT Web sends no service tier.
+  The model catalog cannot rename or hide these controls; patching the signed app is out of scope.
 - Browser state is equivalent to a sensitive login artifact. Never share or commit it.
 - The Responses listener is loopback-only, but another process under the same local user can reach
   it. Use a trusted single-user workstation.

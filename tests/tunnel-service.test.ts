@@ -55,7 +55,7 @@ describe("tunnel launchd ownership", () => {
     before.releaseVersion = "0.1.3";
     before.runtimeCommand = [runtime];
     const after = structuredClone(before);
-    after.releaseVersion = "0.1.5";
+    after.releaseVersion = "0.1.6";
 
     expect(tunnelWorkerRuntimeChanged(before, after)).toBe(true);
     after.releaseVersion = before.releaseVersion;
