@@ -18,5 +18,9 @@ jobs:
           bun-version: 1.3.11
       - run: bun install --frozen-lockfile
       - run: bun run verify
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: false
       - name: Lint GitHub Actions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -config-file .github/actionlint.yaml .github/workflows/*.yml
