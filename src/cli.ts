@@ -34,8 +34,8 @@ Usage:
   codex-chatgpt-web uninstall --yes
 
 Setup options:
-  --browser-only               One ChatGPT Web model, full context/images, no local tools or tunnel
-  --full                       Standard tool-capable model plus Pro
+  --browser-only               Fixed Light–Pro models, full context/images, no local tools or tunnel
+  --full                       Fixed Light–Extra High tool models plus read-only Pro
   --port NUMBER                Loopback Responses port (default: 17841)
   --chrome PATH                Google Chrome executable
   --app-name NAME              ChatGPT connector name (default: Codex Native)
