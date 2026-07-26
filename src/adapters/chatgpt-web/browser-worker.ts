@@ -73,6 +73,55 @@ export class ChatGptCompletionTracker {
   }
 }
 
+export class ChatGptTurnDomHealthTracker {
+  private sawAssistant = false;
+  private missingSince?: number;
+  private emptyCompletionSince?: number;
+
+  constructor(
+    private readonly missingAssistantMs = 15_000,
+    private readonly emptyCompletionMs = 5_000,
+  ) {}
+
+  update(state: {
+    assistantPresent: boolean;
+    running: boolean;
+    sawRunning: boolean;
+    currentText: string;
+    completionActionVisible: boolean;
+    completionActionCount: number;
+    initialCompletionActionCount: number;
+  }, now = Date.now()): string | undefined {
+    if (state.assistantPresent) {
+      this.sawAssistant = true;
+      this.missingSince = undefined;
+    } else {
+      this.missingSince ??= now;
+      if (now - this.missingSince >= this.missingAssistantMs) {
+        return this.sawAssistant
+          ? "ChatGPT response DOM disappeared while the browser turn was active"
+          : "ChatGPT did not create a response DOM after the message was sent";
+      }
+    }
+
+    const emptyCompletion = state.assistantPresent
+      && state.sawRunning
+      && !state.running
+      && state.currentText.length === 0
+      && state.completionActionVisible
+      && state.completionActionCount > state.initialCompletionActionCount;
+    if (!emptyCompletion) {
+      this.emptyCompletionSince = undefined;
+    } else {
+      this.emptyCompletionSince ??= now;
+      if (now - this.emptyCompletionSince >= this.emptyCompletionMs) {
+        return "ChatGPT browser turn completed without a final answer";
+      }
+    }
+    return undefined;
+  }
+}
+
 export interface ChatGptVisibleTraceBlock {
   kind: "markdown" | "status";
   text: string;
@@ -530,6 +579,7 @@ export class ChatGptBrowserWorker {
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownStream = new ChatGptMarkdownStream(stripChatGptTransportMarkers);
       const completionTracker = new ChatGptCompletionTracker();
+      const domHealthTracker = new ChatGptTurnDomHealthTracker();
       for (;;) {
         if (turn.abortSignal?.aborted) {
           const stop = page.getByRole("button", { name: "Stop answering" });
@@ -550,7 +600,11 @@ export class ChatGptBrowserWorker {
         await this.expandVisibleReasoning(page);
 
         const assistant = assistantMessages.last();
-        if (await assistant.count()) {
+        const assistantPresent = await assistant.count() > 0;
+        const stop = page.getByRole("button", { name: "Stop answering" });
+        const running = await stop.isVisible().catch(() => false);
+        if (running) sawRunning = true;
+        if (assistantPresent) {
           const rendered = assistant.locator(".markdown").last();
           const snapshot = await rendered.count()
             ? await rendered.evaluate(element => {
@@ -563,9 +617,6 @@ export class ChatGptBrowserWorker {
               };
             })
             : { visibleText: "", fullHtml: "", stableHtml: "" };
-          const stop = page.getByRole("button", { name: "Stop answering" });
-          const running = await stop.isVisible().catch(() => false);
-          if (running) sawRunning = true;
           const completionActionCount = await completionActions.count();
           const completionActionVisible = completionActionCount > 0
             && await completionActions.last().isVisible().catch(() => false);
@@ -577,6 +628,16 @@ export class ChatGptBrowserWorker {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text);
             else turn.onReasoningSummary?.(trace.text);
           }
+          const domError = domHealthTracker.update({
+            assistantPresent,
+            running,
+            sawRunning,
+            currentText: snapshot.visibleText,
+            completionActionVisible,
+            completionActionCount,
+            initialCompletionActionCount,
+          });
+          if (domError) throw new Error(domError);
           // ChatGPT can render visible commentary Markdown between tool-status rows. Only a
           // Markdown root accompanied by the response action belongs to the final answer stream.
           if (completionActionVisible) {
@@ -612,6 +673,17 @@ export class ChatGptBrowserWorker {
               `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActions=${completionActionCount}, initialCompletionActions=${initialCompletionActionCount}, ui=${diagnostic})`,
             );
           }
+        } else {
+          const domError = domHealthTracker.update({
+            assistantPresent,
+            running,
+            sawRunning,
+            currentText: "",
+            completionActionVisible: false,
+            completionActionCount: await completionActions.count(),
+            initialCompletionActionCount,
+          });
+          if (domError) throw new Error(domError);
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
       }
