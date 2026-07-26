@@ -80,11 +80,11 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   const codex = inspectCodexIntegration();
   if (!codex.installed) {
-    checks.push({ id: "codex", status: "error", message: "Codex model catalog integration is not installed" });
+    checks.push({ id: "codex", status: "error", message: "Codex model route is not installed" });
   } else if (codex.errors.length > 0) {
     checks.push({ id: "codex", status: "error", message: "Codex integration is inconsistent", detail: codex.errors.join("; ") });
   } else {
-    checks.push({ id: "codex", status: "ok", message: "Codex route and model catalog are installed" });
+    checks.push({ id: "codex", status: "ok", message: "Codex native model route is installed" });
   }
 
   const service = getServiceStatus();

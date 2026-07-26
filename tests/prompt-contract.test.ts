@@ -3,7 +3,7 @@ import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
-function request(reasoning: "high" | "pro"): CodexParsedRequest {
+function request(reasoning: "high" | "max"): CodexParsedRequest {
   return {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
@@ -37,7 +37,7 @@ test("tool-capable prompts resume the mandatory bind contract after the complete
 
 test("read-only prompts resume without exposing a bind capability", () => {
   const compiled = compileChatGptWebPrompt(
-    request("pro"),
+    request("max"),
     { localToolsEnabled: true, proAvailable: true },
   );
 

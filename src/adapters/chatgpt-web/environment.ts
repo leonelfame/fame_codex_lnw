@@ -153,10 +153,12 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
     }
   }
   const turnId = clientTurnMetadata(parsed)?.turn_id;
-  if (typeof turnId === "string") {
-    const current = environmentBeforeUser(input, activeUserIndex, turnId);
-    if (current) return current;
-  }
+  const currentByTurn = environmentBeforeUser(
+    input,
+    activeUserIndex,
+    typeof turnId === "string" ? turnId : undefined,
+  );
+  if (currentByTurn) return currentByTurn;
 
   const current = workspaceMetadataEnvironmentBeforeUser(input, activeUserIndex, clientTurnMetadata(parsed));
   if (current) return current;

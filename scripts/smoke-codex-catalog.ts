@@ -2,9 +2,8 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { defaultConfig, saveConfig } from "../src/config";
-import { installCodexIntegration } from "../src/codex-integration";
-import { startServer } from "../src/server";
+import { defaultConfig } from "../src/config";
+import { augmentNativeModelCatalog } from "../src/model-catalog";
 
 const codex = resolve(process.argv[2] ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
 function runCodex(args: string[], env = process.env): { stdout: string; stderr: string } {
@@ -30,17 +29,11 @@ const root = join(tmpdir(), `codex-chatgpt-web-codex-smoke-${process.pid}-${Date
 process.env.CODEX_HOME = join(root, "codex");
 process.env.CODEX_CHATGPT_WEB_HOME = join(root, "app");
 mkdirSync(process.env.CODEX_HOME, { recursive: true });
-const source = join(root, "bundled-models.json");
-writeFileSync(source, `${JSON.stringify(sourceCatalog)}\n`);
 const config = defaultConfig("browser-only");
 config.proAvailable = true;
-const port = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-config.port = port.port;
-port.stop();
-config.acknowledgedUnofficialAt = new Date().toISOString();
-saveConfig(config);
-installCodexIntegration(config, { sourceCatalogPath: source });
-const server = startServer(config);
+const catalogPath = join(root, "augmented-models.json");
+writeFileSync(catalogPath, `${JSON.stringify(augmentNativeModelCatalog(sourceCatalog, config))}\n`);
+writeFileSync(join(process.env.CODEX_HOME, "config.toml"), `model_catalog_json = ${JSON.stringify(catalogPath)}\n`);
 try {
   const result = runCodex(["debug", "models"], { ...process.env, CODEX_HOME: process.env.CODEX_HOME });
   const catalog = JSON.parse(result.stdout) as { models?: Array<{ slug?: string; supported_reasoning_levels?: unknown[] }> };
@@ -49,11 +42,10 @@ try {
   const efforts = Array.isArray(web.supported_reasoning_levels)
     ? (web.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
     : [];
-  if (JSON.stringify(efforts) !== JSON.stringify(["light", "medium", "high", "xhigh", "pro"])) {
+  if (JSON.stringify(efforts) !== JSON.stringify(["low", "medium", "high", "xhigh", "ultra"])) {
     throw new Error(`Codex did not preserve the ChatGPT Web effort contract: ${JSON.stringify(efforts)}`);
   }
   process.stdout.write("NATIVE_CODEX_CATALOG_SMOKE_OK\n");
 } finally {
-  await server.stop(true);
   rmSync(root, { recursive: true, force: true });
 }

@@ -82,7 +82,7 @@ function rawWireRequest(environmentText: string): CodexParsedRequest {
 
 function proRequest(environmentText = environmentXml): CodexParsedRequest {
   const request = rawWireRequest(environmentText);
-  request.options.reasoning = "pro";
+  request.options.reasoning = "max";
   return request;
 }
 
@@ -108,6 +108,12 @@ describe("ChatGPT outer-native harness v3", () => {
       turnId: "turn_test_123",
       promptCacheKey: "thread_test_123",
     });
+  });
+
+  test("accepts adjacent native turn provenance when Codex omits top-level client_metadata", () => {
+    const request = rawWireRequest(environmentXml);
+    delete (request._rawBody as { client_metadata?: unknown }).client_metadata;
+    expect(extractChatGptTurnEnvironment(request).cwd).toBe(tempRoot);
   });
 
   test("does not trust an environment tag supplied as the active user message", () => {
@@ -267,9 +273,9 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("maps one ChatGPT Web model to explicit effort modes and fails closed on invalid combinations", () => {
-    expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "pro", toolCapabilities)).toEqual({
+    expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", toolCapabilities)).toEqual({
       modelId: CHATGPT_WEB_MODEL_ID,
-      effort: "pro",
+      effort: "max",
       uiEffortLabel: "Pro",
       localTools: false,
     });
@@ -277,7 +283,7 @@ describe("ChatGPT outer-native harness v3", () => {
       uiEffortLabel: "Extra High",
       localTools: true,
     });
-    expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "pro", {
+    expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", {
       localToolsEnabled: false,
       proAvailable: false,
     })).toThrow("Pro effort is not available");

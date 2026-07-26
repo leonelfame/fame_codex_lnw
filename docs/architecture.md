@@ -5,7 +5,8 @@ Codex app / CLI
       │ Responses API on loopback
       ▼
 codex-chatgpt-web daemon
-  ├─ Responses parser + native SSE bridge
+  ├─ official /models passthrough + one appended ChatGPT Web model
+  ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ ChatGPT browser worker (one Chrome process, one turn at a time)
   ├─ capability broker (full mode only)
   └─ stdio MCP server
@@ -49,8 +50,13 @@ and verifies it against that release's published SHA-256 manifest.
 Setup creates a user launchd service for the Responses proxy. Full mode also creates a separate
 launchd service that runs `tunnel-client` directly from its generated profile. Both use `RunAtLoad`
 and `KeepAlive`; no shell, terminal, tmux session, or manual post-login command owns production
-lifecycle. Setup only journals and switches Codex's two integration keys after required services
-report healthy and ready.
+lifecycle. Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url` after
+required services report healthy and ready. The daemon forwards the authenticated official model
+catalog and appends one routed model; no static catalog is installed.
+
+The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
+HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky
+switch to its HTTP/SSE transport. No model or provider fallback occurs.
 
 Setup never restarts an already loaded daemon implicitly. A requested stop, restart, replacement,
 or uninstall first calls a private authenticated drain endpoint. The daemon rejects new turns and

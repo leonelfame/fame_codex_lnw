@@ -23,7 +23,6 @@ export interface SetupOptions {
   forceLogin?: boolean;
   autoApproveToolCalls?: boolean;
   replaceCodexRoute?: boolean;
-  sourceCatalogPath?: string;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
   tunnelId?: string;
@@ -242,7 +241,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   }
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
-    sourceCatalogPath: options.sourceCatalogPath,
   });
 
   return {

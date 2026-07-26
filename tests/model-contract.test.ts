@@ -3,7 +3,7 @@ import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapter
 
 test("one ChatGPT Web model maps explicit efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, proAvailable: true };
-  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "light", capabilities)).toMatchObject({
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", capabilities)).toMatchObject({
     uiEffortLabel: "Instant 5.5",
     localTools: true,
   });
@@ -19,7 +19,7 @@ test("one ChatGPT Web model maps explicit efforts to the visible ChatGPT modes",
     uiEffortLabel: "Extra High",
     localTools: true,
   });
-  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "pro", capabilities)).toMatchObject({
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", capabilities)).toMatchObject({
     uiEffortLabel: "Pro",
     localTools: false,
   });
@@ -30,7 +30,7 @@ test("capabilities gate tools and Pro explicitly without changing the selected m
     localToolsEnabled: false,
     proAvailable: true,
   })).toMatchObject({ localTools: false });
-  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "pro", {
+  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", {
     localToolsEnabled: false,
     proAvailable: false,
   })).toThrow("Pro effort is not available");

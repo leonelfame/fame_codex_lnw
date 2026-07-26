@@ -6,7 +6,9 @@ import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
-import { forwardNativeCodexRequest } from "./native-passthrough";
+import { createHash } from "node:crypto";
+import { augmentNativeModelCatalog } from "./model-catalog";
+import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "./responses/compaction";
 import { parseRequest } from "./responses/parser";
 import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
@@ -16,16 +18,12 @@ import { VERSION } from "./version";
 const ROUTED_PREFIX = "chatgpt-web/";
 const WEB_MODEL = "gpt-5.6-sol";
 
-function modelList(): Array<Record<string, unknown>> {
-  return [{ id: `${ROUTED_PREFIX}${WEB_MODEL}`, object: "model", created: 0, owned_by: "chatgpt-web" }];
-}
-
 function routeModel(parsed: CodexParsedRequest, config: AppConfig): string {
   const requested = parsed.modelId.startsWith(ROUTED_PREFIX)
     ? parsed.modelId.slice(ROUTED_PREFIX.length)
     : parsed.modelId;
   if (requested !== WEB_MODEL) throw new Error(`ChatGPT web model is not enabled: ${parsed.modelId}`);
-  if (parsed.options.reasoning === "pro" && !config.proAvailable) {
+  if (parsed.options.reasoning === "max" && !config.proAvailable) {
     throw new Error("ChatGPT Pro effort is not available for this account");
   }
   parsed.modelId = requested;
@@ -33,6 +31,29 @@ function routeModel(parsed: CodexParsedRequest, config: AppConfig): string {
     (parsed._rawBody as { model?: string }).model = requested;
   }
   return requested;
+}
+
+export async function modelsRequest(req: Request, config: AppConfig, fetchUpstream?: NativeFetch): Promise<Response> {
+  let upstream: Response;
+  try {
+    upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
+  } catch (error) {
+    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+  }
+  if (!upstream.ok) return upstream;
+  let catalog: Record<string, unknown>;
+  try {
+    catalog = augmentNativeModelCatalog(await upstream.json(), config);
+  } catch (error) {
+    return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
+  }
+  const body = JSON.stringify(catalog);
+  const headers = new Headers(upstream.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  headers.set("content-type", "application/json");
+  headers.set("etag", `W/\"${createHash("sha256").update(body).digest("base64url")}\"`);
+  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
 function toolBridgeMaps(parsed: CodexParsedRequest): {
@@ -245,7 +266,13 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
         return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        return Response.json({ object: "list", data: modelList() });
+        return modelsRequest(req, config);
+      }
+      if (req.method === "GET" && url.pathname === "/v1/responses") {
+        return new Response("Responses WebSocket transport is not enabled on this local route", {
+          status: 426,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");

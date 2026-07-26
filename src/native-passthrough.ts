@@ -11,7 +11,8 @@ const HOP_BY_HOP_HEADERS = new Set([
   "host",
 ]);
 
-type NativeFetch = (request: Request) => Promise<Response>;
+export type NativeFetch = (request: Request) => Promise<Response>;
+export type NativeCodexEndpoint = "models" | "responses" | "responses/compact";
 
 function endToEndHeaders(source: Headers): Headers {
   const headers = new Headers();
@@ -24,7 +25,7 @@ function endToEndHeaders(source: Headers): Headers {
 
 export async function forwardNativeCodexRequest(
   request: Request,
-  endpoint: "responses" | "responses/compact",
+  endpoint: NativeCodexEndpoint,
   fetchUpstream: NativeFetch = fetch,
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
@@ -32,11 +33,15 @@ export async function forwardNativeCodexRequest(
     throw new Error("Native Codex passthrough requires the incoming Bearer authorization");
   }
 
-  const body = await request.arrayBuffer();
-  const upstreamRequest = new Request(`${CODEX_BACKEND}/${endpoint}`, {
-    method: "POST",
-    headers: endToEndHeaders(request.headers),
-    body,
+  const incomingUrl = new URL(request.url);
+  const headers = endToEndHeaders(request.headers);
+  if (endpoint === "models") headers.delete("if-none-match");
+  const method = endpoint === "models" ? "GET" : "POST";
+  const body = method === "POST" ? await request.arrayBuffer() : undefined;
+  const upstreamRequest = new Request(`${CODEX_BACKEND}/${endpoint}${incomingUrl.search}`, {
+    method,
+    headers,
+    ...(body ? { body } : {}),
     signal: request.signal,
   });
   const upstream = await fetchUpstream(upstreamRequest);

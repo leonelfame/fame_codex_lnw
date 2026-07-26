@@ -58,7 +58,9 @@ Then:
 
 That command downloads one checksum-verified, versioned runtime bundle, stores private browser
 state under `~/.codex-chatgpt-web`, installs a user launchd service, and applies a reversible Codex
-model catalog/config patch. The service starts after macOS login and restarts after a crash; normal
+`openai_base_url` route. The proxy forwards Codex's official `/models` response unchanged and
+appends exactly one `ChatGPT Web` entry; it never generates or replaces the native catalog. The
+service starts after macOS login and restarts after a crash; normal
 use requires no terminal command. It does **not** require a system Node/Bun/Go runtime, OpenCodex,
 or a Playwright browser download.
 
@@ -100,7 +102,7 @@ limited to read/fetch MCP permissions. See the current
 
 Setup automates everything local: it downloads the pinned tunnel-client release, verifies its
 published checksum, writes its profile, installs separate proxy and tunnel launchd services, waits
-for health/readiness, and only then enables the Codex catalog. Both services start after macOS login
+for health/readiness, and only then enables the Codex route. Both services start after macOS login
 and are restarted by launchd after a crash. Tunnel creation, runtime-key creation, and
 connector/admin permissions remain account-level steps and cannot be created on the user's behalf.
 
@@ -131,17 +133,18 @@ codex-chatgpt-web login               # refresh an expired ChatGPT session
 codex-chatgpt-web uninstall --yes
 ```
 
-Setup journals the exact previous `openai_base_url` and `model_catalog_json` values and restores
-them on uninstall. It refuses to overwrite a different existing route unless
+Setup journals the exact previous `openai_base_url`, `model_provider`, and `model_catalog_json`
+assignments and restores them on uninstall. During normal operation, only `openai_base_url` is
+active, so Codex keeps its built-in `openai` provider, native task history, and live model catalog.
+Setup refuses to overwrite a different existing route unless
 `--replace-codex-route` is explicit. Stop, restart, setup replacement, and uninstall also refuse to
 proceed while either a Responses request or browser/tool turn is active.
 
-When migrating from another Codex proxy whose catalog already contains routed models, pass a clean
-native Codex catalog explicitly so those foreign entries are not copied into the new picker:
+When migrating from another Codex proxy, remove it first or explicitly allow this setup to replace
+its routing assignments reversibly:
 
 ```bash
 codex-chatgpt-web setup --browser-only \
-  --source-catalog /path/to/native-model-catalog.json \
   --replace-codex-route \
   --acknowledge-unofficial
 ```

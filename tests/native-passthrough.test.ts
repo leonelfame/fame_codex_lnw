@@ -77,3 +77,17 @@ test("native passthrough fails closed without Codex bearer authentication", asyn
     "Native Codex passthrough requires the incoming Bearer authorization",
   );
 });
+
+test("forwards native model discovery as GET and preserves the client version query", async () => {
+  const request = new Request("http://127.0.0.1:17841/v1/models?client_version=0.99.0", {
+    headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "old-etag" },
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "models", async input => {
+    upstreamRequest = input;
+    return Response.json({ models: [] });
+  });
+  expect(upstreamRequest!.url).toBe("https://chatgpt.com/backend-api/codex/models?client_version=0.99.0");
+  expect(upstreamRequest!.method).toBe("GET");
+  expect(upstreamRequest!.headers.get("if-none-match")).toBeNull();
+});

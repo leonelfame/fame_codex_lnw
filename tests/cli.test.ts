@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-test("setup accepts an explicit native source catalog before runtime validation", () => {
+test("setup validates the port before performing runtime work", () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-"));
   try {
     const result = Bun.spawnSync([
@@ -13,8 +13,6 @@ test("setup accepts an explicit native source catalog before runtime validation"
       "--browser-only",
       "--port",
       "0",
-      "--source-catalog",
-      join(root, "native-models.json"),
       "--acknowledge-unofficial",
     ], {
       env: {
