@@ -48,6 +48,14 @@ async function bootstrapService(path: string, timeoutMs = 20_000): Promise<void>
   throw new Error(`launchctl bootstrap ${launchDomain()} ${path} failed after ${timeoutMs}ms: ${lastError}`);
 }
 
+async function waitForServiceUnloaded(timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (getServiceStatus().loaded && Date.now() < deadline) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 50));
+  }
+  if (getServiceStatus().loaded) throw new Error(`launchd did not unload ${LABEL} after ${timeoutMs}ms`);
+}
+
 function plist(config: AppConfig): string {
   const logDir = join(getConfigDir(), "logs");
   const args = [...config.runtimeCommand, "serve"];
@@ -124,13 +132,13 @@ export function startService(): ServiceStatus {
   return getServiceStatus();
 }
 
-interface DrainLease {
+export interface DrainLease {
   release: () => Promise<void>;
 }
 
 async function control(config: AppConfig, action: "drain" | "resume"): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2_000);
+  const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
     const response = await fetch(`http://${config.host}:${config.port}/admin/${action}`, {
       method: "POST",
@@ -144,11 +152,14 @@ async function control(config: AppConfig, action: "drain" | "resume"): Promise<R
   }
 }
 
-async function acquireDrain(config: AppConfig): Promise<DrainLease> {
-  if (!getServiceStatus().loaded) return { release: async () => {} };
+export async function negotiateDrain(
+  controlAction: (action: "drain" | "resume") => Promise<Record<string, unknown>>,
+): Promise<DrainLease> {
   let drained = false;
+  let drainAttempted = false;
   try {
-    const health = await control(config, "drain");
+    drainAttempted = true;
+    const health = await controlAction("drain");
     drained = true;
     const activeHttp = health.active_http_turns;
     const activeBrowser = health.active_browser_turns;
@@ -158,12 +169,28 @@ async function acquireDrain(config: AppConfig): Promise<DrainLease> {
     if ((activeHttp as number) > 0 || (activeBrowser as number) > 0) {
       throw new Error(`daemon has ${activeHttp} active HTTP turn(s) and ${activeBrowser} active browser turn(s)`);
     }
-    return { release: async () => { if (drained) { await control(config, "resume"); drained = false; } } };
+    return { release: async () => { if (drained) { await controlAction("resume"); drained = false; } } };
   } catch (error) {
-    if (drained) await control(config, "resume").catch(() => {});
+    let resumeError: unknown;
+    if (drainAttempted) {
+      try {
+        await controlAction("resume");
+        drained = false;
+      } catch (caught) {
+        resumeError = caught;
+      }
+    }
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Refusing to stop or restart because atomic idleness could not be proven: ${message}`);
+    const compensation = resumeError
+      ? `; compensating resume also failed: ${resumeError instanceof Error ? resumeError.message : String(resumeError)}`
+      : "";
+    throw new Error(`Refusing to stop or restart because atomic idleness could not be proven: ${message}${compensation}`);
   }
+}
+
+async function acquireDrain(config: AppConfig): Promise<DrainLease> {
+  if (!getServiceStatus().loaded) return { release: async () => {} };
+  return negotiateDrain(action => control(config, action));
 }
 
 export async function assertServiceIdle(config: AppConfig): Promise<void> {
@@ -177,6 +204,7 @@ export async function restartService(config: AppConfig): Promise<ServiceStatus> 
   const lease = await acquireDrain(config);
   try {
     runChecked("launchctl", ["bootout", serviceTarget()]);
+    await waitForServiceUnloaded();
     await bootstrapService(plistPath());
   } catch (error) {
     await lease.release().catch(() => {});
@@ -201,6 +229,7 @@ export async function stopService(config: AppConfig): Promise<ServiceStatus> {
     const lease = await acquireDrain(config);
     try {
       runChecked("launchctl", ["bootout", serviceTarget()]);
+      await waitForServiceUnloaded();
     } catch (error) {
       await lease.release().catch(() => {});
       throw error;
@@ -215,6 +244,7 @@ export async function uninstallService(config: AppConfig): Promise<ServiceStatus
     const lease = await acquireDrain(config);
     try {
       runChecked("launchctl", ["bootout", serviceTarget()]);
+      await waitForServiceUnloaded();
     } catch (error) {
       await lease.release().catch(() => {});
       throw error;

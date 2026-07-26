@@ -58,8 +58,9 @@ Then:
 
 That command downloads one checksum-verified, versioned runtime bundle, stores private browser
 state under `~/.codex-chatgpt-web`, installs a user launchd service, and applies a reversible Codex
-model catalog/config patch. It does **not** require a system Node/Bun/Go runtime, OpenCodex, or a
-Playwright browser download.
+model catalog/config patch. The service starts after macOS login and restarts after a crash; normal
+use requires no terminal command. It does **not** require a system Node/Bun/Go runtime, OpenCodex,
+or a Playwright browser download.
 
 Normal use reuses one long-lived Chrome process. It does not repeat setup or create a new browser
 window for every tool call. Run `codex-chatgpt-web login` only when the ChatGPT session expires.
@@ -98,9 +99,10 @@ limited to read/fetch MCP permissions. See the current
 6. Restart Codex once.
 
 Setup automates everything local: it downloads the pinned tunnel-client release, verifies its
-published checksum, writes its profile, starts the outbound runtime, waits for health/readiness,
-and only then enables the Codex catalog. Tunnel creation, runtime-key creation, and connector/admin
-permissions remain account-level steps and cannot be created on the user's behalf.
+published checksum, writes its profile, installs separate proxy and tunnel launchd services, waits
+for health/readiness, and only then enables the Codex catalog. Both services start after macOS login
+and are restarted by launchd after a crash. Tunnel creation, runtime-key creation, and
+connector/admin permissions remain account-level steps and cannot be created on the user's behalf.
 
 Unexpected browser approval prompts fail closed by default. `--auto-approve-tool-calls` is an
 explicit opt-in that selects **Allow once** only; it never grants a global permission.
@@ -151,7 +153,7 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-`verify` runs dependency auditing, strict TypeScript checking, 56 harness/MCP/config tests, a
+`verify` runs dependency auditing, strict TypeScript checking, harness/MCP/config tests, a
 relocatable runtime smoke test, and a real headless launch of system Chrome. The runtime
 contains no generic provider registry, alternate LLM adapter, dashboard, or compatibility shim.
 

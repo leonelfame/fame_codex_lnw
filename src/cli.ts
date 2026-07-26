@@ -12,7 +12,8 @@ import { runCommand } from "./process";
 import { startServer } from "./server";
 import { assertServiceIdle, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
 import { setup, type SetupOptions } from "./setup";
-import { connectTunnel, installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus } from "./tunnel";
+import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
+import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 
 const HELP = `codex-chatgpt-web ${VERSION}
@@ -28,7 +29,7 @@ Usage:
   codex-chatgpt-web serve
   codex-chatgpt-web mcp [--broker-socket PATH]
   codex-chatgpt-web service <status|install|start|restart|stop>
-  codex-chatgpt-web tunnel <status|start|stop|key-import>
+  codex-chatgpt-web tunnel <status|start|restart|stop|key-import>
   codex-chatgpt-web open <tunnels|runtime-keys|connectors>
   codex-chatgpt-web uninstall --yes
 
@@ -192,12 +193,23 @@ async function tunnelCommand(args: string[]): Promise<void> {
     return;
   }
   const config = loadConfig();
-  if (action === "start") connectTunnel(config);
-  else if (action === "stop") stopTunnel(config);
+  if (action === "start") startTunnelService();
+  else if (action === "restart") {
+    await assertServiceIdle(config);
+    await restartTunnelService();
+  }
+  else if (action === "stop") {
+    await assertServiceIdle(config);
+    await stopTunnelService();
+    stopTunnel(config);
+  }
   else if (action !== "status") throw new Error(`Unknown tunnel action: ${action}`);
-  const status = tunnelStatus(config);
-  stdout.write(`${JSON.stringify(status, null, 2)}\n`);
-  if (action !== "stop" && !status.ok) process.exitCode = 1;
+  const status = action === "start" || action === "restart"
+    ? await waitForTunnelReady(config)
+    : tunnelStatus(config);
+  const service = getTunnelServiceStatus();
+  stdout.write(`${JSON.stringify({ service, runtime: status }, null, 2)}\n`);
+  if (action !== "stop" && (!service.running || !status.ok)) process.exitCode = 1;
 }
 
 async function openCommand(args: string[]): Promise<void> {
@@ -231,7 +243,10 @@ async function uninstallCommand(args: string[]): Promise<void> {
   }
   if (config && process.platform === "darwin") await assertServiceIdle(config);
   uninstallCodexIntegration();
-  if (config?.mode === "full") stopTunnel(config);
+  if (config?.mode === "full") {
+    if (process.platform === "darwin") await uninstallTunnelService();
+    stopTunnel(config);
+  }
   if (config && process.platform === "darwin") await uninstallService(config);
   if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
   stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");

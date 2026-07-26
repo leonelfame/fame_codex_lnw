@@ -5,6 +5,7 @@ import { unzipSync } from "fflate";
 import type { AppConfig, TunnelConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
+import { getTunnelServiceStatus } from "./tunnel-service";
 
 const TUNNEL_VERSION = "0.0.10";
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
@@ -229,7 +230,19 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: `Missing ${settings.binaryPath}` };
   }
   const result = runCommand(settings.binaryPath, ["runtimes", "status", settings.alias, "--json"]);
-  return parseTunnelStatus((result.stdout || result.stderr).trim(), result.status);
+  let output = (result.stdout || result.stderr).trim();
+  const service = getTunnelServiceStatus();
+  if (result.status === 0 && service.running) {
+    try {
+      const parsed = JSON.parse(output) as Record<string, unknown>;
+      parsed.process_running = true;
+      if (parsed.healthy === true && parsed.ready === true) parsed.runtime_state = "ready";
+      output = JSON.stringify(parsed);
+    } catch {
+      // parseTunnelStatus owns the diagnostic for malformed output.
+    }
+  }
+  return parseTunnelStatus(output, result.status);
 }
 
 export async function waitForTunnelReady(config: AppConfig, timeoutMs = 30_000): Promise<TunnelRuntimeStatus> {

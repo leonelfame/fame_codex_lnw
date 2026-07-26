@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import type { AppConfig, RuntimeMode } from "./config";
 import { currentRuntimeCommand, defaultConfig, getConfigPath, loadConfigForSetup, saveConfig } from "./config";
@@ -10,7 +11,8 @@ import {
 } from "./browser-login";
 import { installCodexIntegration } from "./codex-integration";
 import { assertServiceIdle, getServiceStatus, installService, removeLegacyRuntimeArtifacts, restartService } from "./service";
-import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, waitForTunnelReady } from "./tunnel";
+import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, stopTunnel, waitForTunnelReady } from "./tunnel";
+import { getTunnelServiceStatus, installTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 
 export interface SetupOptions {
@@ -162,6 +164,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   }
   const existing = loadExistingConfig();
   const config = baseConfig(existing, options);
+  if (existing && options.restartService) config.controlToken = randomBytes(32).toString("base64url");
   const beforeService = getServiceStatus();
   if (beforeService.loaded && !existing) {
     throw new Error("A codex-chatgpt-web service is loaded but its configuration is missing; refusing to replace an unverifiable process");
@@ -214,8 +217,25 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   removeLegacyRuntimeArtifacts(config);
 
   let tunnelReady: boolean | null = null;
+  if (config.mode === "browser-only" && existing?.mode === "full") {
+    const previousTunnelService = getTunnelServiceStatus();
+    if (previousTunnelService.installed || previousTunnelService.loaded) await uninstallTunnelService();
+    stopTunnel(existing);
+  }
   if (config.mode === "full") {
-    connectTunnel(config);
+    const profilePath = `${config.tunnel!.profileDir}/${config.tunnel!.profileName}.yaml`;
+    const tunnelService = getTunnelServiceStatus();
+    const needsOwnershipMigration = !tunnelService.installed || !tunnelService.loaded || !tunnelServiceDefinitionMatches(config);
+    const needsProfile = !existsSync(profilePath);
+    if (needsOwnershipMigration || needsProfile) {
+      await assertServiceIdle(config);
+      if (tunnelService.loaded) await stopTunnelService();
+      connectTunnel(config);
+      const bootstrapStatus = await waitForTunnelReady(config);
+      if (!bootstrapStatus.ok) throw new Error(`Temporary tunnel bootstrap did not become healthy and ready: ${bootstrapStatus.detail}`);
+      stopTunnel(config);
+      installTunnelService(config);
+    }
     const status = await waitForTunnelReady(config);
     if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
     tunnelReady = true;

@@ -5,6 +5,7 @@ import { inspectCodexIntegration } from "./codex-integration";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
+import { getTunnelServiceStatus } from "./tunnel-service";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -110,6 +111,10 @@ export async function runDoctor(): Promise<DoctorReport> {
     } else {
       checks.push({ id: "tunnel-key", status: "ok", message: "Tunnel runtime key is stored privately" });
     }
+    const tunnelService = getTunnelServiceStatus();
+    checks.push(tunnelService.installed && tunnelService.loaded && tunnelService.running
+      ? { id: "tunnel-service", status: "ok", message: "macOS tunnel service is installed, loaded, and running" }
+      : { id: "tunnel-service", status: "error", message: "macOS tunnel service is not fully running", detail: JSON.stringify(tunnelService) });
     const runtime = tunnelStatus(config);
     checks.push(runtime.ok
       ? { id: "tunnel-runtime", status: "ok", message: "Tunnel runtime reports healthy and ready" }

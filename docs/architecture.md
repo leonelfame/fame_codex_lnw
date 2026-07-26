@@ -46,8 +46,13 @@ doctor, and launchd management; it uses the user's installed Google Chrome and d
 second browser. Full mode separately downloads the official pinned `openai/tunnel-client` release
 and verifies it against that release's published SHA-256 manifest.
 
-Setup creates a user launchd service and only then journals and switches Codex's two integration
-keys. It never restarts an already loaded daemon implicitly. A requested stop, restart, replacement,
+Setup creates a user launchd service for the Responses proxy. Full mode also creates a separate
+launchd service that runs `tunnel-client` directly from its generated profile. Both use `RunAtLoad`
+and `KeepAlive`; no shell, terminal, tmux session, or manual post-login command owns production
+lifecycle. Setup only journals and switches Codex's two integration keys after required services
+report healthy and ready.
+
+Setup never restarts an already loaded daemon implicitly. A requested stop, restart, replacement,
 or uninstall first calls a private authenticated drain endpoint. The daemon rejects new turns and
 reports two independent counters:
 
