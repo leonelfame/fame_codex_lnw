@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.*.bun-build
+coverage/
+.DS_Store
+.env
+.playwright-cli/
+output/
+*.log
+*.pid
+*.sock
+*.key
+storage-state.json
+runtime/

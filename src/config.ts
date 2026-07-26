@@ -1,0 +1,169 @@
+import { randomBytes } from "node:crypto";
+import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import type { CodexProviderConfig } from "./types";
+import { VERSION } from "./version";
+
+export type RuntimeMode = "pro-only" | "full";
+
+export interface TunnelConfig {
+  binaryPath: string;
+  tunnelId: string;
+  runtimeKeyFile: string;
+  profileDir: string;
+  profileName: string;
+  alias: string;
+}
+
+export interface AppConfig {
+  version: 1;
+  releaseVersion: string;
+  mode: RuntimeMode;
+  host: "127.0.0.1";
+  port: number;
+  contextWindow: number;
+  appName: string;
+  chromeExecutablePath: string;
+  storageStatePath: string;
+  brokerSocketPath: string;
+  headed: boolean;
+  autoApproveToolCalls: boolean;
+  controlToken: string;
+  runtimeCommand: string[];
+  acknowledgedUnofficialAt?: string;
+  tunnel?: TunnelConfig;
+}
+
+export function expandUserPath(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  return value;
+}
+
+export function getConfigDir(): string {
+  const configured = process.env.CODEX_CHATGPT_WEB_HOME?.trim();
+  return resolve(expandUserPath(configured || join(homedir(), ".codex-chatgpt-web")));
+}
+
+export function getConfigPath(): string {
+  return join(getConfigDir(), "config.json");
+}
+
+export function atomicWriteFile(path: string, data: string | Uint8Array): void {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  try { chmodSync(directory, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
+  const temp = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  const fd = openSync(temp, "wx", 0o600);
+  try {
+    writeFileSync(fd, data);
+    closeSync(fd);
+    renameSync(temp, path);
+  } catch (error) {
+    try { closeSync(fd); } catch {}
+    rmSync(temp, { force: true });
+    throw error;
+  }
+  try { chmodSync(path, 0o600); } catch { /* Windows ACLs are managed by the installer. */ }
+}
+
+export function defaultConfig(mode: RuntimeMode = "pro-only"): AppConfig {
+  const home = getConfigDir();
+  return {
+    version: 1,
+    releaseVersion: VERSION,
+    mode,
+    host: "127.0.0.1",
+    port: 17841,
+    contextWindow: 256_000,
+    appName: "Codex Native",
+    chromeExecutablePath: defaultChromeExecutable(),
+    storageStatePath: join(home, "browser", "storage-state.json"),
+    brokerSocketPath: join(home, "runtime", "turn-broker.sock"),
+    headed: true,
+    autoApproveToolCalls: false,
+    controlToken: randomBytes(32).toString("base64url"),
+    runtimeCommand: currentRuntimeCommand(),
+  };
+}
+
+export function currentRuntimeCommand(): string[] {
+  const executable = resolve(process.execPath);
+  const executableName = basename(executable).toLowerCase();
+  if (executableName === "bun" || executableName === "bun.exe") {
+    const entry = typeof Bun !== "undefined" ? Bun.main : process.argv[1];
+    if (!entry || entry.endsWith("/[eval]") || entry === "[eval]") {
+      throw new Error("Cannot install a service from an evaluated Bun script");
+    }
+    return [executable, resolve(entry)];
+  }
+  return [executable];
+}
+
+function defaultChromeExecutable(): string {
+  if (process.platform === "darwin") {
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  }
+  if (process.platform === "win32") {
+    return join(process.env.PROGRAMFILES || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe");
+  }
+  return "/usr/bin/google-chrome";
+}
+
+export function loadConfig(): AppConfig {
+  const path = getConfigPath();
+  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run codex-chatgpt-web setup first.`);
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<AppConfig>;
+  if (parsed.version !== 1) throw new Error(`Unsupported configuration version in ${path}`);
+  if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
+  if (parsed.mode !== "pro-only" && parsed.mode !== "full") throw new Error(`Invalid runtime mode in ${path}`);
+  if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
+  if (!Number.isInteger(parsed.port) || parsed.port! < 1 || parsed.port! > 65_535) throw new Error(`Invalid port in ${path}`);
+  const requiredStrings: Array<keyof AppConfig> = [
+    "appName", "chromeExecutablePath", "storageStatePath", "brokerSocketPath", "controlToken",
+  ];
+  for (const key of requiredStrings) {
+    if (typeof parsed[key] !== "string" || !(parsed[key] as string).trim()) throw new Error(`Missing ${key} in ${path}`);
+  }
+  if (!/^[A-Za-z0-9_-]{40,}$/.test(parsed.controlToken!)) throw new Error(`Invalid controlToken in ${path}`);
+  if (parsed.mode === "full" && !parsed.tunnel) throw new Error("Full mode requires tunnel configuration");
+  if (!Array.isArray(parsed.runtimeCommand) || parsed.runtimeCommand.length === 0
+    || parsed.runtimeCommand.some(part => typeof part !== "string" || !part.trim())) {
+    throw new Error(`Invalid runtimeCommand in ${path}`);
+  }
+  return parsed as AppConfig;
+}
+
+export function saveConfig(config: AppConfig): void {
+  atomicWriteFile(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
+}
+
+export function providerConfig(config: AppConfig): CodexProviderConfig {
+  const models = config.mode === "full"
+    ? ["gpt-5.6-sol", "gpt-5.6-sol-pro"]
+    : ["gpt-5.6-sol-pro"];
+  return {
+    adapter: "chatgpt-web",
+    baseUrl: "https://chatgpt.com",
+    models,
+    liveModels: false,
+    defaultModel: config.mode === "full" ? "gpt-5.6-sol" : "gpt-5.6-sol-pro",
+    contextWindow: config.contextWindow,
+    modelInputModalities: Object.fromEntries(models.map(model => [model, ["text", "image"]])),
+    modelReasoningEfforts: {
+      ...(config.mode === "full" ? { "gpt-5.6-sol": ["medium", "high", "xhigh"] } : {}),
+      "gpt-5.6-sol-pro": [],
+    },
+    modelDefaultReasoningEfforts: config.mode === "full" ? { "gpt-5.6-sol": "high" } : {},
+    noReasoningModels: ["gpt-5.6-sol-pro"],
+    chatgptWeb: {
+      appName: config.appName,
+      storageStatePath: config.storageStatePath,
+      chromeExecutablePath: config.chromeExecutablePath,
+      brokerSocketPath: config.brokerSocketPath,
+      headed: config.headed,
+      autoApproveToolCalls: config.autoApproveToolCalls,
+    },
+  };
+}

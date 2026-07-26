@@ -1,0 +1,35 @@
+import { spawn, spawnSync, type SpawnOptions, type SpawnSyncOptions } from "node:child_process";
+
+export interface CommandResult {
+  status: number;
+  stdout: string;
+  stderr: string;
+}
+
+export function runCommand(command: string, args: string[], options: SpawnSyncOptions = {}): CommandResult {
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: "pipe",
+    ...options,
+  });
+  if (result.error) throw result.error;
+  return {
+    status: result.status ?? 1,
+    stdout: typeof result.stdout === "string" ? result.stdout : result.stdout?.toString("utf8") ?? "",
+    stderr: typeof result.stderr === "string" ? result.stderr : result.stderr?.toString("utf8") ?? "",
+  };
+}
+
+export function runChecked(command: string, args: string[], options: SpawnSyncOptions = {}): CommandResult {
+  const result = runCommand(command, args, options);
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+    throw new Error(`${command} ${args.join(" ")} failed: ${detail}`);
+  }
+  return result;
+}
+
+export function spawnDetached(command: string, args: string[], options: SpawnOptions = {}): void {
+  const child = spawn(command, args, { detached: true, stdio: "ignore", ...options });
+  child.unref();
+}

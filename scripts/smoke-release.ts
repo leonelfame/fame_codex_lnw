@@ -1,0 +1,102 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+const binary = resolve(process.argv[2] ?? "dist/codex-chatgpt-web");
+const root = join(tmpdir(), `codex-chatgpt-web-release-smoke-${process.pid}-${Date.now()}`);
+const appHome = join(root, "app");
+const codexHome = join(root, "codex");
+mkdirSync(join(appHome, "browser"), { recursive: true });
+mkdirSync(codexHome, { recursive: true });
+const portServer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+const port = portServer.port;
+portServer.stop();
+const config = {
+  version: 1,
+  releaseVersion: "0.1.0",
+  mode: "pro-only",
+  host: "127.0.0.1",
+  port,
+  contextWindow: 256_000,
+  appName: "Codex Native",
+  chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  storageStatePath: join(appHome, "browser", "storage-state.json"),
+  brokerSocketPath: join(appHome, "runtime", "turn-broker.sock"),
+  headed: true,
+  autoApproveToolCalls: false,
+  controlToken: "release-smoke-control-token-0123456789abcdef",
+  runtimeCommand: [binary],
+  acknowledgedUnofficialAt: new Date().toISOString(),
+};
+writeFileSync(join(appHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
+
+const env = { ...process.env, CODEX_CHATGPT_WEB_HOME: appHome, CODEX_HOME: codexHome };
+const child = Bun.spawn([binary, "serve"], { env, stdout: "pipe", stderr: "pipe" });
+try {
+  const deadline = Date.now() + 10_000;
+  let health: Response | undefined;
+  while (Date.now() < deadline) {
+    try {
+      health = await fetch(`http://127.0.0.1:${port}/healthz`);
+      if (health.ok) break;
+    } catch {}
+    await Bun.sleep(50);
+  }
+  if (!health?.ok) throw new Error("standalone daemon did not become healthy");
+  const payload = await health.json() as Record<string, unknown>;
+  if (payload.service !== "codex-chatgpt-web" || payload.mode !== "pro-only") throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
+
+  const models = await fetch(`http://127.0.0.1:${port}/v1/models`).then(response => response.json()) as { data?: Array<{ id?: string }> };
+  if (JSON.stringify(models.data?.map(model => model.id)) !== JSON.stringify(["chatgpt-web/gpt-5.6-sol-pro"])) {
+    throw new Error(`unexpected model list: ${JSON.stringify(models)}`);
+  }
+  const invalid = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "chatgpt-web/not-enabled", input: "test", stream: false }),
+  });
+  if (invalid.status !== 400) throw new Error(`unsupported model did not fail closed: HTTP ${invalid.status}`);
+
+  const unauthorizedDrain = await fetch(`http://127.0.0.1:${port}/admin/drain`, {
+    method: "POST",
+    headers: { authorization: "Bearer wrong-release-smoke-token" },
+  });
+  if (unauthorizedDrain.status !== 401) throw new Error(`lifecycle control accepted an invalid token: HTTP ${unauthorizedDrain.status}`);
+
+  const drain = await fetch(`http://127.0.0.1:${port}/admin/drain`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.controlToken}` },
+  });
+  const drainPayload = await drain.json() as Record<string, unknown>;
+  if (!drain.ok || drainPayload.accepting_turns !== false
+    || drainPayload.active_http_turns !== 0 || drainPayload.active_browser_turns !== 0) {
+    throw new Error(`daemon did not acknowledge an idle authenticated drain: ${JSON.stringify(drainPayload)}`);
+  }
+  const rejectedWhileDraining = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol-pro", input: "test", stream: false }),
+  });
+  if (rejectedWhileDraining.status !== 503) {
+    throw new Error(`daemon accepted a new turn while draining: HTTP ${rejectedWhileDraining.status}`);
+  }
+  const resume = await fetch(`http://127.0.0.1:${port}/admin/resume`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.controlToken}` },
+  });
+  const resumePayload = await resume.json() as Record<string, unknown>;
+  if (!resume.ok || resumePayload.accepting_turns !== true) {
+    throw new Error(`daemon did not resume after the drain smoke: ${JSON.stringify(resumePayload)}`);
+  }
+
+  if (process.platform === "darwin") {
+    const browser = Bun.spawnSync([binary, "browser", "check"], { env, stdout: "pipe", stderr: "pipe" });
+    if (browser.exitCode !== 0) throw new Error(`standalone Playwright smoke failed: ${browser.stderr.toString()}`);
+  }
+  process.stdout.write("STANDALONE_RELEASE_SMOKE_OK\n");
+} finally {
+  child.kill("SIGTERM");
+  await child.exited;
+  rmSync(root, { recursive: true, force: true });
+}

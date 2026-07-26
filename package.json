@@ -1,0 +1,67 @@
+{
+  "name": "codex-chatgpt-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miuuyy/codex-chatgpt-web.git"
+  },
+  "homepage": "https://github.com/miuuyy/codex-chatgpt-web#readme",
+  "bugs": {
+    "url": "https://github.com/miuuyy/codex-chatgpt-web/issues"
+  },
+  "packageManager": "bun@1.3.11",
+  "type": "module",
+  "bin": {
+    "codex-chatgpt-web": "./src/cli.ts"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "start": "bun run src/cli.ts serve",
+    "setup": "bun run src/cli.ts setup",
+    "doctor": "bun run src/cli.ts doctor",
+    "test": "bun test",
+    "audit": "bun audit",
+    "check-version": "bun run scripts/check-version.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "licenses": "bun run scripts/generate-third-party-notices.ts",
+    "build": "bun build src/cli.ts --compile --minify --sourcemap --outfile dist/codex-chatgpt-web",
+    "smoke": "bun run scripts/smoke-release.ts dist/codex-chatgpt-web",
+    "smoke:codex": "bun run scripts/smoke-codex-catalog.ts",
+    "verify": "bun run check-version && bun run audit && bun run typecheck && bun run test && bun run build && bun run licenses && bun run smoke"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "chromium-bidi": "12.1.0",
+    "fflate": "^0.8.2",
+    "playwright-core": "^1.62.0",
+    "turndown": "7.2.0",
+    "turndown-plugin-gfm": "1.0.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.11",
+    "@types/turndown": "5.0.5",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.3.11 <1.4"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.12"
+  },
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "responses-api",
+    "mcp",
+    "playwright"
+  ],
+  "license": "MIT"
+}
