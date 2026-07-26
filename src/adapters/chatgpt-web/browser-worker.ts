@@ -6,8 +6,8 @@ import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import { ChatGptMarkdownStream } from "./markdown";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
-import type { CompiledChatGptWebPrompt, ChatGptWebPromptImage } from "./prompt";
-import { assertChatGptWebInputWithinLimit, estimateCompiledChatGptWebInputTokens } from "./usage";
+import { CHATGPT_INTERNAL_COMPACTION_MARKER, stripChatGptTransportMarkers, type CompiledChatGptWebPrompt, type ChatGptWebPromptImage } from "./prompt";
+import { estimateCompiledChatGptWebInputTokens } from "./usage";
 import { assertAuthenticatedChatGptPage, assertTemporaryChatPage, CHATGPT_TEMPORARY_CHAT_URL } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 
@@ -18,12 +18,13 @@ export interface BrowserTurn {
   modelId: string;
   reasoning?: string;
   capabilities: ChatGptWebCapabilities;
-  contextWindowTokens?: number;
   prepare: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string) => void;
+  /** Stable visible ChatGPT prose between status/tool rows. */
+  onCommentary?: (text: string) => void;
   /** Append-only, structurally stable Markdown chunks. */
   onTextDelta: (delta: string) => void;
 }
@@ -69,6 +70,57 @@ export class ChatGptCompletionTracker {
       return false;
     }
     return now - this.candidate.since >= this.stableMs;
+  }
+}
+
+export interface ChatGptVisibleTraceBlock {
+  kind: "markdown" | "status";
+  text: string;
+}
+
+export interface ChatGptVisibleTraceEvent {
+  kind: "reasoning" | "commentary";
+  text: string;
+}
+
+/** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
+export class ChatGptVisibleTraceTracker {
+  private readonly seen = new Set<string>();
+
+  observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean): ChatGptVisibleTraceEvent[] {
+    let lastMarkdown = -1;
+    for (let index = 0; index < blocks.length; index++) {
+      if (blocks[index]!.kind === "markdown") lastMarkdown = index;
+    }
+    const output: ChatGptVisibleTraceEvent[] = [];
+    for (let index = 0; index < blocks.length; index++) {
+      const block = blocks[index]!;
+      if (block.text.includes(CHATGPT_INTERNAL_COMPACTION_MARKER)
+        && !this.seen.has(CHATGPT_INTERNAL_COMPACTION_MARKER)) {
+        this.seen.add(CHATGPT_INTERNAL_COMPACTION_MARKER);
+        output.push({ kind: "reasoning", text: "Context automatically compacted" });
+      }
+      const text = block.text
+        .replaceAll(CHATGPT_INTERNAL_COMPACTION_MARKER, "")
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map(line => line.replace(/[\t ]+/g, " ").trim())
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+      if (!text) continue;
+      // The trailing Markdown root is ambiguous while running and becomes the final answer once
+      // complete. It stays owned by ChatGptMarkdownStream; earlier roots are stable commentary.
+      if (block.kind === "markdown"
+        && (completionActionVisible ? index === lastMarkdown : index === blocks.length - 1)) {
+        continue;
+      }
+      const key = `${block.kind}\0${text}`;
+      if (this.seen.has(key)) continue;
+      this.seen.add(key);
+      output.push({ kind: block.kind === "markdown" ? "commentary" : "reasoning", text });
+    }
+    return output;
   }
 }
 
@@ -339,6 +391,54 @@ export class ChatGptBrowserWorker {
     return true;
   }
 
+  private async expandVisibleReasoning(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      const assistants = [...document.querySelectorAll<HTMLElement>('[data-message-author-role="assistant"]')];
+      const root = assistants.at(-1)?.closest<HTMLElement>('section[data-testid^="conversation-turn-"]');
+      if (!root) return;
+      const collapsed = [...root.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')]
+        .find(button => /(?:thinking|reasoning|research)/i.test(button.innerText));
+      if (!collapsed) return;
+      const style = getComputedStyle(collapsed);
+      const rect = collapsed.getBoundingClientRect();
+      if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0) {
+        collapsed.click();
+      }
+    });
+  }
+
+  private async visibleTraceBlocks(page: Page): Promise<ChatGptVisibleTraceBlock[]> {
+    return page.evaluate(() => {
+      const assistants = [...document.querySelectorAll<HTMLElement>('[data-message-author-role="assistant"]')];
+      const assistantRoot = assistants.at(-1);
+      if (!assistantRoot) return [];
+      const root = assistantRoot.closest<HTMLElement>('section[data-testid^="conversation-turn-"]') ?? assistantRoot;
+      const visible = (candidate: HTMLElement): boolean => {
+        const style = getComputedStyle(candidate);
+        const rect = candidate.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const candidates = new Map<HTMLElement, "markdown" | "status">();
+      root.querySelectorAll<HTMLElement>(".markdown").forEach(candidate => candidates.set(candidate, "markdown"));
+      root.querySelectorAll<HTMLElement>(
+        'button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"]',
+      ).forEach(candidate => {
+        const semantic = candidate.closest<HTMLElement>("button") ?? candidate;
+        if (!candidates.has(semantic)) candidates.set(semantic, "status");
+      });
+      return [...candidates]
+        .filter(([candidate]) => visible(candidate))
+        .sort(([left], [right]) => left === right
+          ? 0
+          : left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+        .map(([candidate, kind]) => ({ kind, text: candidate.innerText.trim() }))
+        .filter(block => block.text.length > 0)
+        .filter((block, index, blocks) => (
+          blocks.findIndex(other => other.kind === block.kind && other.text === block.text) === index
+        ));
+    });
+  }
+
   private async stalledTurnDiagnostic(page: Page): Promise<string> {
     const assistant = page.locator('[data-message-author-role="assistant"]').last();
     const assistantState = await assistant.count()
@@ -391,7 +491,6 @@ export class ChatGptBrowserWorker {
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
-      assertChatGptWebInputWithinLimit(estimatedInputTokens, turn.contextWindowTokens);
       const deadline = Date.now() + this.config.turnTimeoutMs;
       const page = await this.runStage(turn.traceId, "browser_page", 30_000, () => this.pageForNewTurn());
       console.info(
@@ -427,8 +526,9 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       const sentAt = Date.now();
-      const seenReasoningSummaries = new Set<string>();
-      const markdownStream = new ChatGptMarkdownStream();
+      const seenTrace = new Set<string>();
+      const visibleTrace = new ChatGptVisibleTraceTracker();
+      const markdownStream = new ChatGptMarkdownStream(stripChatGptTransportMarkers);
       const completionTracker = new ChatGptCompletionTracker();
       for (;;) {
         if (turn.abortSignal?.aborted) {
@@ -447,14 +547,7 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        const reasoningSteps = page.locator('main button:has([data-testid="cot-v5-tool-icon-pile"])');
-        const stepTexts = await reasoningSteps.allInnerTexts().catch(() => [] as string[]);
-        for (const rawText of stepTexts) {
-          const text = rawText.trim();
-          if (!text || seenReasoningSummaries.has(text)) continue;
-          seenReasoningSummaries.add(text);
-          turn.onReasoningSummary?.(text);
-        }
+        await this.expandVisibleReasoning(page);
 
         const assistant = assistantMessages.last();
         if (await assistant.count()) {
@@ -476,6 +569,14 @@ export class ChatGptBrowserWorker {
           const completionActionCount = await completionActions.count();
           const completionActionVisible = completionActionCount > 0
             && await completionActions.last().isVisible().catch(() => false);
+          const traceBlocks = await this.visibleTraceBlocks(page);
+          for (const trace of visibleTrace.observe(traceBlocks, completionActionVisible)) {
+            const key = `${trace.kind}\0${trace.text}`;
+            if (seenTrace.has(key)) continue;
+            seenTrace.add(key);
+            if (trace.kind === "commentary") turn.onCommentary?.(trace.text);
+            else turn.onReasoningSummary?.(trace.text);
+          }
           // ChatGPT can render visible commentary Markdown between tool-status rows. Only a
           // Markdown root accompanied by the response action belongs to the final answer stream.
           if (completionActionVisible) {

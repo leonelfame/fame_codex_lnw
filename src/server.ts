@@ -9,7 +9,6 @@ import { readJsonRequestBody } from "./http-body";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
-import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "./responses/compaction";
 import { parseRequest } from "./responses/parser";
 import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
@@ -72,7 +71,7 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
 }
 
-async function responseRequest(req: Request, config: AppConfig): Promise<Response> {
+export async function responseRequest(req: Request, config: AppConfig): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: unknown;
   try {
@@ -103,12 +102,12 @@ async function responseRequest(req: Request, config: AppConfig): Promise<Respons
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
 
-  const compaction = parsed._compactionRequest === true;
-  if (compaction) {
-    delete parsed.context.tools;
-    delete parsed.options.toolChoice;
-    delete parsed.options.parallelToolCalls;
-    parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
+  if (parsed._compactionRequest === true) {
+    return formatErrorResponse(
+      400,
+      "invalid_request_error",
+      "Codex remote compaction is disabled for ChatGPT Web; ChatGPT owns context compaction inside the browser response",
+    );
   }
 
   const adapter = createChatGptWebAdapter(providerConfig(config));
@@ -140,10 +139,7 @@ async function responseRequest(req: Request, config: AppConfig): Promise<Respons
       2_000,
       {
         hideThinkingSummary: parsed.options.hideThinkingSummary,
-        ...(compaction ? { compaction: true } : {}),
-        ...(!compaction ? {
-          onCompletedResponse: response => rememberResponseState(parsed._rawBody, response, { force: true }),
-        } : {}),
+        onCompletedResponse: response => rememberResponseState(parsed._rawBody, response, { force: true }),
       },
     );
     return new Response(stream, {
@@ -163,13 +159,12 @@ async function responseRequest(req: Request, config: AppConfig): Promise<Respons
     toolNsMap: maps.toolNsMap,
     freeformToolNames: maps.freeformToolNames,
     toolSearchToolNames: maps.toolSearchToolNames,
-    ...(compaction ? { compaction: true } : {}),
   });
-  if (!compaction) rememberResponseState(parsed._rawBody, json, { force: true });
+  rememberResponseState(parsed._rawBody, json, { force: true });
   return Response.json(json);
 }
 
-async function compactRequest(req: Request, config: AppConfig): Promise<Response> {
+export async function compactRequest(req: Request, _config: AppConfig): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
   try {
@@ -193,38 +188,11 @@ async function compactRequest(req: Request, config: AppConfig): Promise<Response
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
   }
-  const input = Array.isArray(raw.input) ? raw.input : [];
-  const headers = new Headers(req.headers);
-  headers.set("content-type", "application/json");
-  const internal = new Request("http://127.0.0.1/v1/responses", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] }),
-    signal: req.signal,
-  });
-  const response = await responseRequest(internal, config);
-  if (!response.ok) return response;
-  let body: { output?: unknown[]; status?: unknown; error?: unknown };
-  try {
-    body = await response.json() as typeof body;
-  } catch {
-    return formatErrorResponse(502, "invalid_response_error", "Compaction turn returned invalid JSON");
-  }
-  if (body.error || body.status !== "completed") {
-    return formatErrorResponse(502, "upstream_error", `Compaction turn failed (status: ${String(body.status ?? "unknown")})`);
-  }
-  const items = (body.output ?? []).filter(
-    (item): item is { type: "compaction"; encrypted_content?: string } =>
-      Boolean(item && typeof item === "object" && (item as { type?: string }).type === "compaction"),
+  return formatErrorResponse(
+    400,
+    "invalid_request_error",
+    "Codex remote compaction is disabled for ChatGPT Web; ChatGPT owns context compaction inside the browser response",
   );
-  if (items.length !== 1) {
-    return formatErrorResponse(502, "invalid_response_error", `Compaction turn produced ${items.length} compaction items; expected one`);
-  }
-  const summary = typeof items[0]!.encrypted_content === "string"
-    ? decodeCompactionSummary(items[0]!.encrypted_content)
-    : null;
-  if (!summary?.trim()) return formatErrorResponse(502, "invalid_response_error", "Compaction turn produced an empty summary");
-  return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(input), summary) });
 }
 
 export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {

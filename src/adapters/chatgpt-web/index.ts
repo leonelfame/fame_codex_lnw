@@ -9,7 +9,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./env
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
-import { ChatGptReasoningFeed, ChatGptTextFeed, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
@@ -102,10 +102,14 @@ function emitBrowserCompletion(outcome: ChatGptBrowserOutcome, usage: CodexUsage
   emit({ type: "done", stopReason: "stop", endTurn: true, usage });
 }
 
-function emitReasoningSummaries(summaries: string[], emit: (event: AdapterEvent) => void): void {
-  for (const summary of summaries) {
+function emitTraceEvents(trace: ChatGptTraceEvent[], emit: (event: AdapterEvent) => void): void {
+  for (const event of trace) {
     emit({ type: "assistant_boundary" });
-    emit({ type: "thinking_delta", thinking: `${summary}\n` });
+    if (event.kind === "commentary") {
+      emit({ type: "text_delta", text: event.text, phase: "commentary" });
+    } else {
+      emit({ type: "thinking_delta", thinking: `${event.text}\n` });
+    }
   }
 }
 
@@ -173,7 +177,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   ): ChatGptTurnRuntime => {
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
     const browserAbort = new AbortController();
-    const reasoning = new ChatGptReasoningFeed();
+    const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
     if (!mode.localTools) {
       const browser = worker.run({
@@ -181,16 +185,16 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities,
-        contextWindowTokens: provider.modelContextWindows?.[parsed.modelId] ?? provider.contextWindow,
         prepare: async () => ({ ...compileChatGptWebPrompt(parsed, capabilities), release: () => {} }),
         abortSignal: browserAbort.signal,
-        onReasoningSummary: summary => reasoning.push(summary),
+        onReasoningSummary: text => trace.push({ kind: "reasoning", text }),
+        onCommentary: text => trace.push({ kind: "commentary", text }),
         onTextDelta: delta => text.push(delta),
       });
       return {
         mode: "read-only",
         browser,
-        reasoning,
+        trace,
         text,
         cancel: () => browserAbort.abort(),
       };
@@ -204,7 +208,6 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities,
-      contextWindowTokens: provider.modelContextWindows?.[parsed.modelId] ?? provider.contextWindow,
       prepare: async () => {
         const turnToken = await broker.register(environment, timeoutMs + 60_000);
         activeToken = turnToken;
@@ -219,7 +222,8 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         }
       },
       abortSignal: browserAbort.signal,
-      onReasoningSummary: text => reasoning.push(text),
+      onReasoningSummary: text => trace.push({ kind: "reasoning", text }),
+      onCommentary: text => trace.push({ kind: "commentary", text }),
       onTextDelta: delta => text.push(delta),
     });
     void browser.catch(error => {
@@ -232,7 +236,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       mode: "tools",
       token: token.promise,
       browser,
-      reasoning,
+      trace,
       text,
       cancel: () => {
         browserAbort.abort();
@@ -278,8 +282,9 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 emit(event);
               };
               emitProContextWarning(parsed, capabilities, emitCaptured);
-              reasoning = session.runtime.reasoning.drain();
-              emitReasoningSummaries(reasoning, emitCaptured);
+              const trace = session.runtime.trace.drain();
+              reasoning = trace.map(event => event.text);
+              emitTraceEvents(trace, emitCaptured);
               emitTextDeltas(session.runtime.text.drain(), emitCaptured);
               if (session.runtime.text.value() !== settled.answer) {
                 throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
@@ -326,33 +331,33 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               roundEvents.push(event);
               emit(event);
             };
-            const emitNewReasoning = (summaries: string[]) => {
-              roundReasoning.push(...summaries);
-              emitReasoningSummaries(summaries, emitRound);
+            const emitNewTrace = (trace: ChatGptTraceEvent[]) => {
+              roundReasoning.push(...trace.map(event => event.text));
+              emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
             emitProContextWarning(parsed, capabilities, emitRound);
-            emitNewReasoning(session.runtime.reasoning.drain());
+            emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken
               ? broker.nextToolBatch(turnToken, toolWaitAbort.signal).then(requests => ({ type: "tools" as const, requests }))
               : undefined;
             const browserOutcome = session.browserOutcome.then(outcome => ({ type: "browser" as const, outcome }));
-            let nextReasoning = session.runtime.reasoning.next(toolWaitAbort.signal).then(text => ({ type: "reasoning" as const, text }));
+            let nextTrace = session.runtime.trace.next(toolWaitAbort.signal).then(event => ({ type: "trace" as const, event }));
             let nextText = session.runtime.text.wait(toolWaitAbort.signal).then(() => ({ type: "text" as const }));
             for (;;) {
               const next = await withAbort(
                 Promise.race([
                   ...(nextTools ? [nextTools] : []),
                   browserOutcome,
-                  nextReasoning,
+                  nextTrace,
                   nextText,
                 ]),
                 incoming.abortSignal,
               );
-              if (next.type === "reasoning") {
-                emitNewReasoning([next.text]);
-                nextReasoning = session.runtime.reasoning.next(toolWaitAbort.signal).then(text => ({ type: "reasoning" as const, text }));
+              if (next.type === "trace") {
+                emitNewTrace([next.event]);
+                nextTrace = session.runtime.trace.next(toolWaitAbort.signal).then(event => ({ type: "trace" as const, event }));
                 continue;
               }
               if (next.type === "text") {
@@ -360,7 +365,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 nextText = session.runtime.text.wait(toolWaitAbort.signal).then(() => ({ type: "text" as const }));
                 continue;
               }
-              emitNewReasoning(session.runtime.reasoning.drain());
+              emitNewTrace(session.runtime.trace.drain());
               emitNewText(session.runtime.text.drain());
               if (next.type === "browser") {
                 session.setFinalReasoning(roundReasoning);

@@ -20,11 +20,11 @@ for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/codex-
 }
 
 const manifest = JSON.parse(readFileSync(join(runtimeRoot, "manifest.json"), "utf8")) as Record<string, unknown>;
-if (manifest.schemaVersion !== 1 || manifest.appVersion !== "0.1.4" || manifest.playwright !== "1.62.0") {
+if (manifest.schemaVersion !== 1 || manifest.appVersion !== "0.1.5" || manifest.playwright !== "1.62.0") {
   throw new Error(`Unexpected runtime manifest: ${JSON.stringify(manifest)}`);
 }
 const version = Bun.spawnSync([launcher, "--version"], { stdout: "pipe", stderr: "pipe" });
-if (version.exitCode !== 0 || version.stdout.toString().trim() !== "0.1.4") {
+if (version.exitCode !== 0 || version.stdout.toString().trim() !== "0.1.5") {
   throw new Error(`Relocated launcher failed: ${version.stderr.toString()}`);
 }
 
@@ -37,7 +37,7 @@ const port = portServer.port;
 portServer.stop();
 const config = {
   version: 2,
-  releaseVersion: "0.1.4",
+  releaseVersion: "0.1.5",
   mode: "browser-only",
   host: "127.0.0.1",
   port,

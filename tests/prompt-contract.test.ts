@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
+import { CHATGPT_INTERNAL_COMPACTION_MARKER, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -33,6 +33,8 @@ test("tool-capable prompts resume the mandatory bind contract after the complete
   expect(resume).toBeGreaterThan(envelopeEnd);
   expect(finalToken).toBeGreaterThan(resume);
   expect(compiled.text.slice(resume)).toContain("first action now must be the actual Codex Native codex_bind_turn call");
+  expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
+  expect(compiled.text).toContain("call codex_bind_turn again with the same turn_token");
 });
 
 test("read-only prompts resume without exposing a bind capability", () => {
@@ -44,4 +46,5 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).toContain("The context envelope is complete. Execute the latest active user request now under the read-only transport contract above.");
   expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("turn_token");
+  expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
 });

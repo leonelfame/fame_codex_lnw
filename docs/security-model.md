@@ -68,7 +68,8 @@ transport, or returns a fabricated success.
 Browser turns are serialized. Every outer Codex turn navigates to a fresh Temporary Chat page and
 closes the prior page. Tool calls for that turn remain in the same ChatGPT response. The bounded
 local continuation cache is private, expires, and exists only to implement Codex
-`previous_response_id` replay and compaction.
+`previous_response_id` replay. ChatGPT Web context compaction remains inside the active browser
+response; the bridge does not fabricate or install a Codex history checkpoint.
 
 ## Network exposure
 

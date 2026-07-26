@@ -15,7 +15,6 @@ const CHATGPT_PLATFORM_RESERVE_TOKENS = 8_192;
 const CHATGPT_IMAGE_RESERVE_TOKENS = 4_096;
 const CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
 const CHATGPT_WEB_CHARS_PER_TOKEN = 3;
-const CHATGPT_WEB_HARD_INPUT_FRACTION = 0.95;
 
 export interface ChatGptWebRoundEvidence {
   answer?: string;
@@ -85,16 +84,4 @@ export function estimateChatGptWebUsage(
     totalTokens: inputTokens + outputTokens,
     estimated: true,
   };
-}
-
-export function assertChatGptWebInputWithinLimit(
-  inputTokens: number,
-  contextWindowTokens: number | undefined,
-): void {
-  if (!contextWindowTokens || !Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) return;
-  const hardInputLimit = Math.floor(contextWindowTokens * CHATGPT_WEB_HARD_INPUT_FRACTION);
-  if (inputTokens < hardInputLimit) return;
-  throw new Error(
-    `ChatGPT web estimated input (${inputTokens} tokens) reached its configured safety limit (${hardInputLimit}); Codex must compact the task before this browser turn`,
-  );
 }

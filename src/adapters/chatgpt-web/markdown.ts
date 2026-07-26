@@ -46,8 +46,10 @@ export class ChatGptMarkdownStream {
   private candidate = "";
   private committed = "";
 
+  constructor(private readonly transform: (markdown: string) => string = markdown => markdown) {}
+
   observeStableHtml(html: string): string {
-    const next = chatGptHtmlToMarkdown(html);
+    const next = this.transform(chatGptHtmlToMarkdown(html));
     if (!next.startsWith(this.committed)) {
       throw new Error("ChatGPT changed Markdown that was already streamed to Codex");
     }
@@ -61,7 +63,7 @@ export class ChatGptMarkdownStream {
   }
 
   finish(html: string): { markdown: string; delta: string } {
-    const markdown = chatGptHtmlToMarkdown(html);
+    const markdown = this.transform(chatGptHtmlToMarkdown(html));
     if (!markdown.startsWith(this.committed)) {
       throw new Error("ChatGPT final Markdown does not extend the streamed stable prefix");
     }

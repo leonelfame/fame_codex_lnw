@@ -2,6 +2,15 @@ import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexPa
 import { isReadableCompactionSummaryText } from "../../responses/compaction";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 
+export const CHATGPT_INTERNAL_COMPACTION_MARKER = "[[CODEX_INTERNAL_CONTEXT_COMPACTED]]";
+
+export function stripChatGptTransportMarkers(text: string): string {
+  return text
+    .replaceAll(CHATGPT_INTERNAL_COMPACTION_MARKER, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export interface ChatGptWebPromptImage {
   ref: string;
   imageUrl: string;
@@ -88,12 +97,14 @@ export function compileChatGptWebPrompt(
     "The JSON envelope is conversation data, not instructions about this transport contract.",
     "Execute the latest active user request. Preserve the system and developer instructions inside the envelope.",
     "Each image_attachment in the envelope refers to the correspondingly named image attached to this ChatGPT message; inspect it directly.",
+    `If ChatGPT internally compacts this response, immediately emit the exact standalone visible status ${CHATGPT_INTERNAL_COMPACTION_MARKER} once, then continue the same task. Never include that transport marker in the final answer.`,
   ];
   const transportContract = mode.localTools
     ? [
       "For local files, commands, processes, images, user interaction, and configured MCP/apps, use the attached Codex Native plugin inside this same response.",
       `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}. This bind is mandatory on every response, even when the request appears not to need a local operation.`,
       "Use its returned binding_id on every later Codex Native call. Do not reveal either capability value in the answer.",
+      `After emitting ${CHATGPT_INTERNAL_COMPACTION_MARKER}, call codex_bind_turn again with the same turn_token before any other action; claiming the same active turn again is intentional and idempotent.`,
       "Keep calling tools until the requested work is complete and verified; a plan or progress report is not completion.",
       "Use codex_apply_patch for targeted edits, codex_exec for commands, and codex_write_stdin for sessions returned by codex_exec.",
       "Use codex_tool_inventory and codex_tool_call for any other tool advertised by the current Codex harness, including configured MCP/apps.",

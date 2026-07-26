@@ -35,10 +35,7 @@ export function buildChatGptWebModel(templateValue: unknown, config: AppConfig):
     ...structuredClone(template),
     slug: CHATGPT_WEB_ROUTED_MODEL,
     display_name: "ChatGPT Web",
-    description: "ChatGPT web through the native Codex harness. Effort selects Light, Medium, High, Extra High, or account-gated Pro.",
-    context_window: config.contextWindow,
-    max_context_window: config.contextWindow,
-    auto_compact_token_limit: Math.floor(config.contextWindow * 0.9),
+    description: "ChatGPT web through the native Codex harness. Light through Extra High map directly; Codex's Ultra option maps to account-gated ChatGPT Pro.",
     input_modalities: ["text", "image"],
     visibility: "list",
     supported_in_api: false,
@@ -52,7 +49,18 @@ export function buildChatGptWebModel(templateValue: unknown, config: AppConfig):
       reasoningLevel(template, "xhigh", "Extra High"),
       ...(config.proAvailable ? [reasoningLevel(template, "ultra", "Pro")] : []),
     ],
+    // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
+    additional_speed_tiers: [],
+    service_tiers: [],
+    default_service_tier: null,
   };
+  // The browser product owns its context and performs its own internal compaction. Advertising the
+  // native template's context boundary makes Codex launch a second remote-compaction turn, which
+  // cannot preserve the in-flight ChatGPT browser/MCP response.
+  delete model.context_window;
+  delete model.max_context_window;
+  delete model.auto_compact_token_limit;
+  delete model.comp_hash;
   delete model.availability_nux;
   return model;
 }

@@ -21,6 +21,7 @@ codex-chatgpt-web daemon
 ### `browser-only`
 
 - Exposes one `chatgpt-web/gpt-5.6-sol` model with Light, Medium, High, Extra High, and Pro efforts.
+  Codex Desktop currently labels the protocol's Pro-mapped `ultra` effort as **Ultra**.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected effort.
@@ -38,6 +39,13 @@ codex-chatgpt-web daemon
 Playwright CLI is a development/debugging tool and is not part of the runtime. The daemon owns one
 long-lived Chrome process. A Codex turn gets a fresh Temporary Chat page; the preceding page is
 closed. This prevents transcript leakage without creating a new Chrome window per tool call.
+
+ChatGPT owns context compaction inside that browser response. The appended model intentionally
+advertises no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
+fail explicitly instead of opening a second summarizer turn. A prompt-level checkpoint marker is
+translated into a visible Codex trace item; tool-capable turns re-bind the same capability after
+that checkpoint. Visible ChatGPT status rows become reasoning summaries, while stable prose between
+rows becomes native Codex commentary.
 
 ## Installation and service lifecycle
 
@@ -62,7 +70,7 @@ Setup never restarts an already loaded daemon implicitly. A requested stop, rest
 or uninstall first calls a private authenticated drain endpoint. The daemon rejects new turns and
 reports two independent counters:
 
-- active Responses/compaction HTTP requests;
+- active Responses HTTP requests, including native compaction passthrough;
 - active ChatGPT browser sessions, including time spent waiting for local Codex tool results.
 
 The lifecycle operation proceeds only when both counters are zero. If the contract is unavailable,

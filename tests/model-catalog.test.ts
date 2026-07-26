@@ -22,6 +22,13 @@ function source(): Record<string, unknown> {
           { effort: "xhigh", description: "Extra high native" },
         ],
         tool_mode: "code_mode_only",
+        context_window: 300_000,
+        max_context_window: 320_000,
+        auto_compact_token_limit: 270_000,
+        comp_hash: "native-compaction-contract",
+        additional_speed_tiers: [{ id: "fast" }],
+        service_tiers: [{ id: "fast", name: "Fast" }],
+        default_service_tier: "fast",
       },
       { slug: "gpt-5.6-terra", display_name: "5.6 Terra", priority: 3 },
     ],
@@ -43,11 +50,15 @@ describe("native /models augmentation", () => {
     expect(models[3]).toMatchObject({
       slug: CHATGPT_WEB_ROUTED_MODEL,
       display_name: "ChatGPT Web",
-      context_window: 256_000,
-      max_context_window: 256_000,
-      auto_compact_token_limit: 230_400,
       tool_mode: "code_mode_only",
+      additional_speed_tiers: [],
+      service_tiers: [],
+      default_service_tier: null,
     });
+    expect(models[3]).not.toHaveProperty("context_window");
+    expect(models[3]).not.toHaveProperty("max_context_window");
+    expect(models[3]).not.toHaveProperty("auto_compact_token_limit");
+    expect(models[3]).not.toHaveProperty("comp_hash");
     expect((models[3]!.supported_reasoning_levels as Array<{ effort: string; description: string }>))
       .toEqual([
         { effort: "low", description: "Light — ChatGPT Instant 5.5" },

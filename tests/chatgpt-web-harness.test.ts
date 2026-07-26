@@ -12,9 +12,9 @@ import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownStream } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
-import { ChatGptReasoningFeed, ChatGptTextFeed, ChatGptTurnSessions, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
-import { assertChatGptWebInputWithinLimit, estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
+import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
@@ -242,7 +242,7 @@ describe("ChatGPT outer-native harness v3", () => {
         mode: "tools" as const,
         token: new Promise<string>(() => {}),
         browser: new Promise<string>(() => {}),
-        reasoning: new ChatGptReasoningFeed(),
+        trace: new ChatGptTraceFeed(),
         text: new ChatGptTextFeed(),
         cancel: () => {},
       };
@@ -352,11 +352,6 @@ describe("ChatGPT outer-native harness v3", () => {
     ];
     const imageUsage = estimateChatGptWebUsage(imageRequest, { answer: "done" }, toolCapabilities);
     expect(imageUsage.inputTokens).toBeGreaterThanOrEqual(textUsage.inputTokens + 3_500);
-  });
-
-  test("fails closed before a browser prompt reaches the configured context ceiling", () => {
-    expect(() => assertChatGptWebInputWithinLimit(95_000, 100_000)).toThrow("must compact");
-    expect(() => assertChatGptWebInputWithinLimit(94_999, 100_000)).not.toThrow();
   });
 
   test("returns one native compaction item with preserved estimated usage", () => {
@@ -672,6 +667,7 @@ describe("ChatGPT outer-native harness v3", () => {
         expect(prepared.text).not.toContain("turn_token");
         expect(prepared.text).not.toContain("codex_bind_turn");
         turn.onReasoningSummary?.("Reviewed the accumulated task evidence");
+        turn.onCommentary?.("The prepared context contains enough evidence to continue the analysis.");
         turn.onReasoningSummary?.("Synthesized the read-only conclusion");
         turn.onTextDelta("## Pro result");
         turn.onTextDelta("\n\nPrepared context synthesized.");
@@ -711,11 +707,20 @@ describe("ChatGPT outer-native harness v3", () => {
       await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
       expect(browserStarts).toBe(1);
       expect(events.some(event => event.type === "tool_call_start")).toBe(false);
-      expect(events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "commentary"))
-        .toEqual([expect.objectContaining({
+      const commentary = events.filter(
+        (event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "commentary",
+      );
+      expect(commentary).toEqual([
+        expect.objectContaining({
           text: expect.stringContaining("without local tools/MCP"),
           phase: "commentary",
-        })]);
+        }),
+        {
+          type: "text_delta",
+          text: "The prepared context contains enough evidence to continue the analysis.",
+          phase: "commentary",
+        },
+      ]);
       expect(events.filter(event => event.type === "thinking_delta")).toEqual([
         { type: "thinking_delta", thinking: "Reviewed the accumulated task evidence\n" },
         { type: "thinking_delta", thinking: "Synthesized the read-only conclusion\n" },
@@ -730,6 +735,7 @@ describe("ChatGPT outer-native harness v3", () => {
       };
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");
       expect(warning?.content?.[0]?.text).toContain("without local tools/MCP");
+      expect(response.output.filter(item => item.type === "message" && item.phase === "commentary")).toHaveLength(2);
       expect(response.output.some(item => item.type === "reasoning")).toBe(true);
 
       const replay: AdapterEvent[] = [];
