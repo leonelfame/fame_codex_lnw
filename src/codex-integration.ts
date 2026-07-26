@@ -7,7 +7,10 @@ import { atomicWriteFile, getConfigDir } from "./config";
 
 const STANDARD_MODEL = "chatgpt-web/gpt-5.6-sol";
 const PRO_MODEL = "chatgpt-web/gpt-5.6-sol-pro";
+const PROVIDER_ID = "codex-chatgpt-web";
 const MANAGED_COMMENT = "# Managed by codex-chatgpt-web; `codex-chatgpt-web uninstall` restores prior values.";
+const PROVIDER_BEGIN = "# BEGIN codex-chatgpt-web provider";
+const PROVIDER_END = "# END codex-chatgpt-web provider";
 
 type JsonObject = Record<string, unknown>;
 
@@ -18,17 +21,18 @@ interface PreviousAssignment {
 }
 
 export interface CodexIntegrationJournal {
-  version: 1;
+  version: 2;
   configPath: string;
   catalogPath: string;
   sourceCatalogPath: string;
   catalogSha256: string;
+  providerBlock: string;
   installed: {
-    openai_base_url: string;
+    model_provider: string;
     model_catalog_json: string;
   };
   previous: {
-    openai_base_url: PreviousAssignment;
+    model_provider: PreviousAssignment;
     model_catalog_json: PreviousAssignment;
   };
 }
@@ -132,7 +136,7 @@ export function buildManagedCatalog(source: unknown, config: AppConfig): JsonObj
       ],
     });
   }
-  injected.push(pro);
+  if (config.proAvailable) injected.push(pro);
   catalog.models = [...injected, ...models];
   catalog.etag = null;
   catalog.fetched_at = new Date().toISOString();
@@ -203,16 +207,18 @@ function findTopLevelAssignment(lines: string[], key: string): AssignmentLocatio
   return match ? { present: true, ...match } : { present: false };
 }
 
+type ManagedAssignmentKey = "model_provider" | "model_catalog_json";
+
 function setTopLevelAssignments(
   text: string,
-  values: Record<"openai_base_url" | "model_catalog_json", string>,
+  values: Record<ManagedAssignmentKey, string>,
 ): { text: string; previous: CodexIntegrationJournal["previous"] } {
   const hadTrailingNewline = text.endsWith("\n");
   const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
-  const openai = findTopLevelAssignment(lines, "openai_base_url");
+  const provider = findTopLevelAssignment(lines, "model_provider");
   const catalog = findTopLevelAssignment(lines, "model_catalog_json");
   const updates = [
-    { key: "openai_base_url" as const, value: values.openai_base_url, location: openai },
+    { key: "model_provider" as const, value: values.model_provider, location: provider },
     { key: "model_catalog_json" as const, value: values.model_catalog_json, location: catalog },
   ];
   for (const update of updates.filter(update => update.location.index !== undefined)) {
@@ -232,16 +238,46 @@ function setTopLevelAssignments(
   return {
     text: `${lines.join("\n")}${hadTrailingNewline || lines.length > 0 ? "\n" : ""}`,
     previous: {
-      openai_base_url: { present: openai.present, ...(openai.rawLine ? { rawLine: openai.rawLine, value: openai.value } : {}) },
+      model_provider: { present: provider.present, ...(provider.rawLine ? { rawLine: provider.rawLine, value: provider.value } : {}) },
       model_catalog_json: { present: catalog.present, ...(catalog.rawLine ? { rawLine: catalog.rawLine, value: catalog.value } : {}) },
     },
   };
 }
 
-function restoreTopLevelAssignments(text: string, journal: CodexIntegrationJournal): string {
-  const hadTrailingNewline = text.endsWith("\n");
-  const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
-  const keys = ["openai_base_url", "model_catalog_json"] as const;
+function providerBlock(config: AppConfig): string {
+  return [
+    PROVIDER_BEGIN,
+    `[model_providers.${PROVIDER_ID}]`,
+    'name = "Codex + ChatGPT Web"',
+    `base_url = ${JSON.stringify(`http://${config.host}:${config.port}/v1`)}`,
+    'wire_api = "responses"',
+    "requires_openai_auth = true",
+    "supports_websockets = false",
+    PROVIDER_END,
+  ].join("\n");
+}
+
+function installProviderBlock(text: string, block: string, previousBlock?: string): string {
+  if (previousBlock) {
+    if (!text.includes(previousBlock)) throw new Error("Managed Codex provider block changed after setup");
+    return text.replace(previousBlock, block);
+  }
+  if (text.includes(PROVIDER_BEGIN) || text.includes(PROVIDER_END)
+    || new RegExp(`^\\s*\\[model_providers\\.${PROVIDER_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\s*$`, "m").test(text)) {
+    throw new Error(`Codex config already contains model_providers.${PROVIDER_ID}; refusing to overwrite it`);
+  }
+  const trimmed = text.replace(/\s+$/, "");
+  return `${trimmed}${trimmed ? "\n\n" : ""}${block}\n`;
+}
+
+function restoreIntegrationText(text: string, journal: CodexIntegrationJournal): string {
+  if (!text.includes(journal.providerBlock)) {
+    throw new Error("Refusing to uninstall: managed Codex provider block changed after setup");
+  }
+  const withoutProvider = text.replace(journal.providerBlock, "").replace(/\n{3,}/g, "\n\n");
+  const hadTrailingNewline = withoutProvider.endsWith("\n");
+  const lines = withoutProvider.length > 0 ? withoutProvider.replace(/\n$/, "").split("\n") : [];
+  const keys: ManagedAssignmentKey[] = ["model_provider", "model_catalog_json"];
   for (const key of keys) {
     const current = findTopLevelAssignment(lines, key);
     if (!current.present || current.value !== journal.installed[key] || current.index === undefined) {
@@ -267,7 +303,9 @@ function readJournal(): CodexIntegrationJournal | undefined {
   const path = getCodexJournalPath();
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8")) as Partial<CodexIntegrationJournal>;
-  if (value.version !== 1 || !value.installed || !value.previous) throw new Error(`Invalid Codex integration journal: ${path}`);
+  if (value.version !== 2 || !value.installed || !value.previous || typeof value.providerBlock !== "string") {
+    throw new Error(`Invalid Codex integration journal: ${path}`);
+  }
   return value as CodexIntegrationJournal;
 }
 
@@ -289,11 +327,14 @@ export function installCodexIntegration(
   const existingJournal = readJournal();
   if (existingJournal) {
     const lines = configText.length > 0 ? configText.replace(/\n$/, "").split("\n") : [];
-    for (const key of ["openai_base_url", "model_catalog_json"] as const) {
+    for (const key of ["model_provider", "model_catalog_json"] as const) {
       const current = findTopLevelAssignment(lines, key);
       if (current.value !== existingJournal.installed[key]) {
         throw new Error(`Codex ${key} changed after setup; refusing to overwrite the user's newer value`);
       }
+    }
+    if (!configText.includes(existingJournal.providerBlock)) {
+      throw new Error("Managed Codex provider block changed after setup; refusing to overwrite it");
     }
   }
 
@@ -303,30 +344,33 @@ export function installCodexIntegration(
   const managed = `${JSON.stringify(buildManagedCatalog(source, config), null, 2)}\n`;
   const catalogPath = getManagedCatalogPath();
   const installed = {
-    openai_base_url: `http://${config.host}:${config.port}/v1`,
+    model_provider: PROVIDER_ID,
     model_catalog_json: catalogPath,
   };
 
-  const currentOpenAi = findTopLevelAssignment(configText.length > 0 ? configText.replace(/\n$/, "").split("\n") : [], "openai_base_url");
-  if (!existingJournal && currentOpenAi.value && currentOpenAi.value !== installed.openai_base_url && !options.replaceExistingRoute) {
+  const currentProvider = findTopLevelAssignment(configText.length > 0 ? configText.replace(/\n$/, "").split("\n") : [], "model_provider");
+  if (!existingJournal && currentProvider.value && currentProvider.value !== installed.model_provider && !options.replaceExistingRoute) {
     throw new Error(
-      `Codex already uses openai_base_url=${JSON.stringify(currentOpenAi.value)}. `
+      `Codex already uses model_provider=${JSON.stringify(currentProvider.value)}. `
       + "Rerun with --replace-codex-route to replace it reversibly.",
     );
   }
 
   const patched = setTopLevelAssignments(configText, installed);
+  const block = providerBlock(config);
+  const installedText = installProviderBlock(patched.text, block, existingJournal?.providerBlock);
   const journal: CodexIntegrationJournal = {
-    version: 1,
+    version: 2,
     configPath,
     catalogPath,
     sourceCatalogPath,
     catalogSha256: sha256(managed),
+    providerBlock: block,
     installed,
     previous: existingJournal?.previous ?? patched.previous,
   };
   atomicWriteFile(catalogPath, managed);
-  atomicWriteFile(configPath, patched.text);
+  atomicWriteFile(configPath, installedText);
   atomicWriteFile(getCodexJournalPath(), `${JSON.stringify(journal, null, 2)}\n`);
   return journal;
 }
@@ -339,7 +383,7 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
     throw new Error(`Refusing to uninstall: managed catalog changed after setup: ${journal.catalogPath}`);
   }
   const current = readFileSync(journal.configPath, "utf8");
-  atomicWriteFile(journal.configPath, restoreTopLevelAssignments(current, journal));
+  atomicWriteFile(journal.configPath, restoreIntegrationText(current, journal));
   let removedCatalog = false;
   if (existsSync(journal.catalogPath)) {
     rmSync(journal.catalogPath);
@@ -362,9 +406,10 @@ export function inspectCodexIntegration(): {
     try {
       const text = readFileSync(journal.configPath, "utf8");
       const lines = text.replace(/\n$/, "").split("\n");
-      for (const key of ["openai_base_url", "model_catalog_json"] as const) {
+      for (const key of ["model_provider", "model_catalog_json"] as const) {
         if (findTopLevelAssignment(lines, key).value !== journal.installed[key]) errors.push(`Codex ${key} no longer matches this installation`);
       }
+      if (!text.includes(journal.providerBlock)) errors.push("Managed Codex provider block no longer matches this installation");
       if (!existsSync(journal.catalogPath)) errors.push("Managed Codex model catalog is missing");
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));

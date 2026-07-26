@@ -5,6 +5,8 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
+import { readJsonRequestBody } from "./http-body";
+import { forwardNativeCodexRequest } from "./native-passthrough";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "./responses/compaction";
 import { parseRequest } from "./responses/parser";
 import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
@@ -50,11 +52,26 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
 }
 
 async function responseRequest(req: Request, config: AppConfig): Promise<Response> {
+  const nativeRequest = req.clone();
   let raw: unknown;
   try {
-    raw = await req.json();
-  } catch {
-    return formatErrorResponse(400, "invalid_request_error", "Request body must be valid JSON");
+    raw = await readJsonRequestBody(req);
+  } catch (error) {
+    return formatErrorResponse(
+      400,
+      "invalid_request_error",
+      error instanceof Error ? error.message : "Request body must be valid JSON",
+    );
+  }
+  const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as { model?: unknown }).model
+    : undefined;
+  if (typeof requestedModel === "string" && !requestedModel.startsWith(ROUTED_PREFIX)) {
+    try {
+      return await forwardNativeCodexRequest(nativeRequest, "responses");
+    } catch (error) {
+      return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    }
   }
   const expanded = expandPreviousResponseInput(raw);
   let parsed: CodexParsedRequest;
@@ -132,16 +149,28 @@ async function responseRequest(req: Request, config: AppConfig): Promise<Respons
 }
 
 async function compactRequest(req: Request, config: AppConfig): Promise<Response> {
+  const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
   try {
-    const parsed = await req.json();
+    const parsed = await readJsonRequestBody(req);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     raw = parsed as Record<string, unknown>;
-  } catch {
-    return formatErrorResponse(400, "invalid_request_error", "Compaction request body must be a JSON object");
+  } catch (error) {
+    return formatErrorResponse(
+      400,
+      "invalid_request_error",
+      error instanceof Error ? error.message : "Compaction request body must be a JSON object",
+    );
   }
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
+  }
+  if (!raw.model.startsWith(ROUTED_PREFIX)) {
+    try {
+      return await forwardNativeCodexRequest(nativeRequest, "responses/compact");
+    } catch (error) {
+      return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    }
   }
   const input = Array.isArray(raw.input) ? raw.input : [];
   const headers = new Headers(req.headers);

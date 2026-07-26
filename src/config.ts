@@ -28,6 +28,7 @@ export interface AppConfig {
   storageStatePath: string;
   brokerSocketPath: string;
   headed: boolean;
+  proAvailable: boolean;
   autoApproveToolCalls: boolean;
   controlToken: string;
   runtimeCommand: string[];
@@ -82,6 +83,7 @@ export function defaultConfig(mode: RuntimeMode = "pro-only"): AppConfig {
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: join(home, "runtime", "turn-broker.sock"),
     headed: true,
+    proAvailable: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
@@ -132,7 +134,10 @@ export function loadConfig(): AppConfig {
     || parsed.runtimeCommand.some(part => typeof part !== "string" || !part.trim())) {
     throw new Error(`Invalid runtimeCommand in ${path}`);
   }
-  return parsed as AppConfig;
+  if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
+    throw new Error(`Invalid proAvailable in ${path}`);
+  }
+  return { ...parsed, proAvailable: parsed.proAvailable === true } as AppConfig;
 }
 
 export function saveConfig(config: AppConfig): void {
@@ -140,9 +145,11 @@ export function saveConfig(config: AppConfig): void {
 }
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
-  const models = config.mode === "full"
-    ? ["gpt-5.6-sol", "gpt-5.6-sol-pro"]
-    : ["gpt-5.6-sol-pro"];
+  const models = [
+    ...(config.mode === "full" ? ["gpt-5.6-sol"] : []),
+    ...(config.proAvailable ? ["gpt-5.6-sol-pro"] : []),
+  ];
+  if (models.length === 0) throw new Error("No ChatGPT web models are enabled for this account");
   return {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
@@ -153,10 +160,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     modelInputModalities: Object.fromEntries(models.map(model => [model, ["text", "image"]])),
     modelReasoningEfforts: {
       ...(config.mode === "full" ? { "gpt-5.6-sol": ["medium", "high", "xhigh"] } : {}),
-      "gpt-5.6-sol-pro": [],
+      ...(config.proAvailable ? { "gpt-5.6-sol-pro": [] } : {}),
     },
     modelDefaultReasoningEfforts: config.mode === "full" ? { "gpt-5.6-sol": "high" } : {},
-    noReasoningModels: ["gpt-5.6-sol-pro"],
+    noReasoningModels: config.proAvailable ? ["gpt-5.6-sol-pro"] : [],
     chatgptWeb: {
       appName: config.appName,
       storageStatePath: config.storageStatePath,

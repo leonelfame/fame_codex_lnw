@@ -20,6 +20,7 @@ mkdirSync(process.env.CODEX_HOME, { recursive: true });
 const source = join(root, "bundled-models.json");
 writeFileSync(source, `${JSON.stringify(sourceCatalog)}\n`);
 const config = defaultConfig("pro-only");
+config.proAvailable = true;
 const port = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
 config.port = port.port;
 port.stop();

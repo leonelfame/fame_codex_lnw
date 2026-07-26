@@ -1,11 +1,80 @@
-import { existsSync } from "node:fs";
-import { chromium } from "playwright-core";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { chromium, type BrowserContextOptions } from "playwright-core";
 import type { AppConfig } from "./config";
 import { atomicWriteFile } from "./config";
+import { assertAuthenticatedChatGptPage, assertTemporaryChatPage, detectChatGptProCapability } from "./chatgpt-session";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
   accountSurfaceUrl: string;
+  proAvailable: boolean;
+}
+
+interface LoginVerificationMarker {
+  version: 1;
+  authenticated: true;
+  verifiedAt: string;
+  proAvailable?: boolean;
+}
+
+export function loginVerificationMarkerPath(storageStatePath: string): string {
+  return `${storageStatePath}.verified.json`;
+}
+
+function writeVerificationMarker(storageStatePath: string, proAvailable: boolean): void {
+  const marker: LoginVerificationMarker = {
+    version: 1,
+    authenticated: true,
+    verifiedAt: new Date().toISOString(),
+    proAvailable,
+  };
+  atomicWriteFile(loginVerificationMarkerPath(storageStatePath), `${JSON.stringify(marker)}\n`);
+}
+
+async function inspectStoredState(
+  config: AppConfig,
+  storageState: NonNullable<BrowserContextOptions["storageState"]>,
+): Promise<{ proAvailable: boolean; url: string }> {
+  const verifierBrowser = await chromium.launch({
+    executablePath: config.chromeExecutablePath,
+    headless: false,
+    ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain"],
+    args: ["--no-first-run", "--no-default-browser-check"],
+  });
+  try {
+    const verifierContext = await verifierBrowser.newContext({ storageState });
+    try {
+      const verifierPage = await verifierContext.newPage();
+      await verifierPage.goto("https://chatgpt.com/?temporary-chat=true", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 30_000 });
+      await assertAuthenticatedChatGptPage(verifierPage);
+      await assertTemporaryChatPage(verifierPage);
+      return { proAvailable: await detectChatGptProCapability(verifierPage), url: verifierPage.url() };
+    } finally {
+      await verifierContext.close();
+    }
+  } finally {
+    await verifierBrowser.close();
+  }
+}
+
+export async function inspectBrowserLoginCapabilities(config: AppConfig): Promise<{ proAvailable: boolean }> {
+  if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
+  const inspected = await inspectStoredState(config, config.storageStatePath);
+  writeVerificationMarker(config.storageStatePath, inspected.proAvailable);
+  return { proAvailable: inspected.proAvailable };
+}
+
+export function storedBrowserLoginCapabilities(config: AppConfig): { proAvailable?: boolean } {
+  if (!browserLoginStateExists(config)) return {};
+  try {
+    const marker = JSON.parse(readFileSync(loginVerificationMarkerPath(config.storageStatePath), "utf8")) as Partial<LoginVerificationMarker>;
+    return typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {};
+  } catch {
+    return {};
+  }
 }
 
 export async function loginToChatGpt(
@@ -15,35 +84,72 @@ export async function loginToChatGpt(
   if (!existsSync(config.chromeExecutablePath)) {
     throw new Error(`Google Chrome was not found at ${config.chromeExecutablePath}. Pass --chrome with its executable path.`);
   }
-  const browser = await chromium.launch({
+  const profileDir = join(dirname(config.storageStatePath), "login-profile");
+  mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+  process.stdout.write(
+    "A normal Chrome window is open. Sign in to ChatGPT, confirm that the composer is visible, then quit this dedicated Chrome instance completely.\n",
+  );
+  const loginBrowser = spawn(config.chromeExecutablePath, [
+    `--user-data-dir=${profileDir}`,
+    "--new-window",
+    "--disable-background-mode",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "https://chatgpt.com/?temporary-chat=true",
+  ], { env: process.env, stdio: "ignore" });
+  const loginExit = await new Promise<number>((resolveExit, rejectExit) => {
+    loginBrowser.once("error", rejectExit);
+    loginBrowser.once("exit", (code, signal) => {
+      if (signal) rejectExit(new Error(`Normal Chrome login window exited from signal ${signal}`));
+      else resolveExit(code ?? 1);
+    });
+  });
+  if (loginExit !== 0) throw new Error(`Normal Chrome login window exited with status ${loginExit}`);
+
+  const context = await chromium.launchPersistentContext(profileDir, {
     executablePath: config.chromeExecutablePath,
     headless: false,
+    ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain"],
     args: ["--no-first-run", "--no-default-browser-check"],
   });
   try {
-    const context = await browser.newContext();
-    const page = await context.newPage();
+    const page = context.pages()[0] ?? await context.newPage();
     await page.goto("https://chatgpt.com/?temporary-chat=true", {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
-    process.stdout.write("A single Chrome window is open. Sign in to ChatGPT; setup will continue automatically.\n");
-    const composer = page.locator('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"]').first();
+    const composer = page.getByRole("textbox", { name: "Chat with ChatGPT" }).or(
+      page.locator('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"]'),
+    ).first();
     try {
-      await composer.waitFor({ state: "visible", timeout: options.timeoutMs ?? 10 * 60_000 });
+      await composer.waitFor({ state: "visible", timeout: options.timeoutMs ?? 30_000 });
     } catch {
-      throw new Error("Timed out waiting for a signed-in ChatGPT composer");
+      throw new Error("The authenticated ChatGPT page did not produce a visible composer");
     }
+    await assertAuthenticatedChatGptPage(page);
+    await assertTemporaryChatPage(page);
     const state = await context.storageState();
+
+    const inspected = await inspectStoredState(config, state);
     atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);
-    return { storageStatePath: config.storageStatePath, accountSurfaceUrl: page.url() };
+    writeVerificationMarker(config.storageStatePath, inspected.proAvailable);
+    return { storageStatePath: config.storageStatePath, accountSurfaceUrl: page.url(), proAvailable: inspected.proAvailable };
   } finally {
-    await browser.close();
+    await context.close();
+    if (browserLoginStateExists(config)) rmSync(profileDir, { recursive: true, force: true });
   }
 }
 
 export function browserLoginStateExists(config: AppConfig): boolean {
-  return existsSync(config.storageStatePath);
+  if (!existsSync(config.storageStatePath)) return false;
+  const markerPath = loginVerificationMarkerPath(config.storageStatePath);
+  if (!existsSync(markerPath)) return false;
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as Partial<LoginVerificationMarker>;
+    return marker.version === 1 && marker.authenticated === true && typeof marker.verifiedAt === "string";
+  } catch {
+    return false;
+  }
 }
 
 export async function checkBrowserEngine(config: AppConfig): Promise<void> {

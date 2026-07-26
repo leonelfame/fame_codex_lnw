@@ -41,6 +41,7 @@ Setup options:
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
   --replace-codex-route        Reversibly replace an existing openai_base_url
+  --source-catalog PATH        Native Codex catalog to use instead of the current routed catalog
   --restart-service            Explicitly restart this project's daemon after an update
   --login                      Refresh the stored ChatGPT login even if one exists
   --auto-approve-tool-calls    Opt in to per-call browser clicks on "Allow once" prompts
@@ -115,11 +116,13 @@ async function setupCommand(args: string[]): Promise<void> {
   const appName = takeOption(args, "--app-name");
   const tunnelId = takeOption(args, "--tunnel-id");
   const runtimeKeyFile = takeOption(args, "--runtime-key-file");
+  const sourceCatalogPath = takeOption(args, "--source-catalog");
   const chrome = takeOption(args, "--chrome");
   if (chrome) options.chromeExecutablePath = chrome;
   if (appName) options.appName = appName;
   if (tunnelId) options.tunnelId = tunnelId;
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
+  if (sourceCatalogPath) options.sourceCatalogPath = sourceCatalogPath;
   options.forceLogin = takeFlag(args, "--login");
   options.autoApproveToolCalls = takeFlag(args, "--auto-approve-tool-calls");
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");

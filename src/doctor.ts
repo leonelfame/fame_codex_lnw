@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig } from "./config";
 import { inspectCodexIntegration } from "./codex-integration";
+import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
 
@@ -66,12 +67,14 @@ export async function runDoctor(): Promise<DoctorReport> {
   } else {
     checks.push({ id: "chrome", status: "ok", message: `Chrome executable found: ${config.chromeExecutablePath}` });
   }
-  if (!existsSync(config.storageStatePath)) {
-    checks.push({ id: "login", status: "error", message: "ChatGPT login state is missing; run `codex-chatgpt-web login`" });
+  if (!browserLoginStateExists(config)) {
+    checks.push({ id: "login", status: "error", message: "ChatGPT login state is missing or unverified; run `codex-chatgpt-web login`" });
   } else if (!secureFile(config.storageStatePath)) {
     checks.push({ id: "login", status: "error", message: `ChatGPT login state is readable by other users: ${config.storageStatePath}` });
+  } else if (!secureFile(loginVerificationMarkerPath(config.storageStatePath))) {
+    checks.push({ id: "login", status: "error", message: "ChatGPT login verification marker is readable by other users" });
   } else {
-    checks.push({ id: "login", status: "ok", message: "ChatGPT login state exists with private permissions" });
+    checks.push({ id: "login", status: "ok", message: "ChatGPT login state was verified in a fresh runtime context" });
   }
 
   const codex = inspectCodexIntegration();

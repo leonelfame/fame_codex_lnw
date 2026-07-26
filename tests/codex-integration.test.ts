@@ -55,6 +55,7 @@ describe("Codex catalog and reversible config integration", () => {
   test("pro-only advertises exactly one injected model and preserves native entries", () => {
     const { source } = fixture();
     const config = defaultConfig("pro-only");
+    config.proAvailable = true;
     const catalog = buildManagedCatalog(JSON.parse(readFileSync(source, "utf8")), config);
     const models = catalog.models as Array<Record<string, unknown>>;
     expect(models.map(model => model.slug)).toEqual([
@@ -74,7 +75,9 @@ describe("Codex catalog and reversible config integration", () => {
 
   test("full mode injects standard reasoning efforts and the separate Pro model", () => {
     const { source } = fixture();
-    const catalog = buildManagedCatalog(JSON.parse(readFileSync(source, "utf8")), defaultConfig("full"));
+    const config = defaultConfig("full");
+    config.proAvailable = true;
+    const catalog = buildManagedCatalog(JSON.parse(readFileSync(source, "utf8")), config);
     const models = catalog.models as Array<Record<string, unknown>>;
     expect(models.slice(0, 2).map(model => model.slug)).toEqual([
       "chatgpt-web/gpt-5.6-sol",
@@ -84,17 +87,35 @@ describe("Codex catalog and reversible config integration", () => {
       .toEqual(["medium", "high", "xhigh"]);
   });
 
+  test("full mode omits Pro when the authenticated account lacks that capability", () => {
+    const { source } = fixture();
+    const config = defaultConfig("full");
+    config.proAvailable = false;
+    const catalog = buildManagedCatalog(JSON.parse(readFileSync(source, "utf8")), config);
+    const models = catalog.models as Array<Record<string, unknown>>;
+    expect(models.map(model => model.slug)).toEqual([
+      "chatgpt-web/gpt-5.6-sol",
+      "gpt-5.6-sol",
+      "native-other",
+    ]);
+  });
+
   test("refuses an existing route unless replacement is explicit, then restores it exactly", () => {
     const { codexHome, source } = fixture();
     const configPath = join(codexHome, "config.toml");
-    const original = `model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:9999/v1"\n\n[features]\ngoals = true\n`;
+    const original = `model = "gpt-5.6-sol"\nmodel_provider = "existing-provider"\nopenai_base_url = "http://127.0.0.1:9999/v1"\n\n[features]\ngoals = true\n`;
     writeFileSync(configPath, original);
     const config = defaultConfig("pro-only");
+    config.proAvailable = true;
     expect(() => installCodexIntegration(config, { sourceCatalogPath: source })).toThrow("--replace-codex-route");
 
     const journal = installCodexIntegration(config, { sourceCatalogPath: source, replaceExistingRoute: true });
     const installed = readFileSync(configPath, "utf8");
-    expect(installed).toContain(`openai_base_url = "http://127.0.0.1:17841/v1"`);
+    expect(installed).toContain('model_provider = "codex-chatgpt-web"');
+    expect(installed).toContain('base_url = "http://127.0.0.1:17841/v1"');
+    expect(installed).toContain("requires_openai_auth = true");
+    expect(installed).toContain("supports_websockets = false");
+    expect(installed).toContain('openai_base_url = "http://127.0.0.1:9999/v1"');
     expect(installed).toContain(`model_catalog_json = ${JSON.stringify(journal.catalogPath)}`);
     expect(readFileSync(journal.catalogPath, "utf8")).toContain("chatgpt-web/gpt-5.6-sol-pro");
 
@@ -107,7 +128,9 @@ describe("Codex catalog and reversible config integration", () => {
     const { codexHome, source } = fixture();
     const configPath = join(codexHome, "config.toml");
     writeFileSync(configPath, "model = \"gpt-5.6-sol\"\n");
-    installCodexIntegration(defaultConfig("pro-only"), { sourceCatalogPath: source });
+    const config = defaultConfig("pro-only");
+    config.proAvailable = true;
+    installCodexIntegration(config, { sourceCatalogPath: source });
     const changed = readFileSync(configPath, "utf8").replace("17841", "17842");
     writeFileSync(configPath, changed);
     expect(() => uninstallCodexIntegration()).toThrow("changed after setup");

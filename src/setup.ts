@@ -2,7 +2,12 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AppConfig, RuntimeMode } from "./config";
 import { currentRuntimeCommand, defaultConfig, getConfigPath, loadConfig, saveConfig } from "./config";
-import { browserLoginStateExists, loginToChatGpt } from "./browser-login";
+import {
+  browserLoginStateExists,
+  inspectBrowserLoginCapabilities,
+  loginToChatGpt,
+  storedBrowserLoginCapabilities,
+} from "./browser-login";
 import { installCodexIntegration } from "./codex-integration";
 import { assertServiceIdle, getServiceStatus, installService, restartService } from "./service";
 import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, waitForTunnelReady } from "./tunnel";
@@ -16,6 +21,7 @@ export interface SetupOptions {
   forceLogin?: boolean;
   autoApproveToolCalls?: boolean;
   replaceCodexRoute?: boolean;
+  sourceCatalogPath?: string;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
   tunnelId?: string;
@@ -50,6 +56,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     storageStatePath: before.storageStatePath,
     brokerSocketPath: before.brokerSocketPath,
     headed: before.headed,
+    proAvailable: before.proAvailable,
     autoApproveToolCalls: before.autoApproveToolCalls,
     controlToken: before.controlToken,
     runtimeCommand: before.runtimeCommand,
@@ -65,6 +72,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     storageStatePath: after.storageStatePath,
     brokerSocketPath: after.brokerSocketPath,
     headed: after.headed,
+    proAvailable: after.proAvailable,
     autoApproveToolCalls: after.autoApproveToolCalls,
     controlToken: after.controlToken,
     runtimeCommand: after.runtimeCommand,
@@ -153,11 +161,35 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     throw new Error("The 0.1 release installer currently supports macOS only; no untested service fallback is installed.");
   }
   const existing = loadExistingConfig();
+  const config = baseConfig(existing, options);
   const beforeService = getServiceStatus();
   if (beforeService.loaded && !existing) {
     throw new Error("A codex-chatgpt-web service is loaded but its configuration is missing; refusing to replace an unverifiable process");
   }
-  const config = baseConfig(existing, options);
+
+  let loginCreated = false;
+  let proAvailable = storedBrowserLoginCapabilities(config).proAvailable;
+  const loginRequired = options.forceLogin || !browserLoginStateExists(config);
+  const capabilityProbeRequired = !loginRequired && proAvailable === undefined;
+  if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
+    throw new Error(
+      "Setup must verify the browser account before changing the running daemon. "
+      + "Rerun from a normal terminal with --restart-service after the active task finishes.",
+    );
+  }
+  if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && existing) await assertServiceIdle(existing);
+  if (loginRequired) {
+    const login = await loginToChatGpt(config);
+    proAvailable = login.proAvailable;
+    loginCreated = true;
+  } else if (capabilityProbeRequired) {
+    proAvailable = (await inspectBrowserLoginCapabilities(config)).proAvailable;
+  }
+  config.proAvailable = proAvailable === true;
+  if (config.mode === "pro-only" && !config.proAvailable) {
+    throw new Error("This ChatGPT account is authenticated but does not have the Pro reasoning tier required by --pro-only");
+  }
+
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
@@ -180,12 +212,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (!beforeService.loaded) await assertPortAvailable(config.host, config.port);
   saveConfig(config);
 
-  let loginCreated = false;
-  if (options.forceLogin || !browserLoginStateExists(config)) {
-    await loginToChatGpt(config);
-    loginCreated = true;
-  }
-
   installService(config);
   if (changedWhileLoaded && options.restartService && existing) await restartService(existing);
   await waitForProxy(config);
@@ -197,7 +223,10 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
     tunnelReady = true;
   }
-  installCodexIntegration(config, { replaceExistingRoute: options.replaceCodexRoute });
+  installCodexIntegration(config, {
+    replaceExistingRoute: options.replaceCodexRoute,
+    sourceCatalogPath: options.sourceCatalogPath,
+  });
 
   return {
     mode: config.mode,

@@ -8,6 +8,8 @@ import { ChatGptMarkdownStream } from "./markdown";
 import { resolveChatGptWebModelMode, type ChatGptWebModelMode } from "./model";
 import type { CompiledChatGptWebPrompt, ChatGptWebPromptImage } from "./prompt";
 import { assertChatGptWebInputWithinLimit, estimateCompiledChatGptWebInputTokens } from "./usage";
+import { assertAuthenticatedChatGptPage, assertTemporaryChatPage } from "../../chatgpt-session";
+import { loginVerificationMarkerPath } from "../../browser-login";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
 
@@ -144,7 +146,7 @@ export class ChatGptBrowserWorker {
 
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
-    if (!existsSync(this.config.storageStatePath)) {
+    if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
       throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
     }
     if (!existsSync(this.config.chromeExecutablePath)) {
@@ -177,20 +179,18 @@ export class ChatGptBrowserWorker {
 
   private async selectModelAndEffort(page: Page, modelId: string, reasoning: string | undefined): Promise<ChatGptWebModelMode> {
     const mode = resolveChatGptWebModelMode(modelId, reasoning);
-    const pill = page.locator("main button.__composer-pill");
-    await pill.waitFor({ state: "visible", timeout: 15_000 });
-    await pill.click();
-    const modelMenu = page.getByRole("menuitem", { name: mode.uiModelLabel, exact: true });
-    await modelMenu.waitFor({ state: "visible", timeout: 5_000 });
-    await modelMenu.click();
-    const modelChoice = page.getByRole("menuitemradio", { name: mode.uiModelLabel, exact: true }).last();
-    await modelChoice.waitFor({ state: "visible", timeout: 5_000 });
-    await modelChoice.click();
-
-    await pill.click();
-    await page.getByRole("menuitemradio", { name: mode.uiEffortLabel, exact: true }).click();
-    const selected = (await pill.textContent())?.trim();
-    if (selected !== mode.uiEffortLabel) throw new Error(`ChatGPT web failed to select reasoning effort ${mode.uiEffortLabel}`);
+    const currentEffort = page.getByRole("button", {
+      name: /^(?:Instant(?:\s+5\.5)?|Medium|High|Extra High|Pro)$/,
+    }).last();
+    await currentEffort.waitFor({ state: "visible", timeout: 15_000 });
+    await currentEffort.click();
+    const effortChoice = page.getByRole("menuitem", { name: mode.uiEffortLabel, exact: true }).or(
+      page.getByRole("menuitemradio", { name: mode.uiEffortLabel, exact: true }),
+    ).last();
+    await effortChoice.waitFor({ state: "visible", timeout: 5_000 });
+    await effortChoice.click();
+    await page.getByRole("button", { name: mode.uiEffortLabel, exact: true }).last()
+      .waitFor({ state: "visible", timeout: 5_000 });
     return mode;
   }
 
@@ -255,7 +255,8 @@ export class ChatGptBrowserWorker {
       } catch {
         throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
       }
-      await page.getByRole("button", { name: "Turn off temporary chat" }).waitFor({ state: "visible", timeout: 5_000 });
+      await assertAuthenticatedChatGptPage(page);
+      await assertTemporaryChatPage(page);
       const mode = await this.selectModelAndEffort(page, turn.modelId, turn.reasoning);
       await this.attachPrompt(page, prepared.text, mode.localTools);
       await this.attachImages(page, prepared.images);

@@ -132,6 +132,16 @@ them on uninstall. It refuses to overwrite a different existing route unless
 `--replace-codex-route` is explicit. Stop, restart, setup replacement, and uninstall also refuse to
 proceed while either a Responses request or browser/tool turn is active.
 
+When migrating from another Codex proxy whose catalog already contains routed models, pass a clean
+native Codex catalog explicitly so those foreign entries are not copied into the new picker:
+
+```bash
+codex-chatgpt-web setup --pro-only \
+  --source-catalog /path/to/native-model-catalog.json \
+  --replace-codex-route \
+  --acknowledge-unofficial
+```
+
 ## Development
 
 ```bash
@@ -139,7 +149,7 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-`verify` runs dependency auditing, strict TypeScript checking, 31 harness/MCP/config tests, a
+`verify` runs dependency auditing, strict TypeScript checking, 39 harness/MCP/config tests, a
 compiled standalone Responses smoke test, and a real headless launch of system Chrome. The runtime
 contains no generic provider registry, alternate LLM adapter, dashboard, or compatibility shim.
 
