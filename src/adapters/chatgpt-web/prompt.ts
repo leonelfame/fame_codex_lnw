@@ -56,9 +56,9 @@ export function chatGptProContextWarning(parsed: CodexParsedRequest): string | u
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
   if (hasLocalEvidence) {
-    return "⚠️ ChatGPT Pro работает без локальных tools/MCP. Он получит весь накопленный контекст задачи, включая предыдущие tool results или их compaction summary и вложения, но не сможет дополнительно читать или менять компьютер.";
+    return "⚠️ ChatGPT Pro runs without local tools/MCP. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify the computer further.";
   }
-  return "⚠️ ChatGPT Pro работает без локальных tools/MCP. В накопленном контексте пока нет локальных tool results: Pro увидит инструкции и вложения, но не содержимое workspace. Сначала подготовь контекст через GPT-5.6 Sol Extra High, затем переключись на Pro.";
+  return "⚠️ ChatGPT Pro runs without local tools/MCP. The accumulated context does not contain local tool results yet: Pro will see instructions and attachments, but not workspace contents. Prepare the context with GPT-5.6 Sol Extra High first, then switch to Pro.";
 }
 
 export function compileChatGptWebPrompt(parsed: CodexParsedRequest, turnToken?: string): CompiledChatGptWebPrompt {

@@ -38,6 +38,18 @@ curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/
 Sign in once in the Chrome window, let setup finish, then restart the Codex app once. The model
 appears in the native picker.
 
+That command performs the complete local Pro setup:
+
+1. Downloads one architecture-specific executable and verifies its SHA-256 checksum.
+2. Opens one controlled Chrome window so you can sign in to ChatGPT yourself; credentials are never
+   requested by the installer.
+3. Stores the resulting browser state under `~/.codex-chatgpt-web` with user-only permissions.
+4. Installs one user launchd service and generates a reversible Codex model catalog/config patch.
+
+Normal use does not repeat the setup flow or open multiple Playwright windows. The service reuses
+one Chrome process in the background. Run `codex-chatgpt-web login` only when the ChatGPT session
+expires.
+
 ### Full Codex tools
 
 Full mode uses OpenAI's outbound tunnel client. It does not expose a public IP, open an inbound
@@ -73,6 +85,11 @@ curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/
 
 The account-level tunnel, runtime-key, and connector permissions cannot be manufactured locally;
 those are the only manual full-mode steps.
+
+Everything else is automated: setup downloads the pinned official tunnel-client release, verifies
+its published checksum, writes its local profile, starts the outbound runtime, waits until it is
+healthy, and only then enables the Codex model catalog. No public IP address or inbound port is
+created.
 
 By default the bridge refuses an unexpected per-call confirmation instead of clicking through it.
 If the workspace cannot configure action control and the user explicitly accepts per-call browser
@@ -149,14 +166,10 @@ retain OpenCodex attribution under the MIT license; see [NOTICE.md](NOTICE.md).
 
 ## Publishing a release
 
-The repository is prepared for `miuuyy/codex-chatgpt-web`, but no remote repository is created by
-the source tree itself.
+To publish a new copy safely, create it as private first:
 
 ```bash
-git init
-git add .
-git commit -m "Initial standalone ChatGPT web harness"
-gh repo create miuuyy/codex-chatgpt-web --public --source=. --remote=origin --push
+gh repo create miuuyy/codex-chatgpt-web --private --source=. --remote=origin --push
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -165,6 +178,9 @@ The tag workflow builds and smoke-tests native arm64 and Intel binaries, ad-hoc 
 creates SHA-256 checksums, packages license notices, and creates a **draft** GitHub release with
 `install.sh`. Review the release gate before publishing that draft. Developer ID signing and
 notarization remain a gate until the corresponding Apple credentials are configured.
+
+After completing the release checklist and testing the private release, visibility can be changed
+deliberately with GitHub's repository settings or `gh repo edit --visibility public`.
 
 Before making it public, review OpenAI's current [Terms of Use](https://openai.com/policies/terms-of-use/),
 the [Services Agreement](https://openai.com/policies/services-agreement/), and this project's

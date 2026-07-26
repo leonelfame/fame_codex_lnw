@@ -313,9 +313,9 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(compiled.text).not.toContain("Use the attached Codex Native plugin");
     expect(() => compileChatGptWebPrompt(request, "turn_forbidden")).toThrow("must not receive");
 
-    expect(chatGptProContextWarning(request)).toContain("весь накопленный контекст задачи");
+    expect(chatGptProContextWarning(request)).toContain("complete accumulated task context");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
-    expect(chatGptProContextWarning(request)).toContain("нет локальных tool results");
+    expect(chatGptProContextWarning(request)).toContain("does not contain local tool results yet");
     request.context.messages = [{
       role: "user",
       content: `${SUMMARY_PREFIX}\n\nWorkspace files and tests were inspected before compaction.`,
@@ -702,7 +702,7 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(events.some(event => event.type === "tool_call_start")).toBe(false);
       expect(events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "commentary"))
         .toEqual([expect.objectContaining({
-          text: expect.stringContaining("без локальных tools/MCP"),
+          text: expect.stringContaining("without local tools/MCP"),
           phase: "commentary",
         })]);
       expect(events.filter(event => event.type === "thinking_delta")).toEqual([
@@ -718,7 +718,7 @@ describe("ChatGPT outer-native harness v3", () => {
         output: Array<{ type: string; phase?: string; content?: Array<{ text?: string }> }>;
       };
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");
-      expect(warning?.content?.[0]?.text).toContain("без локальных tools/MCP");
+      expect(warning?.content?.[0]?.text).toContain("without local tools/MCP");
       expect(response.output.some(item => item.type === "reasoning")).toBe(true);
 
       const replay: AdapterEvent[] = [];
