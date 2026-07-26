@@ -3,6 +3,15 @@
 Keep the project narrow: ChatGPT web-backed Codex models only. Generic providers and unrelated
 OpenCodex product surfaces are out of scope.
 
+Core invariants:
+
+- Model selection is explicit; never silently fall back to another model or reasoning level.
+- Full mode exposes local tools only through the active outer Codex registry and official MCP
+  tunnel.
+- Pro-only mode never creates a broker capability or attaches an MCP connector.
+- Browser state, API keys, tunnel IDs, cookies, Codex history, and absolute user paths never enter
+  the repository.
+
 Before opening a pull request:
 
 1. Run `bun install --frozen-lockfile` and `bun run verify` on macOS.

@@ -1,4 +1,4 @@
-# Threat model
+# Security model
 
 ## Trust boundaries
 

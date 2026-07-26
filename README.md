@@ -1,100 +1,120 @@
-# codex-chatgpt-web
+<h1 align="center">codex-chatgpt-web</h1>
 
-An independent, focused bridge that exposes two ChatGPT web-backed models in the native Codex
-model picker while preserving Codex's Responses protocol, context replay, compaction, streaming,
-reasoning summaries, images, and outer tool lifecycle.
+<p align="center">
+  <strong>Use ChatGPT Pro as a native Codex model.</strong><br>
+  Keep Codex's model picker, context, compaction, images, streaming, and task history. Change the model—not your workflow.
+</p>
 
-This is experimental, unofficial software. It is not affiliated with or endorsed by OpenAI. It
-automates a user-controlled ChatGPT browser session; it is not an OpenAI API and must not be used
-to evade usage limits or access controls. Read the [public release gate](PUBLIC_RELEASE_CHECKLIST.md)
-before publishing or distributing it.
+<p align="center">
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml"><img src="https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/macOS-arm64%20%7C%20Intel-black?logo=apple" alt="macOS arm64 and Intel">
+</p>
 
-## What is actually installed
+<p align="center"><code>curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh | sh -s -- --pro-only --acknowledge-unofficial</code></p>
 
-| Mode | Native picker entry | Context and images | Local Codex tools | Tunnel |
+<p align="center"><sub>One binary · one ChatGPT login window · no API key or tunnel in Pro-only mode</sub></p>
+
+**Codex has the harness. ChatGPT has Pro. This connects them.**
+
+Open a normal Codex task, choose **ChatGPT Pro (web)** in the native model picker, and keep working
+in the same Codex UI. The bridge replays the complete task context into a fresh ChatGPT Temporary
+Chat and streams the result back through Codex's native Responses protocol.
+
+```text
+Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled browser──▶ ChatGPT
+     ▲                                │                                      │
+     └──── native text, reasoning, images, compaction, and tool lifecycle ───┘
+```
+
+## Choose a mode
+
+| Mode | Native picker | Context and images | Local Codex tools | Tunnel |
 | --- | --- | --- | --- | --- |
-| `pro-only` | `ChatGPT Pro (web)` | Yes | No, with a visible nonfatal warning | None |
-| `full` | `ChatGPT 5.6 (web + Codex tools)` and Pro | Yes | Yes, in the same ChatGPT response | Official `openai/tunnel-client` |
+| **Pro-only** | `ChatGPT Pro (web)` | Full | No, with a visible warning | None |
+| **Full harness** | `ChatGPT 5.6 (web + Codex tools)` plus Pro | Full | Yes, in the same ChatGPT response | Official OpenAI tunnel-client |
 
-The release is one standalone macOS executable. End users do not install Bun, Node.js, Go,
-Playwright browsers, or OpenCodex. Google Chrome is the only external runtime dependency.
+Pro is intentionally read-only with respect to the local computer: it receives all context already
+collected by Codex, but it cannot request another local tool call. Full harness mode adds the
+standard ChatGPT model with the Codex tool loop; the separate Pro entry remains read-only.
 
-Playwright's development/debug windows are not part of production. Setup opens one controlled
-Chrome window for ChatGPT login. The daemon then owns one long-lived Chrome process and serializes
-browser turns. Each Codex turn gets a fresh Temporary Chat page; MCP tool calls stay inside that
-same ChatGPT response instead of opening another chat per tool result.
+## Install Pro
 
-## Install
-
-Current release target: macOS arm64 and Intel.
-
-### Fast path: Pro only
+Current release target: macOS arm64 and Intel. Google Chrome is the only external runtime
+dependency.
 
 ```bash
 curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh \
   | sh -s -- --pro-only --acknowledge-unofficial
 ```
 
-Sign in once in the Chrome window, let setup finish, then restart the Codex app once. The model
-appears in the native picker.
+Then:
 
-That command performs the complete local Pro setup:
+1. Sign in to ChatGPT in the single Chrome window opened by setup.
+2. Let setup finish.
+3. Restart the Codex app once.
+4. Pick **ChatGPT Pro (web)** from the native model picker.
 
-1. Downloads one architecture-specific executable and verifies its SHA-256 checksum.
-2. Opens one controlled Chrome window so you can sign in to ChatGPT yourself; credentials are never
-   requested by the installer.
-3. Stores the resulting browser state under `~/.codex-chatgpt-web` with user-only permissions.
-4. Installs one user launchd service and generates a reversible Codex model catalog/config patch.
+That command downloads one checksum-verified standalone executable, stores private browser state
+under `~/.codex-chatgpt-web`, installs a user launchd service, and applies a reversible Codex model
+catalog/config patch. It does **not** install Node, Bun, Go, OpenCodex, or a Playwright browser.
 
-Normal use does not repeat the setup flow or open multiple Playwright windows. The service reuses
-one Chrome process in the background. Run `codex-chatgpt-web login` only when the ChatGPT session
-expires.
+Normal use reuses one long-lived Chrome process. It does not repeat setup or create a new browser
+window for every tool call. Run `codex-chatgpt-web login` only when the ChatGPT session expires.
 
-### Full Codex tools
+## Enable the full Codex tool loop
 
-Full mode uses OpenAI's outbound tunnel client. It does not expose a public IP, open an inbound
-port, or require router/firewall forwarding.
+Full mode uses the official [OpenAI tunnel-client](https://github.com/openai/tunnel-client). The
+tunnel is outbound: it does not expose a public IP, open an inbound port, or require router
+forwarding.
 
-It also requires a ChatGPT workspace that can use full MCP actions. OpenAI currently documents
-write/modify MCP support for Business and Enterprise/Edu workspaces; personal Pro is limited to
-read/fetch permissions. Workspace developer mode and connector/action-control access must be
-enabled by the appropriate admin. See OpenAI's
+Full write/modify actions require a ChatGPT workspace and admin policy that permit them. OpenAI
+currently documents those actions for Business and Enterprise/Edu workspaces; personal Pro is
+limited to read/fetch MCP permissions. See the current
 [developer mode and MCP apps documentation](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
 
 1. Create or choose a tunnel in [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels).
 2. Create a runtime key with **Tunnels Read + Use** in [Platform API key settings](https://platform.openai.com/settings/organization/api-keys).
-3. Install the binary without running setup yet:
+3. Install the binary:
 
-```bash
-curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh | sh
-```
+   ```bash
+   curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh | sh
+   ```
 
-4. Import the runtime key without echoing it or placing it in shell history, then run setup:
+4. Import the key without echoing it or placing it in shell history, then run setup:
 
-```bash
-~/.local/bin/codex-chatgpt-web tunnel key-import
-~/.local/bin/codex-chatgpt-web setup --full \
-  --tunnel-id tunnel_0123456789abcdef0123456789abcdef \
-  --acknowledge-unofficial
-```
+   ```bash
+   ~/.local/bin/codex-chatgpt-web tunnel key-import
+   ~/.local/bin/codex-chatgpt-web setup --full \
+     --tunnel-id tunnel_0123456789abcdef0123456789abcdef \
+     --acknowledge-unofficial
+   ```
 
-5. While `doctor` reports the tunnel ready, attach that tunnel to a ChatGPT connector named
-   `Codex Native` at [ChatGPT connector settings](https://chatgpt.com/#settings/Connectors), scan
-   its tools, and configure the workspace action permissions you intend to allow.
+5. While `doctor` reports the tunnel ready, attach it to a ChatGPT connector named `Codex Native`
+   in [ChatGPT connector settings](https://chatgpt.com/#settings/Connectors), scan its tools, and
+   configure the intended workspace action permissions.
 6. Restart Codex once.
 
-The account-level tunnel, runtime-key, and connector permissions cannot be manufactured locally;
-those are the only manual full-mode steps.
+Setup automates everything local: it downloads the pinned tunnel-client release, verifies its
+published checksum, writes its profile, starts the outbound runtime, waits for health/readiness,
+and only then enables the Codex catalog. Tunnel creation, runtime-key creation, and connector/admin
+permissions remain account-level steps and cannot be created on the user's behalf.
 
-Everything else is automated: setup downloads the pinned official tunnel-client release, verifies
-its published checksum, writes its local profile, starts the outbound runtime, waits until it is
-healthy, and only then enables the Codex model catalog. No public IP address or inbound port is
-created.
+Unexpected browser approval prompts fail closed by default. `--auto-approve-tool-calls` is an
+explicit opt-in that selects **Allow once** only; it never grants a global permission.
 
-By default the bridge refuses an unexpected per-call confirmation instead of clicking through it.
-If the workspace cannot configure action control and the user explicitly accepts per-call browser
-approval, rerun setup with `--auto-approve-tool-calls`; this selects only **Allow once**, never a
-global permission.
+## What stays native
+
+- Codex model picker and task history
+- complete system/developer/user context replay
+- `previous_response_id` continuation and compaction v1/v2
+- image attachments
+- streamed Markdown, reasoning summaries, and final answers
+- Codex-owned sandbox, approvals, command sessions, and tool results
+
+The MCP server is a capability transport, not a second agent. ChatGPT remains the decision engine.
+Each capability is opaque, bound to one outer Codex turn, expires, and is revoked at completion.
+See the full [architecture](docs/architecture.md).
 
 ## Operations
 
@@ -102,52 +122,15 @@ global permission.
 codex-chatgpt-web doctor
 codex-chatgpt-web service status
 codex-chatgpt-web tunnel status       # full mode
-codex-chatgpt-web browser check       # invisible local Playwright/Chrome smoke test
-codex-chatgpt-web login               # refresh expired ChatGPT login
+codex-chatgpt-web browser check       # invisible Chrome smoke test
+codex-chatgpt-web login               # refresh an expired ChatGPT session
 codex-chatgpt-web uninstall --yes
 ```
 
-Private state lives under `~/.codex-chatgpt-web` with user-only permissions. Setup modifies only
-the top-level `openai_base_url` and `model_catalog_json` values in `~/.codex/config.toml`, writes a
-journal of the exact prior values, and restores them during uninstall. If either value changes
-after setup, uninstall fails closed instead of overwriting the user's newer configuration.
-
-Service-changing operations use an authenticated drain handshake. The daemon first stops accepting
-new Responses requests and reports both active HTTP work and the live browser/tool loop. Restart,
-stop, setup replacement, and uninstall refuse to continue unless both counters are exactly zero;
-they never kill an in-progress Codex turn. Runtime-changing setup also requires the explicit
-`--restart-service` flag, so rerunning setup cannot silently replace the process underneath the
-task issuing the command.
-
-If Codex already points at another Responses proxy, setup stops and asks for the explicit
-`--replace-codex-route` flag. Replacement remains journaled and reversible.
-
-## How the harness works
-
-```text
-Codex app / CLI
-    │ native Responses API + SSE
-    ▼
-codex-chatgpt-web (127.0.0.1 only)
-    ├── context replay + remote compaction v1/v2
-    ├── one serialized Chrome worker
-    ├── Markdown/reasoning/image streaming
-    └── turn-bound capability broker
-             ▲
-             │ stdio MCP over outbound OpenAI tunnel
-             ▼
-      ChatGPT custom connector
-```
-
-The MCP server does not become a second agent. ChatGPT remains the decision engine. The bridge
-only transports exact Codex tool definitions and results, enforces the active Codex sandbox/workspace
-boundary, and renders each requested call back into Codex's native tool lifecycle. A capability is
-opaque, bound to one Codex turn, expires, and is revoked at completion.
-
-Pro is deliberately separate. ChatGPT Pro's UI mode does not expose the custom connector tool in
-this flow, so Pro receives the complete accumulated Codex context and images but no capability.
-The response begins with a visible Codex commentary warning; there is no silent downgrade to
-another reasoning level or model.
+Setup journals the exact previous `openai_base_url` and `model_catalog_json` values and restores
+them on uninstall. It refuses to overwrite a different existing route unless
+`--replace-codex-route` is explicit. Stop, restart, setup replacement, and uninstall also refuse to
+proceed while either a Responses request or browser/tool turn is active.
 
 ## Development
 
@@ -156,47 +139,38 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-`verify` performs strict TypeScript checking, 31 focused harness/MCP/config tests, creates the
-standalone binary, starts that binary against an isolated home, probes its Responses surface, and
-launches system Chrome headlessly through the compiled Playwright bundle.
+`verify` runs dependency auditing, strict TypeScript checking, 31 harness/MCP/config tests, a
+compiled standalone Responses smoke test, and a real headless launch of system Chrome. The runtime
+contains no generic provider registry, alternate LLM adapter, dashboard, or compatibility shim.
 
-The runtime intentionally contains no generic model registry, OAuth provider pool, alternate LLM
-adapters, OpenCodex dashboard, or compatibility shim. The Responses translation and browser harness
-retain OpenCodex attribution under the MIT license; see [NOTICE.md](NOTICE.md).
+Maintainer details:
 
-## Publishing a release
-
-To publish a new copy safely, create it as private first:
-
-```bash
-gh repo create miuuyy/codex-chatgpt-web --private --source=. --remote=origin --push
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The tag workflow builds and smoke-tests native arm64 and Intel binaries, ad-hoc signs each Mach-O,
-creates SHA-256 checksums, packages license notices, and creates a **draft** GitHub release with
-`install.sh`. Review the release gate before publishing that draft. Developer ID signing and
-notarization remain a gate until the corresponding Apple credentials are configured.
-
-After completing the release checklist and testing the private release, visibility can be changed
-deliberately with GitHub's repository settings or `gh repo edit --visibility public`.
-
-Before making it public, review OpenAI's current [Terms of Use](https://openai.com/policies/terms-of-use/),
-the [Services Agreement](https://openai.com/policies/services-agreement/), and this project's
-[release checklist](PUBLIC_RELEASE_CHECKLIST.md). Do not describe the project as a quota bypass.
+- [Architecture](docs/architecture.md)
+- [Security model](docs/security-model.md)
+- [Release checklist](docs/releasing.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Security and limitations
 
-- ChatGPT UI selectors can change without notice. Failures are explicit; the runtime never silently
-  changes model, effort, or transport.
-- Browser state is equivalent to a sensitive login artifact. Do not share or commit it.
-- The Responses listener is loopback-only, but another process running as the same local user can
-  reach it. Use a trusted single-user workstation.
-- Browser turns are serialized. This protects one browser profile and avoids accidental cross-turn
-  transcript reuse, at the cost of local concurrency.
-- Version `0.1` supports managed background installation on macOS only. Other platforms fail
-  explicitly instead of installing an untested service fallback.
+- ChatGPT UI selectors can change without notice. UI drift fails explicitly; the runtime never
+  silently changes model, effort, or transport.
+- Browser state is equivalent to a sensitive login artifact. Never share or commit it.
+- The Responses listener is loopback-only, but another process under the same local user can reach
+  it. Use a trusted single-user workstation.
+- Browser turns are serialized to protect one profile and prevent cross-turn transcript reuse.
+- Managed background installation currently supports macOS only.
 
-Report security issues according to [SECURITY.md](SECURITY.md).
-The complete trust-boundary analysis is in [THREAT_MODEL.md](THREAT_MODEL.md).
+Report vulnerabilities according to [SECURITY.md](SECURITY.md) and review the complete
+[security model](docs/security-model.md) before enabling full mode.
+
+## Credits and disclaimer
+
+Portions of the Responses translation, Codex catalog integration, and browser harness were adapted
+from [OpenCodex](https://github.com/lidge-jun/opencodex) under the MIT license. See the complete
+[third-party notices](LICENSES/NOTICE.md).
+
+This is experimental, independent software. It is not affiliated with or endorsed by OpenAI, and
+it is not an OpenAI API. Do not use it to evade usage limits or access controls. Before public
+distribution, review OpenAI's current [Terms of Use](https://openai.com/policies/terms-of-use/),
+the [Services Agreement](https://openai.com/policies/services-agreement/), and the project's
+[release checklist](docs/releasing.md).

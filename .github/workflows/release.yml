@@ -57,7 +57,7 @@ jobs:
       - name: Create checksums
         run: |
           cp LICENSE release-assets/LICENSE
-          cp NOTICE.md release-assets/NOTICE.md
+          cp LICENSES/NOTICE.md release-assets/NOTICE.md
           cp LICENSES/OpenCodex-MIT.txt release-assets/OpenCodex-MIT.txt
           cp LICENSES/Bun-1.3.11.md release-assets/Bun-1.3.11.md
           cp dist/THIRD_PARTY_NOTICES.txt release-assets/THIRD_PARTY_NOTICES.txt

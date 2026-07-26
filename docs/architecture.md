@@ -64,3 +64,5 @@ malformed, or non-idle, the operation fails closed and resumes the old daemon wh
 - Never place secret values in command-line arguments, logs, generated profiles, or Git.
 - Serialize browser turns and reject unsupported models or efforts explicitly.
 - Do not retry or switch modes to evade product usage limits.
+
+See the complete [security model](security-model.md).

@@ -20,7 +20,7 @@
     "dist",
     "README.md",
     "LICENSE",
-    "NOTICE.md"
+    "LICENSES"
   ],
   "scripts": {
     "start": "bun run src/cli.ts serve",

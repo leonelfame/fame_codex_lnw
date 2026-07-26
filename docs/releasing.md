@@ -1,4 +1,4 @@
-# Public release gate
+# Release checklist
 
 This project automates a consumer ChatGPT web session. OpenAI's current Terms of Use prohibit
 programmatic extraction of Output and circumvention of rate limits or restrictions. A public
@@ -19,5 +19,7 @@ Before making the repository public:
 - [ ] Run a clean-home full-mode tunnel/connector/multi-tool/uninstall test on both architectures.
 - [ ] Verify setup, restart, stop, and uninstall refuse while a browser/tool turn is active.
 - [ ] Run a secret scan and inspect the source archive manually.
-- [ ] Review `NOTICE.md`, trademark wording, bundled npm licenses, and Bun/JSC LGPL relinking obligations.
-- [ ] Configure Developer ID signing and notarization, or document the unsigned alpha decision explicitly.
+- [ ] Review `LICENSES/NOTICE.md`, trademark wording, bundled npm licenses, and Bun/JSC LGPL
+      relinking obligations.
+- [ ] Configure Developer ID signing and notarization, or document the unsigned alpha decision
+      explicitly.
