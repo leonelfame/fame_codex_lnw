@@ -1,5 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 
+export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -23,8 +25,9 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
 
 export async function assertTemporaryChatPage(page: Page): Promise<void> {
   const url = new URL(page.url());
-  if (url.searchParams.get("temporary-chat") !== "true") {
-    throw new Error(`ChatGPT did not retain temporary-chat=true (${page.url()})`);
+  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
+  if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
+    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
   }
   await page.getByRole("heading", { name: "Temporary Chat", exact: true }).waitFor({ state: "visible", timeout: 10_000 });
 }

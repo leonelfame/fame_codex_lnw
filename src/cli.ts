@@ -20,7 +20,7 @@ const HELP = `codex-chatgpt-web ${VERSION}
 Focused ChatGPT web-backed models for the native Codex harness.
 
 Usage:
-  codex-chatgpt-web setup --pro-only [options]
+  codex-chatgpt-web setup --browser-only [options]
   codex-chatgpt-web setup --full --tunnel-id ID --runtime-key-file PATH [options]
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
@@ -33,7 +33,7 @@ Usage:
   codex-chatgpt-web uninstall --yes
 
 Setup options:
-  --pro-only                   Pro model, full context/images, no local tools or tunnel
+  --browser-only               One ChatGPT Web model, full context/images, no local tools or tunnel
   --full                       Standard tool-capable model plus Pro
   --port NUMBER                Loopback Responses port (default: 17841)
   --chrome PATH                Google Chrome executable
@@ -104,13 +104,13 @@ function assertNoArgs(args: string[]): void {
 }
 
 async function setupCommand(args: string[]): Promise<void> {
-  const proOnly = takeFlag(args, "--pro-only");
+  const browserOnly = takeFlag(args, "--browser-only");
   const full = takeFlag(args, "--full");
-  if (proOnly === full) throw new Error("Choose exactly one setup mode: --pro-only or --full");
+  if (browserOnly === full) throw new Error("Choose exactly one setup mode: --browser-only or --full");
   const portRaw = takeOption(args, "--port");
   let acknowledged = takeFlag(args, "--acknowledge-unofficial");
   const options: SetupOptions = {
-    mode: full ? "full" : "pro-only",
+    mode: full ? "full" : "browser-only",
     ...(portRaw ? { port: Number(portRaw) } : {}),
   };
   const appName = takeOption(args, "--app-name");

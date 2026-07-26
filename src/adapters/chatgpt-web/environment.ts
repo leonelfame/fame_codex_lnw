@@ -69,6 +69,69 @@ function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurn
   return undefined;
 }
 
+function sandboxTypeFromEnvironment(text: string): ChatGptSandboxPolicy["type"] | undefined {
+  const unrestricted = /<permission_profile\s+type=["']disabled["'][^>]*>[\s\S]*?<file_system\s+type=["']unrestricted["'][^>]*\/?\s*>/i.test(text)
+    || /<sandbox_mode>danger-full-access<\/sandbox_mode>/i.test(text);
+  const workspaceWrite = /<sandbox_mode>workspace-write<\/sandbox_mode>/i.test(text);
+  const readOnly = /<sandbox_mode>read-only<\/sandbox_mode>/i.test(text);
+  if (Number(unrestricted) + Number(workspaceWrite) + Number(readOnly) !== 1) return undefined;
+  return unrestricted ? "dangerFullAccess" : workspaceWrite ? "workspaceWrite" : "readOnly";
+}
+
+function sandboxTypeFromMetadata(value: unknown): ChatGptSandboxPolicy["type"] | undefined {
+  if (typeof value !== "string") return undefined;
+  switch (value.trim().toLowerCase().replaceAll("_", "-")) {
+    case "none":
+    case "unrestricted":
+    case "danger-full-access":
+      return "dangerFullAccess";
+    case "workspace-write":
+      return "workspaceWrite";
+    case "read-only":
+      return "readOnly";
+    default:
+      return undefined;
+  }
+}
+
+function workspaceMetadataEnvironmentBeforeUser(
+  input: unknown[],
+  userIndex: number,
+  metadata: Record<string, unknown> | undefined,
+): string | undefined {
+  if (userIndex <= 0 || !metadata) return undefined;
+  const workspaces = record(metadata.workspaces);
+  const metadataSandbox = sandboxTypeFromMetadata(metadata.sandbox);
+  if (!workspaces || !metadataSandbox) return undefined;
+  const metadataRoots = Object.keys(workspaces);
+  if (metadataRoots.length === 0 || metadataRoots.some(path => !isAbsolute(path))) return undefined;
+  const normalizedMetadataRoots = [...new Set(metadataRoots.map(path => resolve(path)))];
+
+  const user = record(input[userIndex]);
+  const candidate = record(input[userIndex - 1]);
+  if (user?.type !== "message" || user.role !== "user" || typeof user.id !== "string") return undefined;
+  if (candidate?.type !== "message" || candidate.role !== "user" || typeof candidate.id !== "string") return undefined;
+
+  const content = Array.isArray(candidate.content) ? candidate.content : [];
+  for (const part of content) {
+    const text = record(part)?.text;
+    if (typeof text !== "string") continue;
+    const trimmed = text.trim();
+    if (!/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) continue;
+
+    const cwdMatches = [...trimmed.matchAll(/<cwd>([^<]+)<\/cwd>/g)].map(match => decodeXmlText(match[1]!.trim()));
+    if (cwdMatches.length !== 1 || !isAbsolute(cwdMatches[0]!)) continue;
+    const rootMatches = [...trimmed.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
+      .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => decodeXmlText(match[1]!.trim())));
+    const declaredRoots = [...new Set((rootMatches.length > 0 ? rootMatches : cwdMatches).map(path => resolve(path)))];
+    if (declaredRoots.some(path => !normalizedMetadataRoots.includes(path))) continue;
+    if (!normalizedMetadataRoots.some(root => matchesPath(root, resolve(cwdMatches[0]!)))) continue;
+    if (sandboxTypeFromEnvironment(trimmed) !== metadataSandbox) continue;
+    return trimmed;
+  }
+  return undefined;
+}
+
 function hasAssistantOutputBetween(input: unknown[], startIndex: number, endIndex: number): boolean {
   for (let index = startIndex; index < endIndex; index += 1) {
     const item = record(input[index]);
@@ -94,6 +157,9 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
     const current = environmentBeforeUser(input, activeUserIndex, turnId);
     if (current) return current;
   }
+
+  const current = workspaceMetadataEnvironmentBeforeUser(input, activeUserIndex, clientTurnMetadata(parsed));
+  if (current) return current;
 
   const replayPrefixLen = Math.min(parsed._replayPrefixLen ?? 0, input.length);
   for (let index = replayPrefixLen - 1; index > 0; index -= 1) {
@@ -162,20 +228,17 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
     throw new Error("ChatGPT web cwd is outside the trusted Codex workspace roots");
   }
 
-  const unrestricted = /<permission_profile\s+type=["']disabled["'][^>]*>[\s\S]*?<file_system\s+type=["']unrestricted["'][^>]*\/?\s*>/i.test(text)
-    || /<sandbox_mode>danger-full-access<\/sandbox_mode>/i.test(text);
-  const workspaceWrite = /<sandbox_mode>workspace-write<\/sandbox_mode>/i.test(text);
-  const readOnly = /<sandbox_mode>read-only<\/sandbox_mode>/i.test(text);
+  const sandboxType = sandboxTypeFromEnvironment(text);
   const networkAccess = /<network_access>enabled<\/network_access>/i.test(text)
     || /network access is enabled/i.test(text);
 
-  if (Number(unrestricted) + Number(workspaceWrite) + Number(readOnly) !== 1) {
+  if (!sandboxType) {
     throw new Error("ChatGPT web turn requires one explicit trusted Codex sandbox mode");
   }
-  if (unrestricted) {
+  if (sandboxType === "dangerFullAccess") {
     return { cwd, roots, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, tools: parsed.context.tools ?? [] };
   }
-  if (workspaceWrite) {
+  if (sandboxType === "workspaceWrite") {
     return {
       cwd,
       roots,

@@ -2,8 +2,10 @@
 set -eu
 
 REPOSITORY="${CODEX_CHATGPT_WEB_REPOSITORY:-miuuyy/codex-chatgpt-web}"
-VERSION="${CODEX_CHATGPT_WEB_VERSION:-0.1.0}"
-INSTALL_DIR="${CODEX_CHATGPT_WEB_BIN_DIR:-$HOME/.local/bin}"
+VERSION="${CODEX_CHATGPT_WEB_VERSION:-0.1.1}"
+BIN_DIR="${CODEX_CHATGPT_WEB_BIN_DIR:-$HOME/.local/bin}"
+LIB_DIR="${CODEX_CHATGPT_WEB_LIB_DIR:-$HOME/.local/lib/codex-chatgpt-web}"
+DOC_DIR="${CODEX_CHATGPT_WEB_DOC_DIR:-$HOME/.local/share/doc/codex-chatgpt-web}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "codex-chatgpt-web 0.1 supports macOS only" >&2
@@ -16,26 +18,24 @@ case "$(uname -m)" in
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-ASSET="codex-chatgpt-web-darwin-$ARCH"
+ASSET="codex-chatgpt-web-darwin-$ARCH.tar.gz"
 BASE_URL="https://github.com/$REPOSITORY/releases/download/v$VERSION"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-chatgpt-web.XXXXXX")"
-trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
+STAGE_DIR="$LIB_DIR/.stage-$VERSION-$$"
+TARGET_DIR="$LIB_DIR/$VERSION"
+BACKUP_DIR="$LIB_DIR/.previous-$VERSION-$$"
+trap 'rm -rf "$TEMP_DIR" "$STAGE_DIR"' EXIT HUP INT TERM
 
 curl -fsSL "$BASE_URL/$ASSET" -o "$TEMP_DIR/$ASSET"
 curl -fsSL "$BASE_URL/checksums.txt" -o "$TEMP_DIR/checksums.txt"
 
 EXPECTED="$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$TEMP_DIR/checksums.txt")"
-if [ -z "$EXPECTED" ]; then
-  echo "checksums.txt has no entry for $ASSET" >&2
-  exit 1
-fi
 ACTUAL="$(shasum -a 256 "$TEMP_DIR/$ASSET" | awk '{ print $1 }')"
-if [ "$ACTUAL" != "$EXPECTED" ]; then
+if [ -z "$EXPECTED" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "SHA-256 verification failed for $ASSET" >&2
   exit 1
 fi
 
-DOC_DIR="${CODEX_CHATGPT_WEB_DOC_DIR:-$HOME/.local/share/doc/codex-chatgpt-web}"
 for DOC in LICENSE NOTICE.md OpenCodex-MIT.txt Bun-1.3.11.md THIRD_PARTY_NOTICES.txt; do
   curl -fsSL "$BASE_URL/$DOC" -o "$TEMP_DIR/$DOC"
   DOC_EXPECTED="$(awk -v asset="$DOC" '$2 == asset { print $1 }' "$TEMP_DIR/checksums.txt")"
@@ -45,15 +45,37 @@ for DOC in LICENSE NOTICE.md OpenCodex-MIT.txt Bun-1.3.11.md THIRD_PARTY_NOTICES
     exit 1
   fi
 done
-mkdir -p "$INSTALL_DIR" "$DOC_DIR"
-install -m 0755 "$TEMP_DIR/$ASSET" "$INSTALL_DIR/codex-chatgpt-web"
+
+mkdir -p "$LIB_DIR" "$BIN_DIR" "$DOC_DIR"
+mkdir "$STAGE_DIR"
+tar -xzf "$TEMP_DIR/$ASSET" -C "$STAGE_DIR"
+if [ ! -x "$STAGE_DIR/bin/codex-chatgpt-web" ] || [ ! -x "$STAGE_DIR/runtime/bun" ]; then
+  echo "Runtime archive is incomplete" >&2
+  exit 1
+fi
+if [ "$("$STAGE_DIR/bin/codex-chatgpt-web" --version)" != "$VERSION" ]; then
+  echo "Runtime archive version does not match $VERSION" >&2
+  exit 1
+fi
+
+if [ -e "$TARGET_DIR" ]; then
+  mv "$TARGET_DIR" "$BACKUP_DIR"
+fi
+if ! mv "$STAGE_DIR" "$TARGET_DIR"; then
+  if [ -e "$BACKUP_DIR" ]; then mv "$BACKUP_DIR" "$TARGET_DIR"; fi
+  exit 1
+fi
+
+ln -sfn "$TARGET_DIR/bin/codex-chatgpt-web" "$BIN_DIR/.codex-chatgpt-web.next"
+mv -f "$BIN_DIR/.codex-chatgpt-web.next" "$BIN_DIR/codex-chatgpt-web"
 for DOC in LICENSE NOTICE.md OpenCodex-MIT.txt Bun-1.3.11.md THIRD_PARTY_NOTICES.txt; do
   install -m 0644 "$TEMP_DIR/$DOC" "$DOC_DIR/$DOC"
 done
-echo "Installed $INSTALL_DIR/codex-chatgpt-web"
+if [ -e "$BACKUP_DIR" ]; then rm -rf "$BACKUP_DIR"; fi
 
+echo "Installed $TARGET_DIR"
 if [ "$#" -gt 0 ]; then
-  exec "$INSTALL_DIR/codex-chatgpt-web" setup "$@"
+  "$TARGET_DIR/bin/codex-chatgpt-web" setup "$@"
+  exit 0
 fi
-
-echo "Next: $INSTALL_DIR/codex-chatgpt-web setup --pro-only --acknowledge-unofficial"
+echo "Next: $BIN_DIR/codex-chatgpt-web setup --browser-only --acknowledge-unofficial"

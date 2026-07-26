@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { dirname } from "node:path";
 import type { ChatGptTurnEnvironment } from "./environment";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
@@ -170,13 +171,19 @@ export class TurnBroker {
     this.server = undefined;
     this.startPromise = undefined;
     brokers.delete(this.socketPath);
-    if (server) await new Promise<void>((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()));
+    if (server?.listening) {
+      await new Promise<void>((resolveClose, rejectClose) => server.close(error => {
+        if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolveClose();
+        else rejectClose(error);
+      }));
+    }
     if (existsSync(this.socketPath) && lstatSync(this.socketPath).isSocket()) unlinkSync(this.socketPath);
   }
 
   private start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
     this.startPromise = new Promise<void>((resolveStart, rejectStart) => {
+      mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
       const listen = () => {
         const server = createServer(socket => this.handleSocket(socket));
         this.server = server;
@@ -266,6 +273,7 @@ export class TurnBroker {
       const token = request.token?.trim();
       if (!token) throw new Error("turn token is required");
       const channel = this.channels.get(token);
+      console.error(`[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)})`);
       if (!channel) throw new Error("turn token is invalid, expired, or revoked");
       if (channel.bindingId) {
         const existing = this.bindings.get(channel.bindingId);

@@ -10,7 +10,7 @@ test("setup accepts an explicit native source catalog before runtime validation"
       process.execPath,
       resolve(import.meta.dir, "../src/cli.ts"),
       "setup",
-      "--pro-only",
+      "--browser-only",
       "--port",
       "0",
       "--source-catalog",

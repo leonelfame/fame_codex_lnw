@@ -14,20 +14,20 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import { VERSION } from "./version";
 
 const ROUTED_PREFIX = "chatgpt-web/";
-const STANDARD_MODEL = "gpt-5.6-sol";
-const PRO_MODEL = "gpt-5.6-sol-pro";
+const WEB_MODEL = "gpt-5.6-sol";
 
-function modelList(config: AppConfig): Array<Record<string, unknown>> {
-  const ids = config.mode === "full" ? [STANDARD_MODEL, PRO_MODEL] : [PRO_MODEL];
-  return ids.map(id => ({ id: `${ROUTED_PREFIX}${id}`, object: "model", created: 0, owned_by: "chatgpt-web" }));
+function modelList(): Array<Record<string, unknown>> {
+  return [{ id: `${ROUTED_PREFIX}${WEB_MODEL}`, object: "model", created: 0, owned_by: "chatgpt-web" }];
 }
 
 function routeModel(parsed: CodexParsedRequest, config: AppConfig): string {
   const requested = parsed.modelId.startsWith(ROUTED_PREFIX)
     ? parsed.modelId.slice(ROUTED_PREFIX.length)
     : parsed.modelId;
-  const allowed = config.mode === "full" ? new Set([STANDARD_MODEL, PRO_MODEL]) : new Set([PRO_MODEL]);
-  if (!allowed.has(requested)) throw new Error(`Model is not enabled in ${config.mode} mode: ${parsed.modelId}`);
+  if (requested !== WEB_MODEL) throw new Error(`ChatGPT web model is not enabled: ${parsed.modelId}`);
+  if (parsed.options.reasoning === "pro" && !config.proAvailable) {
+    throw new Error("ChatGPT Pro effort is not available for this account");
+  }
   parsed.modelId = requested;
   if (parsed._rawBody && typeof parsed._rawBody === "object") {
     (parsed._rawBody as { model?: string }).model = requested;
@@ -245,7 +245,7 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
         return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        return Response.json({ object: "list", data: modelList(config) });
+        return Response.json({ object: "list", data: modelList() });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");

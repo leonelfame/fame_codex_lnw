@@ -17,16 +17,17 @@ codex-chatgpt-web daemon
 
 ## Modes
 
-### `pro-only`
+### `browser-only`
 
-- Exposes only `chatgpt-web/gpt-5.6-sol-pro`.
-- Sends the complete Codex context and image attachments to a Temporary Chat in ChatGPT Pro.
+- Exposes one `chatgpt-web/gpt-5.6-sol` model with Light, Medium, High, Extra High, and Pro efforts.
+- Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
 - Never starts the broker, tunnel, or MCP server.
-- Emits a nonfatal Codex commentary warning that local tools are unavailable.
+- Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected effort.
 
 ### `full`
 
-- Also exposes `chatgpt-web/gpt-5.6-sol` with Medium, High, and Extra High.
+- Exposes the same single model and effort list; Light through Extra High are tool-capable, while
+  Pro remains read-only.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
@@ -39,11 +40,11 @@ closed. This prevents transcript leakage without creating a new Chrome window pe
 
 ## Installation and service lifecycle
 
-The release artifact is a single Bun-compiled executable. It contains the Responses bridge,
-Playwright client code, MCP server, setup, doctor, and launchd management; it uses the user's
-installed Google Chrome and does not download a second browser. Full mode separately downloads the
-official pinned `openai/tunnel-client` release and verifies it against that release's published
-SHA-256 manifest.
+The release artifact is a versioned runtime bundle containing a pinned Bun executable and the
+bundled application. It contains the Responses bridge, Playwright client code, MCP server, setup,
+doctor, and launchd management; it uses the user's installed Google Chrome and does not download a
+second browser. Full mode separately downloads the official pinned `openai/tunnel-client` release
+and verifies it against that release's published SHA-256 manifest.
 
 Setup creates a user launchd service and only then journals and switches Codex's two integration
 keys. It never restarts an already loaded daemon implicitly. A requested stop, restart, replacement,

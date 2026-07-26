@@ -10,8 +10,8 @@ import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownStream } from "../src/adapters/chatgpt-web/markdown";
-import { CHATGPT_WEB_PRO_MODEL_ID, CHATGPT_WEB_STANDARD_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
-import { chatGptProContextWarning, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
+import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { ChatGptReasoningFeed, ChatGptTextFeed, ChatGptTurnSessions, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { assertChatGptWebInputWithinLimit, estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
@@ -35,10 +35,12 @@ const environmentXml = `<environment_context>
   <cwd>${tempRoot}</cwd>
   <filesystem><workspace_roots><root>${tempRoot}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
 </environment_context>`;
+const toolCapabilities = { localToolsEnabled: true, proAvailable: true };
+const readOnlyCapabilities = { localToolsEnabled: false, proAvailable: true };
 
 function parsed(developerText?: string): CodexParsedRequest {
   return {
-    modelId: "gpt-5.6-sol",
+    modelId: CHATGPT_WEB_MODEL_ID,
     stream: true,
     context: {
       tools,
@@ -80,7 +82,7 @@ function rawWireRequest(environmentText: string): CodexParsedRequest {
 
 function proRequest(environmentText = environmentXml): CodexParsedRequest {
   const request = rawWireRequest(environmentText);
-  request.modelId = CHATGPT_WEB_PRO_MODEL_ID;
+  request.options.reasoning = "pro";
   return request;
 }
 
@@ -254,7 +256,7 @@ describe("ChatGPT outer-native harness v3", () => {
       { type: "text", text: "Inspect this image" },
       { type: "image", imageUrl, detail: "high" },
     ];
-    const compiled = compileChatGptWebPrompt(request, "turn_123456789012345678901234");
+    const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
     expect(compiled.text).not.toContain(imageUrl);
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
     expect(compiled.text).toContain('"version":3');
@@ -264,19 +266,22 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(files[0]?.buffer.length).toBeGreaterThan(0);
   });
 
-  test("maps the separate Pro model to the real Pro UI mode and fails closed on invalid combinations", () => {
-    expect(resolveChatGptWebModelMode(CHATGPT_WEB_PRO_MODEL_ID, "high")).toEqual({
-      modelId: CHATGPT_WEB_PRO_MODEL_ID,
-      uiModelLabel: "GPT-5.6 Sol",
+  test("maps one ChatGPT Web model to explicit effort modes and fails closed on invalid combinations", () => {
+    expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "pro", toolCapabilities)).toEqual({
+      modelId: CHATGPT_WEB_MODEL_ID,
+      effort: "pro",
       uiEffortLabel: "Pro",
       localTools: false,
     });
-    expect(resolveChatGptWebModelMode(CHATGPT_WEB_STANDARD_MODEL_ID, "xhigh")).toMatchObject({
+    expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", toolCapabilities)).toMatchObject({
       uiEffortLabel: "Extra High",
       localTools: true,
     });
-    expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_STANDARD_MODEL_ID, "pro")).toThrow("not supported");
-    expect(() => resolveChatGptWebModelMode("unknown", "high")).toThrow("model is not supported");
+    expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "pro", {
+      localToolsEnabled: false,
+      proAvailable: false,
+    })).toThrow("Pro effort is not available");
+    expect(() => resolveChatGptWebModelMode("unknown", "high", toolCapabilities)).toThrow("model is not supported");
   });
 
   test("builds a context-complete Pro prompt without exposing any local-tool capability", () => {
@@ -302,8 +307,8 @@ describe("ChatGPT outer-native harness v3", () => {
       },
     ];
 
-    const compiled = compileChatGptWebPrompt(request);
-    expect(compiled.text).toContain("ChatGPT Pro read-only Codex mode");
+    const compiled = compileChatGptWebPrompt(request, readOnlyCapabilities);
+    expect(compiled.text).toContain("ChatGPT Web Pro in read-only Codex mode");
     expect(compiled.text).toContain("prepared workspace evidence");
     expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
@@ -311,24 +316,24 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(compiled.text).not.toContain("codex_bind_turn");
     expect(compiled.text).not.toContain("turn_token");
     expect(compiled.text).not.toContain("Use the attached Codex Native plugin");
-    expect(() => compileChatGptWebPrompt(request, "turn_forbidden")).toThrow("must not receive");
+    expect(() => compileChatGptWebPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
-    expect(chatGptProContextWarning(request)).toContain("complete accumulated task context");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("complete accumulated task context");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
-    expect(chatGptProContextWarning(request)).toContain("does not contain local tool results yet");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("does not contain local tool results yet");
     request.context.messages = [{
       role: "user",
       content: `${SUMMARY_PREFIX}\n\nWorkspace files and tests were inspected before compaction.`,
       timestamp: 4,
     }];
-    expect(chatGptProContextWarning(request)).toContain("compaction summary");
-    expect(chatGptProContextWarning(parsed())).toBeUndefined();
-    expect(() => compileChatGptWebPrompt(parsed())).toThrow("requires a broker turn token");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("compaction summary");
+    expect(chatGptReadOnlyContextWarning(parsed(), toolCapabilities)).toBeUndefined();
+    expect(() => compileChatGptWebPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
   });
 
   test("reports conservative nonzero usage for browser text and image context", () => {
     const textRequest = parsed();
-    const textUsage = estimateChatGptWebUsage(textRequest, { answer: "done" });
+    const textUsage = estimateChatGptWebUsage(textRequest, { answer: "done" }, toolCapabilities);
     expect(textUsage).toMatchObject({ estimated: true });
     expect(textUsage.inputTokens).toBeGreaterThan(8_000);
     expect(textUsage.outputTokens).toBeGreaterThan(0);
@@ -339,7 +344,7 @@ describe("ChatGPT outer-native harness v3", () => {
       { type: "text", text: "Inspect this image" },
       { type: "image", imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", detail: "high" },
     ];
-    const imageUsage = estimateChatGptWebUsage(imageRequest, { answer: "done" });
+    const imageUsage = estimateChatGptWebUsage(imageRequest, { answer: "done" }, toolCapabilities);
     expect(imageUsage.inputTokens).toBeGreaterThanOrEqual(textUsage.inputTokens + 3_500);
   });
 
@@ -351,7 +356,7 @@ describe("ChatGPT outer-native harness v3", () => {
   test("returns one native compaction item with preserved estimated usage", () => {
     const request = parsed();
     const summary = "Completed the tool loop; continue with the deployment check.";
-    const usage = estimateChatGptWebUsage(request, { answer: summary });
+    const usage = estimateChatGptWebUsage(request, { answer: summary }, toolCapabilities);
     const response = buildResponseJSON([
       { type: "text_delta", text: "Completed the tool loop; ", phase: "final_answer" },
       { type: "text_delta", text: "continue with the deployment check.", phase: "final_answer" },
@@ -440,7 +445,7 @@ describe("ChatGPT outer-native harness v3", () => {
       },
       { role: "user", content: "continue", timestamp: 5 },
     ];
-    const compiled = compileChatGptWebPrompt(request, "turn_123456789012345678901234");
+    const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
     const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
     const envelope = JSON.parse(encoded!) as { version: number; system: string[]; messages: Array<Record<string, unknown>> };
     expect(envelope.version).toBe(3);
@@ -540,7 +545,7 @@ describe("ChatGPT outer-native harness v3", () => {
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt",
-      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000 },
+      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
@@ -647,17 +652,17 @@ describe("ChatGPT outer-native harness v3", () => {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt-pro-test",
       contextWindow: 256_000,
-      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000 },
+      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: false, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
-      expect(turn.modelId).toBe(CHATGPT_WEB_PRO_MODEL_ID);
+      expect(turn.modelId).toBe(CHATGPT_WEB_MODEL_ID);
       const prepared = await turn.prepare();
       try {
-        expect(prepared.text).toContain("ChatGPT Pro read-only Codex mode");
+        expect(prepared.text).toContain("ChatGPT Web Pro in read-only Codex mode");
         expect(prepared.text).not.toContain("turn_token");
         expect(prepared.text).not.toContain("codex_bind_turn");
         turn.onReasoningSummary?.("Reviewed the accumulated task evidence");
@@ -714,7 +719,7 @@ describe("ChatGPT outer-native harness v3", () => {
         .toBe("## Pro result\n\nPrepared context synthesized.");
       expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
 
-      const response = buildResponseJSON(events, CHATGPT_WEB_PRO_MODEL_ID) as {
+      const response = buildResponseJSON(events, CHATGPT_WEB_MODEL_ID) as {
         output: Array<{ type: string; phase?: string; content?: Array<{ text?: string }> }>;
       };
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");

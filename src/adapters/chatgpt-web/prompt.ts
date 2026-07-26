@@ -1,6 +1,6 @@
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isReadableCompactionSummaryText } from "../../responses/compaction";
-import { resolveChatGptWebModelMode } from "./model";
+import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 
 export interface ChatGptWebPromptImage {
   ref: string;
@@ -48,26 +48,34 @@ function messageEnvelope(message: CodexMessage, images: ChatGptWebPromptImage[])
   return { role: message.role, content: inputContent(message.content, images) };
 }
 
-export function chatGptProContextWarning(parsed: CodexParsedRequest): string | undefined {
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning);
+export function chatGptReadOnlyContextWarning(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+): string | undefined {
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (mode.localTools) return undefined;
+  const label = mode.effort === "pro" ? "ChatGPT Pro" : `ChatGPT Web ${mode.uiEffortLabel}`;
   const hasLocalEvidence = parsed.context.messages.some(message =>
     message.role === "toolResult"
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
   if (hasLocalEvidence) {
-    return "⚠️ ChatGPT Pro runs without local tools/MCP. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify the computer further.";
+    return `⚠️ ${label} runs without local tools/MCP. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify the computer further.`;
   }
-  return "⚠️ ChatGPT Pro runs without local tools/MCP. The accumulated context does not contain local tool results yet: Pro will see instructions and attachments, but not workspace contents. Prepare the context with GPT-5.6 Sol Extra High first, then switch to Pro.";
+  return `⚠️ ${label} runs without local tools/MCP. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. Prepare the context with a tool-capable ChatGPT Web effort first, then switch back.`;
 }
 
-export function compileChatGptWebPrompt(parsed: CodexParsedRequest, turnToken?: string): CompiledChatGptWebPrompt {
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning);
+export function compileChatGptWebPrompt(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+  turnToken?: string,
+): CompiledChatGptWebPrompt {
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (mode.localTools && !turnToken) {
     throw new Error("Tool-capable ChatGPT web mode requires a broker turn token");
   }
   if (!mode.localTools && turnToken !== undefined) {
-    throw new Error("ChatGPT Pro must not receive a local-tool capability token");
+    throw new Error("A read-only ChatGPT Web effort must not receive a local-tool capability token");
   }
   const images: ChatGptWebPromptImage[] = [];
   const envelope = {
@@ -84,7 +92,7 @@ export function compileChatGptWebPrompt(parsed: CodexParsedRequest, turnToken?: 
   const transportContract = mode.localTools
     ? [
       "For local files, commands, processes, images, user interaction, and configured MCP/apps, use the attached Codex Native plugin inside this same response.",
-      `Before the first local operation call codex_bind_turn with turn_token ${turnToken}.`,
+      `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}. This bind is mandatory on every response, even when the request appears not to need a local operation.`,
       "Use its returned binding_id on every later Codex Native call. Do not reveal either capability value in the answer.",
       "Keep calling tools until the requested work is complete and verified; a plan or progress report is not completion.",
       "Use codex_apply_patch for targeted edits, codex_exec for commands, and codex_write_stdin for sessions returned by codex_exec.",
@@ -93,11 +101,23 @@ export function compileChatGptWebPrompt(parsed: CodexParsedRequest, turnToken?: 
       "Never serialize a proposed tool call as assistant text. Make the actual MCP call and use its returned evidence.",
     ]
     : [
-      "This is ChatGPT Pro read-only Codex mode. No local computer tool, MCP app, or Codex Native plugin is attached to this response.",
+      `This is ChatGPT Web ${mode.uiEffortLabel} in read-only Codex mode. No local computer tool, MCP app, or Codex Native plugin is attached to this response.`,
       "Use only evidence already present in the complete envelope and the attached images. Prior tool results are authoritative snapshots of earlier local work.",
       "Do not claim to inspect, execute, edit, or verify anything that is not evidenced in that supplied context.",
       "If the latest request requires missing local evidence or a computer mutation, state the exact missing evidence or action instead of inventing success.",
       "Within those boundaries, perform the full analysis or synthesis requested; do not stop at a plan or progress report.",
+    ];
+  const transportResume = mode.localTools
+    ? [
+      "<codex_transport_resume>",
+      `The context envelope is complete. Your first action now must be the actual Codex Native codex_bind_turn call with turn_token ${turnToken}; emit no commentary or answer before its real result.`,
+      "After binding, execute the latest active user request under the preserved envelope instructions and keep using the returned binding_id for Codex Native calls.",
+      "</codex_transport_resume>",
+    ]
+    : [
+      "<codex_transport_resume>",
+      "The context envelope is complete. Execute the latest active user request now under the read-only transport contract above.",
+      "</codex_transport_resume>",
     ];
   const text = [
     ...sharedContract,
@@ -106,6 +126,7 @@ export function compileChatGptWebPrompt(parsed: CodexParsedRequest, turnToken?: 
     "<codex_context_json>",
     JSON.stringify(envelope),
     "</codex_context_json>",
+    ...transportResume,
   ].join("\n");
   return { text, images };
 }

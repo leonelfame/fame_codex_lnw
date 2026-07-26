@@ -1,10 +1,34 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
-const binary = resolve(process.argv[2] ?? "dist/codex-chatgpt-web");
-const root = join(tmpdir(), `codex-chatgpt-web-release-smoke-${process.pid}-${Date.now()}`);
-const appHome = join(root, "app");
+const sourceBundle = resolve(process.argv[2] ?? "dist/runtime");
+const sourceRoot = resolve(import.meta.dir, "..");
+const root = join(homedir(), `.codex-chatgpt-web-release-smoke-${process.pid}-${Date.now()}`);
+const firstLocation = join(root, "first-location");
+const runtimeRoot = join(root, "relocated-runtime");
+cpSync(sourceBundle, firstLocation, { recursive: true });
+renameSync(firstLocation, runtimeRoot);
+
+const launcher = join(runtimeRoot, "bin", "codex-chatgpt-web");
+const cliBundle = readFileSync(join(runtimeRoot, "app", "cli.js"), "utf8");
+const launcherText = readFileSync(launcher, "utf8");
+for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/codex-chatgpt-web-verify", "/tmp/codex-chatgpt-web-verify"]) {
+  if (cliBundle.includes(forbidden) || launcherText.includes(forbidden)) {
+    throw new Error(`Runtime artifact embeds an ephemeral build path: ${forbidden}`);
+  }
+}
+
+const manifest = JSON.parse(readFileSync(join(runtimeRoot, "manifest.json"), "utf8")) as Record<string, unknown>;
+if (manifest.schemaVersion !== 1 || manifest.appVersion !== "0.1.1" || manifest.playwright !== "1.62.0") {
+  throw new Error(`Unexpected runtime manifest: ${JSON.stringify(manifest)}`);
+}
+const version = Bun.spawnSync([launcher, "--version"], { stdout: "pipe", stderr: "pipe" });
+if (version.exitCode !== 0 || version.stdout.toString().trim() !== "0.1.1") {
+  throw new Error(`Relocated launcher failed: ${version.stderr.toString()}`);
+}
+
+const appHome = join(root, "app-state");
 const codexHome = join(root, "codex");
 mkdirSync(join(appHome, "browser"), { recursive: true });
 mkdirSync(codexHome, { recursive: true });
@@ -12,9 +36,9 @@ const portServer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data()
 const port = portServer.port;
 portServer.stop();
 const config = {
-  version: 1,
-  releaseVersion: "0.1.0",
-  mode: "pro-only",
+  version: 2,
+  releaseVersion: "0.1.1",
+  mode: "browser-only",
   host: "127.0.0.1",
   port,
   contextWindow: 256_000,
@@ -23,16 +47,17 @@ const config = {
   storageStatePath: join(appHome, "browser", "storage-state.json"),
   brokerSocketPath: join(appHome, "runtime", "turn-broker.sock"),
   headed: true,
+  proAvailable: true,
   autoApproveToolCalls: false,
   controlToken: "release-smoke-control-token-0123456789abcdef",
-  runtimeCommand: [binary],
+  runtimeCommand: [launcher],
   acknowledgedUnofficialAt: new Date().toISOString(),
 };
 writeFileSync(join(appHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
 
 const env = { ...process.env, CODEX_CHATGPT_WEB_HOME: appHome, CODEX_HOME: codexHome };
-const child = Bun.spawn([binary, "serve"], { env, stdout: "pipe", stderr: "pipe" });
+const child = Bun.spawn([launcher, "serve"], { env, stdout: "pipe", stderr: "pipe" });
 try {
   const deadline = Date.now() + 10_000;
   let health: Response | undefined;
@@ -43,12 +68,14 @@ try {
     } catch {}
     await Bun.sleep(50);
   }
-  if (!health?.ok) throw new Error("standalone daemon did not become healthy");
+  if (!health?.ok) throw new Error("relocated daemon did not become healthy");
   const payload = await health.json() as Record<string, unknown>;
-  if (payload.service !== "codex-chatgpt-web" || payload.mode !== "pro-only") throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
+  if (payload.service !== "codex-chatgpt-web" || payload.mode !== "browser-only") {
+    throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
+  }
 
   const models = await fetch(`http://127.0.0.1:${port}/v1/models`).then(response => response.json()) as { data?: Array<{ id?: string }> };
-  if (JSON.stringify(models.data?.map(model => model.id)) !== JSON.stringify(["chatgpt-web/gpt-5.6-sol-pro"])) {
+  if (JSON.stringify(models.data?.map(model => model.id)) !== JSON.stringify(["chatgpt-web/gpt-5.6-sol"])) {
     throw new Error(`unexpected model list: ${JSON.stringify(models)}`);
   }
   const invalid = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
@@ -76,7 +103,7 @@ try {
   const rejectedWhileDraining = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol-pro", input: "test", stream: false }),
+    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", reasoning: { effort: "high" }, input: "test", stream: false }),
   });
   if (rejectedWhileDraining.status !== 503) {
     throw new Error(`daemon accepted a new turn while draining: HTTP ${rejectedWhileDraining.status}`);
@@ -91,10 +118,10 @@ try {
   }
 
   if (process.platform === "darwin") {
-    const browser = Bun.spawnSync([binary, "browser", "check"], { env, stdout: "pipe", stderr: "pipe" });
-    if (browser.exitCode !== 0) throw new Error(`standalone Playwright smoke failed: ${browser.stderr.toString()}`);
+    const browser = Bun.spawnSync([launcher, "browser", "check"], { env, stdout: "pipe", stderr: "pipe" });
+    if (browser.exitCode !== 0) throw new Error(`relocated Playwright smoke failed: ${browser.stderr.toString()}`);
   }
-  process.stdout.write("STANDALONE_RELEASE_SMOKE_OK\n");
+  process.stdout.write("RELOCATABLE_RUNTIME_SMOKE_OK\n");
 } finally {
   child.kill("SIGTERM");
   await child.exited;

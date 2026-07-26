@@ -2,7 +2,7 @@ import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import { compileChatGptWebPrompt } from "./prompt";
-import { resolveChatGptWebModelMode } from "./model";
+import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import type { BrokerToolRequest } from "./turn-broker";
 
 // The real capability has the same length. Keeping it out of usage accounting would make
@@ -45,10 +45,13 @@ export function estimateCompiledChatGptWebInputTokens(
     + imageTokens;
 }
 
-export function estimateChatGptWebInputTokens(parsed: CodexParsedRequest): number {
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning);
+export function estimateChatGptWebInputTokens(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+): number {
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   return estimateCompiledChatGptWebInputTokens(
-    compileChatGptWebPrompt(parsed, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined),
+    compileChatGptWebPrompt(parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined),
     parsed.modelId,
   );
 }
@@ -72,8 +75,9 @@ function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {
 export function estimateChatGptWebUsage(
   parsed: CodexParsedRequest,
   evidence: ChatGptWebRoundEvidence,
+  capabilities: ChatGptWebCapabilities,
 ): CodexUsage {
-  const inputTokens = estimateChatGptWebInputTokens(parsed);
+  const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities);
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
     inputTokens,

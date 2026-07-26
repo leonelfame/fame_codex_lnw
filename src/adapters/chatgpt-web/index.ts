@@ -6,8 +6,8 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
-import { resolveChatGptWebModelMode } from "./model";
-import { chatGptProContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
 import { ChatGptReasoningFeed, ChatGptTextFeed, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
@@ -112,8 +112,12 @@ function emitTextDeltas(deltas: string[], emit: (event: AdapterEvent) => void): 
   for (const text of deltas) emit({ type: "text_delta", text, phase: "final_answer" });
 }
 
-function emitProContextWarning(parsed: CodexParsedRequest, emit: (event: AdapterEvent) => void): void {
-  const warning = chatGptProContextWarning(parsed);
+function emitProContextWarning(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+  emit: (event: AdapterEvent) => void,
+): void {
+  const warning = chatGptReadOnlyContextWarning(parsed, capabilities);
   if (!warning) return;
   emit({ type: "assistant_boundary" });
   emit({ type: "text_delta", text: warning, phase: "commentary" });
@@ -147,6 +151,10 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = TurnBroker.forSocket(brokerSocketPath(provider));
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs ?? 20 * 60_000;
+  const capabilities: ChatGptWebCapabilities = {
+    localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
+    proAvailable: provider.chatgptWeb?.proAvailable === true,
+  };
   const executionNamespace = createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
     chatgptWeb: provider.chatgptWeb ?? {},
@@ -157,7 +165,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
   ): ChatGptTurnRuntime => {
-    const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning);
+    const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
     const browserAbort = new AbortController();
     const reasoning = new ChatGptReasoningFeed();
     const text = new ChatGptTextFeed();
@@ -166,8 +174,9 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
+        capabilities,
         contextWindowTokens: provider.modelContextWindows?.[parsed.modelId] ?? provider.contextWindow,
-        prepare: async () => ({ ...compileChatGptWebPrompt(parsed), release: () => {} }),
+        prepare: async () => ({ ...compileChatGptWebPrompt(parsed, capabilities), release: () => {} }),
         abortSignal: browserAbort.signal,
         onReasoningSummary: summary => reasoning.push(summary),
         onTextDelta: delta => text.push(delta),
@@ -188,6 +197,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
+      capabilities,
       contextWindowTokens: provider.modelContextWindows?.[parsed.modelId] ?? provider.contextWindow,
       prepare: async () => {
         const turnToken = await broker.register(environment, timeoutMs + 60_000);
@@ -195,7 +205,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         tokenSettled = true;
         token.resolve(turnToken);
         try {
-          const compiled = compileChatGptWebPrompt(parsed, turnToken);
+          const compiled = compileChatGptWebPrompt(parsed, capabilities, turnToken);
           return { ...compiled, release: () => {} };
         } catch (error) {
           broker.revoke(turnToken);
@@ -228,7 +238,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   return {
     name: "chatgpt-web",
     async runTurn(parsed, incoming, emit) {
-      const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning);
+      const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
@@ -261,7 +271,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 events.push(event);
                 emit(event);
               };
-              emitProContextWarning(parsed, emitCaptured);
+              emitProContextWarning(parsed, capabilities, emitCaptured);
               reasoning = session.runtime.reasoning.drain();
               emitReasoningSummaries(reasoning, emitCaptured);
               emitTextDeltas(session.runtime.text.drain(), emitCaptured);
@@ -271,7 +281,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
-            emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }), emit);
+            emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, capabilities), emit);
             return;
           }
 
@@ -287,7 +297,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (results.length === 0) {
                 const reasoning = session.reasoningForOutstandingReplay();
                 replayEvents(session.eventsForOutstandingReplay(), emit);
-                emitToolBatch(outstanding, estimateChatGptWebUsage(parsed, { reasoning, toolRequests: outstanding }), emit);
+                emitToolBatch(outstanding, estimateChatGptWebUsage(parsed, { reasoning, toolRequests: outstanding }, capabilities), emit);
                 return;
               }
               if (results.length !== outstanding.length) {
@@ -299,7 +309,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               }
             }
           } else if (session.outstanding().length > 0) {
-            throw new Error("Read-only ChatGPT Pro runtime cannot own local tool calls");
+            throw new Error("Read-only ChatGPT Web runtime cannot own local tool calls");
           }
 
           const toolWaitAbort = new AbortController();
@@ -315,7 +325,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               emitReasoningSummaries(summaries, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            emitProContextWarning(parsed, emitRound);
+            emitProContextWarning(parsed, capabilities, emitRound);
             emitNewReasoning(session.runtime.reasoning.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken
@@ -356,20 +366,20 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 }
                 emitBrowserCompletion(
                   next.outcome,
-                  estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }),
+                  estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, capabilities),
                   emit,
                 );
                 return;
               }
               if (!turnToken || session.runtime.mode !== "tools") {
-                throw new Error("Read-only ChatGPT Pro runtime received a broker tool batch");
+                throw new Error("Read-only ChatGPT Web runtime received a broker tool batch");
               }
               if (next.requests.length === 0) throw new Error("ChatGPT tool bridge returned an empty batch");
               validateBatchTools(parsed, next.requests);
               session.setOutstanding(next.requests, roundReasoning, roundEvents);
               emitToolBatch(
                 next.requests,
-                estimateChatGptWebUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }),
+                estimateChatGptWebUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, capabilities),
                 emit,
               );
               return;

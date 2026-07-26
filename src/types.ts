@@ -308,6 +308,10 @@ export interface CodexProviderConfig {
     turnTimeoutMs?: number;
     /** Keep the single controlled browser visible. */
     headed?: boolean;
+    /** Attach the turn-bound Codex MCP capability for non-Pro efforts. */
+    localToolsEnabled?: boolean;
+    /** Account capability proven by the authenticated browser probe. */
+    proAvailable?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */
     autoApproveToolCalls?: boolean;
   };

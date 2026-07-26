@@ -1,7 +1,7 @@
 <h1 align="center">codex-chatgpt-web</h1>
 
 <p align="center">
-  <strong>Use ChatGPT Pro as a native Codex model.</strong><br>
+  <strong>Use ChatGPT Web—including Pro—as one native Codex model.</strong><br>
   Keep Codex's model picker, context, compaction, images, streaming, and task history. Change the model—not your workflow.
 </p>
 
@@ -11,15 +11,16 @@
   <img src="https://img.shields.io/badge/macOS-arm64%20%7C%20Intel-black?logo=apple" alt="macOS arm64 and Intel">
 </p>
 
-<p align="center"><code>curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh | sh -s -- --pro-only --acknowledge-unofficial</code></p>
+<p align="center"><code>curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh | sh -s -- --browser-only --acknowledge-unofficial</code></p>
 
-<p align="center"><sub>One binary · one ChatGPT login window · no API key or tunnel in Pro-only mode</sub></p>
+<p align="center"><sub>One runtime bundle · one ChatGPT login window · no API key or tunnel in browser-only mode</sub></p>
 
 **Codex has the harness. ChatGPT has Pro. This connects them.**
 
-Open a normal Codex task, choose **ChatGPT Pro (web)** in the native model picker, and keep working
-in the same Codex UI. The bridge replays the complete task context into a fresh ChatGPT Temporary
-Chat and streams the result back through Codex's native Responses protocol.
+Open a normal Codex task, choose **ChatGPT Web** in the native model picker, select an Effort from
+Light through Pro, and keep working in the same Codex UI. The bridge replays the complete task
+context into a fresh ChatGPT Temporary Chat and streams the result back through Codex's native
+Responses protocol.
 
 ```text
 Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled browser──▶ ChatGPT
@@ -31,21 +32,21 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled bro
 
 | Mode | Native picker | Context and images | Local Codex tools | Tunnel |
 | --- | --- | --- | --- | --- |
-| **Pro-only** | `ChatGPT Pro (web)` | Full | No, with a visible warning | None |
-| **Full harness** | `ChatGPT 5.6 (web + Codex tools)` plus Pro | Full | Yes, in the same ChatGPT response | Official OpenAI tunnel-client |
+| **Browser-only** | `ChatGPT Web` · Light through Pro | Full | No, with a visible warning | None |
+| **Full harness** | The same `ChatGPT Web` model and efforts | Full | Light–Extra High: yes; Pro: read-only | Official OpenAI tunnel-client |
 
 Pro is intentionally read-only with respect to the local computer: it receives all context already
-collected by Codex, but it cannot request another local tool call. Full harness mode adds the
-standard ChatGPT model with the Codex tool loop; the separate Pro entry remains read-only.
+collected by Codex, but it cannot request another local tool call. Full harness mode attaches the
+Codex tool loop to Light, Medium, High, and Extra High. The selected model never changes silently.
 
-## Install Pro
+## Install without local tools
 
 Current release target: macOS arm64 and Intel. Google Chrome is the only external runtime
 dependency.
 
 ```bash
 curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh \
-  | sh -s -- --pro-only --acknowledge-unofficial
+  | sh -s -- --browser-only --acknowledge-unofficial
 ```
 
 Then:
@@ -53,11 +54,12 @@ Then:
 1. Sign in to ChatGPT in the single Chrome window opened by setup.
 2. Let setup finish.
 3. Restart the Codex app once.
-4. Pick **ChatGPT Pro (web)** from the native model picker.
+4. Pick **ChatGPT Web** from the native model picker and choose the **Pro** effort.
 
-That command downloads one checksum-verified standalone executable, stores private browser state
-under `~/.codex-chatgpt-web`, installs a user launchd service, and applies a reversible Codex model
-catalog/config patch. It does **not** install Node, Bun, Go, OpenCodex, or a Playwright browser.
+That command downloads one checksum-verified, versioned runtime bundle, stores private browser
+state under `~/.codex-chatgpt-web`, installs a user launchd service, and applies a reversible Codex
+model catalog/config patch. It does **not** require a system Node/Bun/Go runtime, OpenCodex, or a
+Playwright browser download.
 
 Normal use reuses one long-lived Chrome process. It does not repeat setup or create a new browser
 window for every tool call. Run `codex-chatgpt-web login` only when the ChatGPT session expires.
@@ -136,7 +138,7 @@ When migrating from another Codex proxy whose catalog already contains routed mo
 native Codex catalog explicitly so those foreign entries are not copied into the new picker:
 
 ```bash
-codex-chatgpt-web setup --pro-only \
+codex-chatgpt-web setup --browser-only \
   --source-catalog /path/to/native-model-catalog.json \
   --replace-codex-route \
   --acknowledge-unofficial
@@ -149,8 +151,8 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-`verify` runs dependency auditing, strict TypeScript checking, 39 harness/MCP/config tests, a
-compiled standalone Responses smoke test, and a real headless launch of system Chrome. The runtime
+`verify` runs dependency auditing, strict TypeScript checking, 56 harness/MCP/config tests, a
+relocatable runtime smoke test, and a real headless launch of system Chrome. The runtime
 contains no generic provider registry, alternate LLM adapter, dashboard, or compatibility shim.
 
 Maintainer details:

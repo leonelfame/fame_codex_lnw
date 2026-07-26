@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browserLoginStateExists, loginToChatGpt, loginVerificationMarkerPath } from "../src/browser-login";
+import { CHATGPT_TEMPORARY_CHAT_URL } from "../src/chatgpt-session";
 import { defaultConfig } from "../src/config";
 
 test("login starts with normal Chrome and captures state in a headed Keychain-aware context", async () => {
@@ -14,7 +15,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
   const previousLog = process.env.CODEX_LOGIN_ARG_LOG;
   process.env.CODEX_LOGIN_ARG_LOG = argsLog;
   try {
-    const config = defaultConfig("pro-only");
+    const config = defaultConfig("browser-only");
     config.chromeExecutablePath = executable;
     config.storageStatePath = join(root, "browser", "storage-state.json");
     await loginToChatGpt(config, { timeoutMs: 100 }).catch(() => {});
@@ -23,7 +24,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
     const firstLaunch = launches[0] ?? "";
     expect(firstLaunch).toContain("--new-window");
     expect(firstLaunch).toContain("--user-data-dir=");
-    expect(firstLaunch).toContain("https://chatgpt.com/?temporary-chat=true");
+    expect(firstLaunch).toContain(CHATGPT_TEMPORARY_CHAT_URL);
     expect(firstLaunch).not.toContain("--remote-debugging-pipe");
     expect(launches[1]).not.toContain("--headless");
   } finally {
@@ -36,7 +37,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
 test("a storage-state file is not trusted without a verification marker", () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-login-state-"));
   try {
-    const config = defaultConfig("pro-only");
+    const config = defaultConfig("browser-only");
     config.storageStatePath = join(root, "storage-state.json");
     writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
     expect(browserLoginStateExists(config)).toBe(false);

@@ -4,7 +4,12 @@ import { dirname, join } from "node:path";
 import { chromium, type BrowserContextOptions } from "playwright-core";
 import type { AppConfig } from "./config";
 import { atomicWriteFile } from "./config";
-import { assertAuthenticatedChatGptPage, assertTemporaryChatPage, detectChatGptProCapability } from "./chatgpt-session";
+import {
+  assertAuthenticatedChatGptPage,
+  assertTemporaryChatPage,
+  CHATGPT_TEMPORARY_CHAT_URL,
+  detectChatGptProCapability,
+} from "./chatgpt-session";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
@@ -47,7 +52,7 @@ async function inspectStoredState(
     const verifierContext = await verifierBrowser.newContext({ storageState });
     try {
       const verifierPage = await verifierContext.newPage();
-      await verifierPage.goto("https://chatgpt.com/?temporary-chat=true", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 30_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
       await assertTemporaryChatPage(verifierPage);
@@ -95,7 +100,7 @@ export async function loginToChatGpt(
     "--disable-background-mode",
     "--no-first-run",
     "--no-default-browser-check",
-    "https://chatgpt.com/?temporary-chat=true",
+    CHATGPT_TEMPORARY_CHAT_URL,
   ], { env: process.env, stdio: "ignore" });
   const loginExit = await new Promise<number>((resolveExit, rejectExit) => {
     loginBrowser.once("error", rejectExit);
@@ -114,7 +119,7 @@ export async function loginToChatGpt(
   });
   try {
     const page = context.pages()[0] ?? await context.newPage();
-    await page.goto("https://chatgpt.com/?temporary-chat=true", {
+    await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });

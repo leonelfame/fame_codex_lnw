@@ -1,14 +1,27 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { defaultConfig, saveConfig } from "../src/config";
 import { installCodexIntegration } from "../src/codex-integration";
 import { startServer } from "../src/server";
 
 const codex = resolve(process.argv[2] ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
-const bundled = Bun.spawnSync([codex, "debug", "models", "--bundled"], { stdout: "pipe", stderr: "pipe" });
-if (bundled.exitCode !== 0) throw new Error(`Could not read bundled Codex catalog: ${bundled.stderr.toString()}`);
-const sourceCatalog = JSON.parse(bundled.stdout.toString()) as { models?: unknown[] };
+function runCodex(args: string[], env = process.env): { stdout: string; stderr: string } {
+  const result = spawnSync(codex, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 15_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(`Codex ${args.join(" ")} failed: ${result.error?.message || result.stderr || result.signal || `exit ${result.status}`}`);
+  }
+  return { stdout: result.stdout, stderr: result.stderr };
+}
+
+const bundled = runCodex(["debug", "models", "--bundled"]);
+const sourceCatalog = JSON.parse(bundled.stdout) as { models?: unknown[] };
 if (!sourceCatalog.models?.some(model => model && typeof model === "object" && (model as { slug?: string }).slug === "gpt-5.6-sol")) {
   throw new Error("Bundled Codex catalog has no gpt-5.6-sol template");
 }
@@ -19,7 +32,7 @@ process.env.CODEX_CHATGPT_WEB_HOME = join(root, "app");
 mkdirSync(process.env.CODEX_HOME, { recursive: true });
 const source = join(root, "bundled-models.json");
 writeFileSync(source, `${JSON.stringify(sourceCatalog)}\n`);
-const config = defaultConfig("pro-only");
+const config = defaultConfig("browser-only");
 config.proAvailable = true;
 const port = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
 config.port = port.port;
@@ -29,17 +42,15 @@ saveConfig(config);
 installCodexIntegration(config, { sourceCatalogPath: source });
 const server = startServer(config);
 try {
-  const result = Bun.spawnSync([codex, "debug", "models"], {
-    env: { ...process.env, CODEX_HOME: process.env.CODEX_HOME },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (result.exitCode !== 0) throw new Error(`Codex rejected the generated catalog: ${result.stderr.toString()}`);
-  const catalog = JSON.parse(result.stdout.toString()) as { models?: Array<{ slug?: string; supported_reasoning_levels?: unknown[] }> };
-  const pro = catalog.models?.find(model => model.slug === "chatgpt-web/gpt-5.6-sol-pro");
-  if (!pro) throw new Error("Codex did not expose the generated Pro model");
-  if (!Array.isArray(pro.supported_reasoning_levels) || pro.supported_reasoning_levels.length !== 0) {
-    throw new Error("Codex did not preserve the Pro no-effort model contract");
+  const result = runCodex(["debug", "models"], { ...process.env, CODEX_HOME: process.env.CODEX_HOME });
+  const catalog = JSON.parse(result.stdout) as { models?: Array<{ slug?: string; supported_reasoning_levels?: unknown[] }> };
+  const web = catalog.models?.find(model => model.slug === "chatgpt-web/gpt-5.6-sol");
+  if (!web) throw new Error("Codex did not expose the generated ChatGPT Web model");
+  const efforts = Array.isArray(web.supported_reasoning_levels)
+    ? (web.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
+    : [];
+  if (JSON.stringify(efforts) !== JSON.stringify(["light", "medium", "high", "xhigh", "pro"])) {
+    throw new Error(`Codex did not preserve the ChatGPT Web effort contract: ${JSON.stringify(efforts)}`);
   }
   process.stdout.write("NATIVE_CODEX_CATALOG_SMOKE_OK\n");
 } finally {

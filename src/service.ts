@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import type { AppConfig } from "./config";
-import { atomicWriteFile, getConfigDir } from "./config";
+import { assertDurableRuntimeCommand, atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
 
 const LABEL = "io.github.codex-chatgpt-web.daemon";
@@ -34,6 +34,18 @@ function launchDomain(): string {
 
 function serviceTarget(): string {
   return `${launchDomain()}/${LABEL}`;
+}
+
+async function bootstrapService(path: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "unknown launchctl bootstrap failure";
+  while (Date.now() < deadline) {
+    const result = runCommand("launchctl", ["bootstrap", launchDomain(), path]);
+    if (result.status === 0) return;
+    lastError = result.stderr.trim() || result.stdout.trim() || `exit status ${result.status}`;
+    await new Promise(resolveWait => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`launchctl bootstrap ${launchDomain()} ${path} failed after ${timeoutMs}ms: ${lastError}`);
 }
 
 function plist(config: AppConfig): string {
@@ -92,6 +104,7 @@ export function getServiceStatus(): ServiceStatus {
 
 export function installService(config: AppConfig): ServiceStatus {
   assertMacOs();
+  assertDurableRuntimeCommand(config.runtimeCommand);
   const path = plistPath();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   mkdirSync(join(getConfigDir(), "logs"), { recursive: true, mode: 0o700 });
@@ -163,12 +176,23 @@ export async function restartService(config: AppConfig): Promise<ServiceStatus> 
   if (!getServiceStatus().loaded) return startService();
   const lease = await acquireDrain(config);
   try {
-    runChecked("launchctl", ["kickstart", "-k", serviceTarget()]);
+    runChecked("launchctl", ["bootout", serviceTarget()]);
+    await bootstrapService(plistPath());
   } catch (error) {
     await lease.release().catch(() => {});
     throw error;
   }
   return getServiceStatus();
+}
+
+export function removeLegacyRuntimeArtifacts(config: AppConfig): void {
+  const legacyWrapper = join(getConfigDir(), "bin", "serve-with-playwright.sh");
+  const legacyVendor = join(getConfigDir(), "vendor");
+  if (config.runtimeCommand.some(part => part === legacyWrapper || part.startsWith(`${legacyVendor}/`))) {
+    throw new Error("Refusing to remove legacy runtime artifacts while the active service still references them");
+  }
+  rmSync(legacyWrapper, { force: true });
+  rmSync(legacyVendor, { recursive: true, force: true });
 }
 
 export async function stopService(config: AppConfig): Promise<ServiceStatus> {

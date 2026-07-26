@@ -121,7 +121,7 @@ export async function runDoctor(): Promise<DoctorReport> {
       detail: "Verify it once at https://chatgpt.com/#settings/Connectors while the tunnel is ready.",
     });
   } else {
-    checks.push({ id: "tools", status: "warning", message: "Pro-only mode intentionally has no local tools or MCP tunnel" });
+    checks.push({ id: "tools", status: "warning", message: "Browser-only mode intentionally has no local tools or MCP tunnel" });
   }
 
   return {

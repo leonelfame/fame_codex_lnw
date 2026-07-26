@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
@@ -16,6 +17,36 @@ interface ResolvedTurn {
 
 const bindingSchema = z.string().min(20).max(256).describe("Opaque binding_id returned by codex_bind_turn.");
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
+
+function scopeHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function requestScopeSummary(extra: {
+  sessionId?: string;
+  requestId: string | number;
+  _meta?: unknown;
+  requestInfo?: unknown;
+}): string {
+  const meta = extra._meta && typeof extra._meta === "object" && !Array.isArray(extra._meta)
+    ? Object.entries(extra._meta as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => ({
+        key,
+        type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,
+        ...(typeof value === "string" ? { chars: value.length, hash: scopeHash(value) } : {}),
+      }))
+    : [];
+  const requestInfoKeys = extra.requestInfo && typeof extra.requestInfo === "object"
+    ? Object.keys(extra.requestInfo as Record<string, unknown>).sort()
+    : [];
+  return JSON.stringify({
+    requestId: String(extra.requestId),
+    session: extra.sessionId ? { chars: extra.sessionId.length, hash: scopeHash(extra.sessionId) } : null,
+    meta,
+    requestInfoKeys,
+  });
+}
 
 function result(value: Record<string, unknown>, isError = false) {
   return {
@@ -134,7 +165,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       inputSchema: { turn_token: z.string().min(20).max(256) },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ turn_token }) => {
+    async ({ turn_token }, extra) => {
+      console.error(`[chatgpt-web-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
       const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, { method: "claim", token: turn_token });
       const commandTool = exactTool(claimed.environment, "exec_command") ?? exactTool(claimed.environment, "shell_command");
       const gateway = execGateway(claimed.environment);
@@ -170,7 +202,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ binding_id, cmd, workdir, yield_time_ms, max_output_tokens, tty }) => {
+    async ({ binding_id, cmd, workdir, yield_time_ms, max_output_tokens, tty }, extra) => {
+      console.error(`[chatgpt-web-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
       if (!tool) throw new Error("This Codex turn did not advertise a native command tool");

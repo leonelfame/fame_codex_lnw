@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AppConfig, RuntimeMode } from "./config";
-import { currentRuntimeCommand, defaultConfig, getConfigPath, loadConfig, saveConfig } from "./config";
+import { currentRuntimeCommand, defaultConfig, getConfigPath, loadConfigForSetup, saveConfig } from "./config";
 import {
   browserLoginStateExists,
   inspectBrowserLoginCapabilities,
@@ -9,7 +9,7 @@ import {
   storedBrowserLoginCapabilities,
 } from "./browser-login";
 import { installCodexIntegration } from "./codex-integration";
-import { assertServiceIdle, getServiceStatus, installService, restartService } from "./service";
+import { assertServiceIdle, getServiceStatus, installService, removeLegacyRuntimeArtifacts, restartService } from "./service";
 import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, waitForTunnelReady } from "./tunnel";
 import { VERSION } from "./version";
 
@@ -41,7 +41,7 @@ export interface SetupResult {
 
 function loadExistingConfig(): AppConfig | undefined {
   if (!existsSync(getConfigPath())) return undefined;
-  return loadConfig();
+  return loadConfigForSetup();
 }
 
 function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
@@ -130,7 +130,7 @@ function baseConfig(existing: AppConfig | undefined, options: SetupOptions): App
 }
 
 async function configureTunnel(config: AppConfig, existing: AppConfig | undefined, options: SetupOptions): Promise<void> {
-  if (config.mode === "pro-only") {
+  if (config.mode === "browser-only") {
     delete config.tunnel;
     return;
   }
@@ -186,10 +186,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     proAvailable = (await inspectBrowserLoginCapabilities(config)).proAvailable;
   }
   config.proAvailable = proAvailable === true;
-  if (config.mode === "pro-only" && !config.proAvailable) {
-    throw new Error("This ChatGPT account is authenticated but does not have the Pro reasoning tier required by --pro-only");
-  }
-
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
@@ -215,6 +211,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   installService(config);
   if (changedWhileLoaded && options.restartService && existing) await restartService(existing);
   await waitForProxy(config);
+  removeLegacyRuntimeArtifacts(config);
 
   let tunnelReady: boolean | null = null;
   if (config.mode === "full") {

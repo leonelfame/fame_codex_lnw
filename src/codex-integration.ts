@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -90,54 +91,112 @@ function reasoningLevel(template: JsonObject, effort: string, fallbackDescriptio
   return source ? cloneObject(source) : { effort, description: fallbackDescription };
 }
 
+function validateSourceCatalog(source: unknown, label: string): JsonObject {
+  const catalog = asObject(source, label);
+  if (!Array.isArray(catalog.models)) throw new Error(`${label} is missing a models array`);
+  if (!catalog.models.some(model => modelSlug(model) === "gpt-5.6-sol")) {
+    throw new Error(`${label} is missing the native gpt-5.6-sol entry`);
+  }
+  return catalog;
+}
+
+function bundledCatalogSnapshotPath(): string {
+  return join(getConfigDir(), "codex", "source-model-catalog.bundled.json");
+}
+
+function codexCommandCandidates(): string[] {
+  const configured = process.env.CODEX_CHATGPT_WEB_CODEX_BINARY?.trim();
+  return [
+    ...(configured ? [configured] : []),
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "codex",
+  ];
+}
+
+function readJsonCatalogFile(path: string): { path: string; source: JsonObject } {
+  if (!existsSync(path)) throw new Error(`Codex source model catalog does not exist: ${path}`);
+  return { path, source: validateSourceCatalog(JSON.parse(readFileSync(path, "utf8")), `Codex source model catalog at ${path}`) };
+}
+
+function readBundledCodexCatalog(): { path: string; source: JsonObject } {
+  const errors: string[] = [];
+  for (const command of codexCommandCandidates()) {
+    const result = spawnSync(command, ["debug", "models", "--bundled"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15_000,
+    });
+    if (result.status !== 0) {
+      const detail = result.error?.message || result.stderr || result.signal || `exit ${result.status}`;
+      errors.push(`${command}: ${detail.trim()}`);
+      continue;
+    }
+    try {
+      const source = validateSourceCatalog(JSON.parse(result.stdout), `bundled Codex catalog from ${command}`);
+      const path = bundledCatalogSnapshotPath();
+      atomicWriteFile(path, `${JSON.stringify(source, null, 2)}\n`);
+      return { path, source };
+    } catch (error) {
+      errors.push(`${command}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(
+    "Could not read Codex's bundled model catalog. "
+    + "Install or update the ChatGPT app, or pass --source-catalog PATH explicitly. "
+    + `Attempts: ${errors.join("; ")}`,
+  );
+}
+
+function readPreservedSourceCatalog(
+  existingJournal: CodexIntegrationJournal | undefined,
+): { path: string; source: JsonObject } | undefined {
+  if (!existingJournal) return undefined;
+  const previous = existingJournal.previous.model_catalog_json;
+  if (!previous.present) return undefined;
+  if (!previous.value) {
+    throw new Error("Codex integration journal is missing the preserved pre-install model catalog path");
+  }
+  const path = resolve(previous.value);
+  if (path === resolve(getManagedCatalogPath())) {
+    throw new Error("Codex integration journal points its preserved source at the managed catalog; refusing recursive catalog generation");
+  }
+  return readJsonCatalogFile(path);
+}
+
 export function buildManagedCatalog(source: unknown, config: AppConfig): JsonObject {
-  const catalog = cloneObject(asObject(source, "Codex model catalog"));
-  if (!Array.isArray(catalog.models)) throw new Error("Codex model catalog is missing a models array");
-  const models = catalog.models.filter(model => modelSlug(model) !== STANDARD_MODEL && modelSlug(model) !== PRO_MODEL);
+  const catalog = cloneObject(validateSourceCatalog(source, "Codex model catalog"));
+  const sourceModels = catalog.models as unknown[];
+  const models = sourceModels.filter(model => modelSlug(model) !== STANDARD_MODEL && modelSlug(model) !== PRO_MODEL);
   const template = models.find(model => modelSlug(model) === "gpt-5.6-sol");
   if (!template || typeof template !== "object" || Array.isArray(template)) {
     throw new Error("The native gpt-5.6-sol catalog entry is missing. Update Codex, then rerun setup.");
   }
   const native = template as JsonObject;
   const compactLimit = Math.floor(config.contextWindow * 0.9);
-  const common: JsonObject = {
+  const webModel: JsonObject = {
     ...cloneObject(native),
+    slug: STANDARD_MODEL,
+    display_name: "ChatGPT Web",
+    description: "ChatGPT web through one native Codex model surface. Effort selects Light, Medium, High, Extra High, or account-gated Pro.",
     context_window: config.contextWindow,
     max_context_window: config.contextWindow,
     auto_compact_token_limit: compactLimit,
     input_modalities: ["text", "image"],
     visibility: "list",
     supported_in_api: false,
-    tool_mode: null,
+    tool_mode: config.mode === "full" ? native.tool_mode : null,
     upgrade: null,
+    default_reasoning_level: "high",
+    supported_reasoning_levels: [
+      { effort: "light", description: "Light — ChatGPT Instant 5.5" },
+      reasoningLevel(native, "medium", "Medium"),
+      reasoningLevel(native, "high", "High"),
+      reasoningLevel(native, "xhigh", "Extra High"),
+      ...(config.proAvailable ? [{ effort: "pro", description: "Pro" }] : []),
+    ],
   };
-  const pro: JsonObject = {
-    ...cloneObject(common),
-    slug: PRO_MODEL,
-    display_name: "ChatGPT Pro (web)",
-    description: "ChatGPT Pro through a private browser turn. Full Codex context and images; local tools are unavailable.",
-    supported_reasoning_levels: [],
-  };
-  delete pro.default_reasoning_level;
-  delete pro.availability_nux;
-
-  const injected: JsonObject[] = [];
-  if (config.mode === "full") {
-    injected.push({
-      ...cloneObject(common),
-      slug: STANDARD_MODEL,
-      display_name: "ChatGPT 5.6 (web + Codex tools)",
-      description: "ChatGPT web reasoning with the native Codex tool harness through a turn-bound MCP connector.",
-      default_reasoning_level: "high",
-      supported_reasoning_levels: [
-        reasoningLevel(native, "medium", "Balances speed and reasoning depth"),
-        reasoningLevel(native, "high", "Greater reasoning depth for complex tasks"),
-        reasoningLevel(native, "xhigh", "Extra high reasoning depth for complex tasks"),
-      ],
-    });
-  }
-  if (config.proAvailable) injected.push(pro);
-  catalog.models = [...injected, ...models];
+  delete webModel.availability_nux;
+  catalog.models = [webModel, ...models];
   catalog.etag = null;
   catalog.fetched_at = new Date().toISOString();
   return catalog;
@@ -208,6 +267,14 @@ function findTopLevelAssignment(lines: string[], key: string): AssignmentLocatio
 }
 
 type ManagedAssignmentKey = "model_provider" | "model_catalog_json";
+
+function migrateLegacyDefaultModel(text: string): string {
+  const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
+  const current = findTopLevelAssignment(lines, "model");
+  if (current.index === undefined || current.value !== PRO_MODEL) return text;
+  lines[current.index] = `model = ${JSON.stringify(STANDARD_MODEL)}`;
+  return `${lines.join("\n")}${text.endsWith("\n") || lines.length > 0 ? "\n" : ""}`;
+}
 
 function setTopLevelAssignments(
   text: string,
@@ -309,14 +376,6 @@ function readJournal(): CodexIntegrationJournal | undefined {
   return value as CodexIntegrationJournal;
 }
 
-function sourceCatalogFrom(configText: string, explicit?: string): string {
-  if (explicit) return resolve(explicit);
-  const lines = configText.length > 0 ? configText.replace(/\n$/, "").split("\n") : [];
-  const configured = findTopLevelAssignment(lines, "model_catalog_json");
-  if (configured.value && resolve(configured.value) !== getManagedCatalogPath()) return resolve(configured.value);
-  return join(getCodexHome(), "models_cache.json");
-}
-
 export function installCodexIntegration(
   config: AppConfig,
   options: InstallCodexIntegrationOptions = {},
@@ -338,9 +397,11 @@ export function installCodexIntegration(
     }
   }
 
-  const sourceCatalogPath = resolve(options.sourceCatalogPath || existingJournal?.sourceCatalogPath || sourceCatalogFrom(configText));
-  if (!existsSync(sourceCatalogPath)) throw new Error(`Codex source model catalog does not exist: ${sourceCatalogPath}`);
-  const source = JSON.parse(readFileSync(sourceCatalogPath, "utf8")) as unknown;
+  const loadedSource = options.sourceCatalogPath
+    ? readJsonCatalogFile(resolve(options.sourceCatalogPath))
+    : readPreservedSourceCatalog(existingJournal) ?? readBundledCodexCatalog();
+  const sourceCatalogPath = loadedSource.path;
+  const source = loadedSource.source;
   const managed = `${JSON.stringify(buildManagedCatalog(source, config), null, 2)}\n`;
   const catalogPath = getManagedCatalogPath();
   const installed = {
@@ -356,7 +417,7 @@ export function installCodexIntegration(
     );
   }
 
-  const patched = setTopLevelAssignments(configText, installed);
+  const patched = setTopLevelAssignments(migrateLegacyDefaultModel(configText), installed);
   const block = providerBlock(config);
   const installedText = installProviderBlock(patched.text, block, existingJournal?.providerBlock);
   const journal: CodexIntegrationJournal = {
