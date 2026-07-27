@@ -9,6 +9,8 @@
   <a href="https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml"><img src="https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/macOS-arm64%20%7C%20Intel-black?logo=apple" alt="macOS arm64 and Intel">
+  <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
+  <img src="https://img.shields.io/badge/Windows-coming_soon-0078d4?logo=windows11" alt="Windows support coming soon">
 </p>
 
 **Codex has the harness. ChatGPT has Pro. This connects them.**
@@ -37,11 +39,13 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled Chr
   computer. Every browser turn starts in a fresh ChatGPT Temporary Chat and receives the complete
   accumulated Codex context, so browser chats are not reused across tasks or added to normal
   ChatGPT history.
-- **ChatGPT-native capabilities stay available.** Pro and other read-only modes cannot reach the
-  local Codex computer, but they can still use first-party ChatGPT capabilities such as web search
-  and research when those capabilities are available on the account.
-- **Real outer tool loop.** In full mode, ChatGPT calls the tools from the active Codex harness and
-  their results return to the same browser response; tool calls are not simulated as text.
+- **The full Codex harness over MCP.** In full mode, Instant through Extra High can use the active
+  Codex task's filesystem, shell, images, approvals, and configured tools/apps through MCP. Calls
+  and real results stay inside the same browser response—nothing is simulated as text.
+- **Pro stays useful.** Pro is the one exception: ChatGPT's current Pro mode does not expose the
+  custom MCP connector this bridge needs. Its native capabilities, including web search and
+  research, remain available. Gather local workspace context with Instant through Extra High,
+  switch to Pro, and Pro receives the complete accumulated Codex task for deeper analysis.
 - **Fail-closed and manually tested.** Model selection, long inline context, images, streaming,
   visible trace, compaction, native tool rounds, cancellation, and Pro were exercised end-to-end on
   macOS. UI drift and missing capabilities produce explicit errors rather than silent fallbacks.
