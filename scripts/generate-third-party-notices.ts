@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 interface PackageJson {
@@ -78,6 +78,7 @@ const output = [
   "",
 ].join("\n");
 
-const destination = join(root, "dist", "THIRD_PARTY_NOTICES.txt");
+const destination = resolve(process.argv[2] ?? join(root, "dist", "THIRD_PARTY_NOTICES.txt"));
+mkdirSync(dirname(destination), { recursive: true });
 writeFileSync(destination, output);
 process.stdout.write(`Wrote ${destination} (${visited.size} runtime packages)\n`);

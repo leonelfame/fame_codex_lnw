@@ -306,6 +306,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async runStage<T>(traceId: string, stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T> {
+    const startedAt = performance.now();
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
@@ -317,10 +318,10 @@ export class ChatGptBrowserWorker {
         }, timeoutMs);
       });
       const value = await Promise.race([action(), timeout]);
-      console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed`);
+      console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
-      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${error instanceof Error ? error.message : String(error)}`);
       if (timedOut) this.discardBrowser();
       throw error;
     } finally {

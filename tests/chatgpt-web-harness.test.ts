@@ -764,7 +764,11 @@ describe("ChatGPT outer-native harness v3", () => {
   test("serves the complete outer-native bridge contract over MCP stdio", async () => {
     const socketPath = join(tmpdir(), `cgw-h3-mcp-${process.pid}-${Date.now()}.sock`);
     const broker = TurnBroker.forSocket(socketPath);
-    const token = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 60_000);
+    const gatewayOnlyEnvironment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    gatewayOnlyEnvironment.tools = gatewayOnlyEnvironment.tools.filter(tool => (
+      tool.name === "exec" || tool.name === "search_openai_docs"
+    ));
+    const token = await broker.register(gatewayOnlyEnvironment, 60_000);
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
@@ -792,6 +796,7 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(bindingId).toStartWith("binding_");
       expect((bound.structuredContent as { execution: string }).execution).toBe("outer_codex_native");
       expect((bound.structuredContent as { outer_tool_gateway: string }).outer_tool_gateway).toBe("exec");
+      expect((bound.structuredContent as { command_tool: string }).command_tool).toBe("exec_command");
 
       const inventory = await call("codex_tool_inventory", { binding_id: bindingId, query: "docs" });
       const discovered = (inventory.structuredContent as { tools: Array<{ wire_name: string }> }).tools;

@@ -37,6 +37,7 @@ interface ToolWaiter {
 }
 
 interface TurnChannel {
+  traceId: string;
   environment: PendingTurn;
   bindingId?: string;
   queuedCallIds: string[];
@@ -100,11 +101,12 @@ export class TurnBroker {
 
   private constructor(readonly socketPath: string) {}
 
-  async register(environment: ChatGptTurnEnvironment, ttlMs: number): Promise<string> {
+  async register(environment: ChatGptTurnEnvironment, ttlMs: number, traceId = "unknown"): Promise<string> {
     await this.start();
     this.prune();
     const token = opaqueId("turn");
     const channel: TurnChannel = {
+      traceId,
       environment: { ...environment, expiresAt: Date.now() + ttlMs },
       queuedCallIds: [],
       invocations: new Map(),
@@ -153,6 +155,7 @@ export class TurnBroker {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
+    console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
 
@@ -311,6 +314,9 @@ export class TurnBroker {
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
       binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
       binding.channel.queuedCallIds.push(callId);
+      console.info(
+        `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
+      );
       this.scheduleToolWaiters(binding.channel);
     });
   }
@@ -332,6 +338,9 @@ export class TurnBroker {
   private wakeToolWaiters(channel: TurnChannel): void {
     if (channel.queuedCallIds.length === 0 || channel.waiters.size === 0) return;
     const batch = this.takeQueued(channel);
+    console.info(
+      `[chatgpt-web] broker trace=${channel.traceId} delivered calls=${batch.length} tools=${batch.map(request => request.wireName).join(",")}`,
+    );
     const waiters = [...channel.waiters];
     channel.waiters.clear();
     const first = waiters.shift();

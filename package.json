@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
   "repository": {
@@ -31,10 +31,11 @@
     "check-version": "bun run scripts/check-version.ts",
     "typecheck": "bunx tsc --noEmit",
     "licenses": "bun run scripts/generate-third-party-notices.ts",
+    "clean": "bun run scripts/clean.ts",
     "build": "bun run scripts/build-runtime-bundle.ts",
     "smoke": "bun run scripts/smoke-release.ts dist/runtime",
     "smoke:codex": "bun run scripts/smoke-codex-catalog.ts",
-    "verify": "bun run check-version && bun run audit && bun run typecheck && bun run test && bun run build && bun run licenses && bun run smoke"
+    "verify": "bun run scripts/verify.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

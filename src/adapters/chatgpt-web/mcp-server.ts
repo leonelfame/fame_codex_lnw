@@ -92,17 +92,18 @@ function execGateway(environment: ChatGptTurnEnvironment): CodexTool | undefined
   return tool?.freeform ? tool : undefined;
 }
 
-function nestedToolProperty(tool: CodexTool): string {
-  return wireName(tool).replace(/[^A-Za-z0-9_$]/g, "_");
+function gatewayNestedToolName(toolName: string): string {
+  return toolName.replace(/[^A-Za-z0-9_$]/g, "_");
 }
 
 function execGatewayProgram(
-  tool: CodexTool,
+  nestedToolName: string,
+  freeform: boolean,
   payload: { arguments?: Record<string, unknown>; input?: string },
 ): string {
-  const nestedInput = tool.freeform ? payload.input ?? "" : payload.arguments ?? {};
+  const nestedInput = freeform ? payload.input ?? "" : payload.arguments ?? {};
   return [
-    `const result = await tools[${JSON.stringify(nestedToolProperty(tool))}](${JSON.stringify(nestedInput)});`,
+    `const result = await tools[${JSON.stringify(gatewayNestedToolName(nestedToolName))}](${JSON.stringify(nestedInput)});`,
     "const emit = value => {",
     "  if (Array.isArray(value)) { for (const item of value) emit(item); return; }",
     "  if (value && typeof value === \"object\") {",
@@ -153,8 +154,24 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
   ) => {
     const gateway = execGateway(bound);
     return gateway && gateway !== tool
-      ? invoke(bindingId, bound, gateway, { input: execGatewayProgram(tool, payload) })
+      ? invoke(bindingId, bound, gateway, { input: execGatewayProgram(wireName(tool), tool.freeform === true, payload) })
       : invoke(bindingId, bound, tool, payload);
+  };
+
+  const invokeNestedNative = (
+    bindingId: string,
+    bound: ChatGptTurnEnvironment & { expiresAt: number },
+    nestedToolName: string,
+    freeform: boolean,
+    payload: { arguments?: Record<string, unknown>; input?: string },
+  ) => {
+    const gateway = execGateway(bound);
+    if (!gateway) {
+      throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);
+    }
+    return invoke(bindingId, bound, gateway, {
+      input: execGatewayProgram(nestedToolName, freeform, payload),
+    });
   };
 
   server.registerTool(
@@ -180,7 +197,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         sandbox: claimed.environment.sandboxPolicy.type,
         expires_at: new Date(claimed.environment.expiresAt).toISOString(),
         tool_count: claimed.environment.tools.length,
-        command_tool: commandTool ? wireName(commandTool) : null,
+        command_tool: commandTool ? wireName(commandTool) : gateway ? "exec_command" : null,
         outer_tool_gateway: gateway ? wireName(gateway) : null,
         capabilities: ["native_tool_loop", "session_history", "exec", "apply_patch", "images", "tool_registry"],
       });
@@ -206,8 +223,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       console.error(`[chatgpt-web-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
-      if (!tool) throw new Error("This Codex turn did not advertise a native command tool");
-      const args = tool.name === "exec_command"
+      const commandName = tool?.name ?? "exec_command";
+      const args = commandName === "exec_command"
         ? {
             cmd,
             ...(workdir ? { workdir } : {}),
@@ -220,7 +237,9 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
             ...(workdir ? { workdir } : {}),
             ...(yield_time_ms !== undefined ? { timeout_ms: yield_time_ms } : {}),
           };
-      return invokeNative(binding_id, bound, tool, { arguments: args });
+      return tool
+        ? invokeNative(binding_id, bound, tool, { arguments: args })
+        : invokeNestedNative(binding_id, bound, commandName, false, { arguments: args });
     },
   );
 
@@ -241,13 +260,15 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     async ({ binding_id, session_id, chars, yield_time_ms, max_output_tokens }) => {
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "write_stdin");
-      if (!tool) throw new Error("This Codex turn did not advertise write_stdin");
-      return invokeNative(binding_id, bound, tool, { arguments: {
+      const payload = { arguments: {
         session_id,
         ...(chars !== undefined ? { chars } : {}),
         ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
         ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
-      } });
+      } };
+      return tool
+        ? invokeNative(binding_id, bound, tool, payload)
+        : invokeNestedNative(binding_id, bound, "write_stdin", false, payload);
     },
   );
 
@@ -262,7 +283,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     async ({ binding_id, patch }) => {
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "apply_patch");
-      if (!tool) throw new Error("This Codex turn did not advertise apply_patch");
+      if (!tool) return invokeNestedNative(binding_id, bound, "apply_patch", true, { input: patch });
       return tool.freeform
         ? invokeNative(binding_id, bound, tool, { input: patch })
         : invokeNative(binding_id, bound, tool, { arguments: { input: patch } });
@@ -284,8 +305,10 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     async ({ binding_id, path, detail }) => {
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "view_image");
-      if (!tool) throw new Error("This Codex turn did not advertise view_image");
-      return invokeNative(binding_id, bound, tool, { arguments: { path, ...(detail ? { detail } : {}) } });
+      const payload = { arguments: { path, ...(detail ? { detail } : {}) } };
+      return tool
+        ? invokeNative(binding_id, bound, tool, payload)
+        : invokeNestedNative(binding_id, bound, "view_image", false, payload);
     },
   );
 

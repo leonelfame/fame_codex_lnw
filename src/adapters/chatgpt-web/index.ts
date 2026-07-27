@@ -209,7 +209,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       reasoning: parsed.options.reasoning,
       capabilities,
       prepare: async () => {
-        const turnToken = await broker.register(environment, timeoutMs + 60_000);
+        const turnToken = await broker.register(environment, timeoutMs + 60_000, traceId);
         activeToken = turnToken;
         tokenSettled = true;
         token.resolve(turnToken);
