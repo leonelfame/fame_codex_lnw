@@ -1,14 +1,14 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
 import {
   CHATGPT_CONTEXT_FILE_NAME,
+  CHATGPT_INLINE_CONTEXT_MAX_CHARS,
   CHATGPT_INTERNAL_COMPACTION_MARKER,
   compileChatGptWebPrompt,
 } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
-function request(reasoning: "high" | "max"): CodexParsedRequest {
+function request(reasoning: "low" | "high" | "max"): CodexParsedRequest {
   return {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
@@ -54,6 +54,16 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
 });
 
+test("uses the public Instant name without leaking the browser menu alias into the prompt", () => {
+  const compiled = compileChatGptWebPrompt(
+    request("low"),
+    { localToolsEnabled: false, proAvailable: true },
+  );
+
+  expect(compiled.text).toContain("This is ChatGPT Web Instant in read-only Codex mode");
+  expect(compiled.text).not.toContain("Instant 5.5");
+});
+
 test("large contexts move intact into an ordered JSONL attachment", () => {
   const token = "turn_12345678901234567890123456789012";
   const largeContent = "x".repeat(600_000);
@@ -78,7 +88,8 @@ test("large contexts move intact into an ordered JSONL attachment", () => {
   expect(compiled.text).not.toContain("x".repeat(1_000));
   expect(compiled.text).toContain(token);
   expect(compiled.text).toContain(`<codex_context_attachment>`);
-  expect(compiled.text).toContain(compiled.contextFile!.sha256);
+  expect(compiled.text).not.toContain("sha256");
+  expect(compiled.text).not.toContain("SHA-256");
 
   const records = compiled.contextFile!.content.trimEnd().split("\n").map(line => JSON.parse(line));
   expect(records).toHaveLength(compiled.contextFile!.recordCount);
@@ -95,6 +106,36 @@ test("large contexts move intact into an ordered JSONL attachment", () => {
     message: { role: "tool_result", tool_call_id: "call_large" },
   });
   expect(records.at(-1).message.content).toBe(largeContent);
-  expect(createHash("sha256").update(compiled.contextFile!.content).digest("hex"))
-    .toBe(compiled.contextFile!.sha256);
+});
+
+test("keeps exactly 40,000 serialized context characters inline and attaches only above it", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const makeRequest = (contentLength: number): CodexParsedRequest => ({
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: { messages: [{ role: "user", content: "x".repeat(contentLength), timestamp: 1 }] },
+    stream: true,
+    options: { reasoning: "high" },
+  });
+  const emptyEnvelopeLength = JSON.stringify({
+    version: 3,
+    system: [],
+    messages: [{ role: "user", content: "" }],
+  }).length;
+  const exactContentLength = CHATGPT_INLINE_CONTEXT_MAX_CHARS - emptyEnvelopeLength;
+
+  const exact = compileChatGptWebPrompt(
+    makeRequest(exactContentLength),
+    { localToolsEnabled: true, proAvailable: true },
+    token,
+  );
+  const above = compileChatGptWebPrompt(
+    makeRequest(exactContentLength + 1),
+    { localToolsEnabled: true, proAvailable: true },
+    token,
+  );
+
+  expect(exact.contextFile).toBeUndefined();
+  expect(exact.text).toContain("x".repeat(exactContentLength));
+  expect(above.contextFile?.name).toBe(CHATGPT_CONTEXT_FILE_NAME);
+  expect(above.text).not.toContain("x".repeat(1_000));
 });

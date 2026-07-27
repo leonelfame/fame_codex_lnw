@@ -4,6 +4,7 @@ import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapter
 test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, proAvailable: true };
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", capabilities)).toMatchObject({
+    displayLabel: "Instant",
     uiEffortLabel: "Instant 5.5",
     localTools: true,
   });

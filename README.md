@@ -17,16 +17,16 @@
 
 **Codex has the harness. ChatGPT has Pro. This connects them.**
 
-Open a normal Codex task, choose **ChatGPT Web — Light**, **Medium**, **High**, **Extra High**, or
+Open a normal Codex task, choose **ChatGPT Web — Instant**, **Medium**, **High**, **Extra High**, or
 **Pro** in the native model picker, and keep working in the same Codex UI. Each model has one fixed
 browser mode. The bridge replays the complete task
 context into a fresh ChatGPT Temporary Chat and streams the result back through Codex's native
 Responses protocol.
 
-Small contexts stay inline. Once the serialized context exceeds 64 KiB, the bridge uploads one
-ordered, SHA-256-identified `codex-context.jsonl` attachment instead of forcing hundreds of
-thousands of characters through ChatGPT's contenteditable composer. The model receives the same
-system, message, tool-result, and image-reference records without truncation.
+Contexts of up to 40,000 serialized characters stay inline. Above that boundary, the bridge
+uploads one ordered `codex-context.jsonl` attachment instead of forcing hundreds of thousands of
+characters through ChatGPT's contenteditable composer. The model receives the same system,
+message, tool-result, and image-reference records without truncation.
 
 ```text
 Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled browser──▶ ChatGPT
@@ -39,14 +39,14 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled bro
 | Mode | Native picker | Context and images | Local Codex tools | Tunnel |
 | --- | --- | --- | --- | --- |
 | **Browser-only** | Four fixed models + Pro when available | Full | No, with a visible warning | None |
-| **Full harness** | The same fixed models | Full | Light–Extra High: yes; Pro: read-only | Official OpenAI tunnel-client |
+| **Full harness** | The same fixed models | Full | Instant–Extra High: yes; Pro: read-only | Official OpenAI tunnel-client |
 
 Codex Desktop always renders an Effort row for custom models. Every ChatGPT Web model therefore
 advertises exactly one immutable protocol effort; the model selection is authoritative. The Pro
 model uses Codex's `ultra` wire value and binds explicitly to ChatGPT **Pro**. Pro is intentionally
 read-only with respect to the local computer: it receives all context already
 collected by Codex, but it cannot request another local tool call. Full harness mode attaches the
-Codex tool loop to Light, Medium, High, and Extra High. The selected model never changes silently.
+Codex tool loop to Instant, Medium, High, and Extra High. The selected model never changes silently.
 
 ## Install without local tools
 

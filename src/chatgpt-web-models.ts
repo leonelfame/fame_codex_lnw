@@ -22,8 +22,8 @@ export interface ChatGptWebModelRoute {
 export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
   {
     slug: "chatgpt-web/light",
-    displayName: "ChatGPT Web — Light",
-    description: "ChatGPT Web Light (Instant 5.5) through the native Codex harness.",
+    displayName: "ChatGPT Web — Instant",
+    description: "ChatGPT Web Instant through the native Codex harness.",
     codexEffort: "low",
     adapterEffort: "low",
     requiresPro: false,

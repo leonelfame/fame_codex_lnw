@@ -293,6 +293,7 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", toolCapabilities)).toEqual({
       modelId: CHATGPT_WEB_MODEL_ID,
       effort: "max",
+      displayLabel: "Pro",
       uiEffortLabel: "Pro",
       localTools: false,
     });

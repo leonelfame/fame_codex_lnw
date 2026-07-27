@@ -20,7 +20,7 @@ codex-chatgpt-web daemon
 
 ### `browser-only`
 
-- Exposes `chatgpt-web/light`, `medium`, `high`, and `extra-high`; each model advertises exactly one
+- Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
   immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
   the authenticated account exposes Pro.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
@@ -29,7 +29,7 @@ codex-chatgpt-web daemon
 
 ### `full`
 
-- Exposes the same fixed models; Light through Extra High are tool-capable, while Pro remains
+- Exposes the same fixed models; Instant through Extra High are tool-capable, while Pro remains
   read-only.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
@@ -41,11 +41,11 @@ Playwright CLI is a development/debugging tool and is not part of the runtime. T
 long-lived Chrome process. A Codex turn gets a fresh Temporary Chat page; the preceding page is
 closed. This prevents transcript leakage without creating a new Chrome window per tool call.
 
-Contexts through 64 KiB remain an inline JSON envelope. Larger contexts become one in-memory
-JSONL attachment with a manifest, ordered system/message records, image references, and a SHA-256
-identity repeated in the short composer contract. Nothing is written to a temporary context file,
-and the complete attachment remains included in conservative usage accounting. File acceptance
-and send readiness are verified before the turn begins.
+Contexts through 40,000 serialized characters remain an inline JSON envelope. Larger contexts
+become one in-memory JSONL attachment with a manifest, ordered system/message records, and image
+references. Nothing is written to a temporary context file, and the complete attachment remains
+included in conservative usage accounting. File acceptance and send readiness are verified before
+the turn begins.
 
 ChatGPT owns context compaction inside that browser response. The appended models intentionally
 advertise no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
