@@ -40,6 +40,19 @@ export interface SetupResult {
   connectorSetupRequired: boolean;
 }
 
+export interface ExistingFullSetupCredentials {
+  tunnelId: boolean;
+  runtimeKey: boolean;
+}
+
+export function existingFullSetupCredentials(existing: AppConfig | undefined): ExistingFullSetupCredentials {
+  const tunnel = existing?.mode === "full" ? existing.tunnel : undefined;
+  return {
+    tunnelId: Boolean(tunnel?.tunnelId),
+    runtimeKey: Boolean(tunnel?.runtimeKeyFile && existsSync(tunnel.runtimeKeyFile)),
+  };
+}
+
 function loadExistingConfig(): AppConfig | undefined {
   if (!existsSync(getConfigPath())) return undefined;
   return loadConfigForSetup();

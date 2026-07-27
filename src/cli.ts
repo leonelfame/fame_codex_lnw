@@ -4,14 +4,14 @@ import { Writable } from "node:stream";
 import { existsSync, rmSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { getConfigDir, getConfigPath, loadConfig } from "./config";
+import { getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
 import { uninstallCodexIntegration } from "./codex-integration";
 import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
 import { assertServiceIdle, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
-import { setup, type SetupOptions } from "./setup";
+import { existingFullSetupCredentials, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
@@ -137,12 +137,19 @@ async function setupCommand(args: string[]): Promise<void> {
   if (!acknowledged) throw new Error("Setup cancelled: acknowledgement was not provided");
   options.acknowledgedUnofficial = true;
 
-  if (full && (!options.tunnelId || (!options.runtimeKeyFile && !existsSync(managedRuntimeKeyPath()))) && stdin.isTTY) {
+  const existing = existsSync(getConfigPath()) ? loadConfigForSetup() : undefined;
+  const reusableCredentials = existingFullSetupCredentials(existing);
+  const needsTunnelId = !options.tunnelId && !reusableCredentials.tunnelId;
+  const needsRuntimeKey = !options.runtimeKeyFile
+    && !reusableCredentials.runtimeKey
+    && !existsSync(managedRuntimeKeyPath());
+
+  if (full && (needsTunnelId || needsRuntimeKey) && stdin.isTTY) {
     stdout.write("Full mode needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
     stdout.write("Tunnels: https://platform.openai.com/settings/organization/tunnels\n");
     stdout.write("Runtime keys: https://platform.openai.com/settings/organization/api-keys\n");
-    if (!options.tunnelId) options.tunnelId = await prompt("Tunnel id: ");
-    if (!options.runtimeKeyFile && !existsSync(managedRuntimeKeyPath())) {
+    if (needsTunnelId) options.tunnelId = await prompt("Tunnel id: ");
+    if (needsRuntimeKey) {
       options.runtimeKeyValue = await secretPrompt("Runtime key (hidden): ");
     }
   }

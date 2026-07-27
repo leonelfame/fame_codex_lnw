@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { defaultConfig } from "../src/config";
 import { createTunnelConfig } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
-import { tunnelWorkerRuntimeChanged } from "../src/setup";
+import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
 const roots: string[] = [];
 
@@ -55,10 +55,30 @@ describe("tunnel launchd ownership", () => {
     before.releaseVersion = "0.1.3";
     before.runtimeCommand = [runtime];
     const after = structuredClone(before);
-    after.releaseVersion = "0.1.6";
+    after.releaseVersion = "0.1.7";
 
     expect(tunnelWorkerRuntimeChanged(before, after)).toBe(true);
     after.releaseVersion = before.releaseVersion;
     expect(tunnelWorkerRuntimeChanged(before, after)).toBe(false);
+  });
+
+  test("reuses complete full-mode tunnel credentials during setup updates", () => {
+    const root = join(tmpdir(), `codex-chatgpt-web-existing-tunnel-${process.pid}-${Date.now()}`);
+    roots.push(root);
+    process.env.CODEX_CHATGPT_WEB_HOME = root;
+    const key = join(root, "secrets", "runtime.key");
+    mkdirSync(join(root, "secrets"), { recursive: true });
+    writeFileSync(key, "secret");
+    const config = defaultConfig("full");
+    config.tunnel = createTunnelConfig({
+      binaryPath: process.execPath,
+      runtimeKeyFile: key,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+
+    expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: true });
+    rmSync(key);
+    expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: false });
+    expect(existingFullSetupCredentials(defaultConfig("browser-only"))).toEqual({ tunnelId: false, runtimeKey: false });
   });
 });
