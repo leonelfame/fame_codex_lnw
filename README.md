@@ -1,8 +1,12 @@
-<h1 align="center">codex-chatgpt-web</h1>
+<h1 align="center">ChatGPT Web for Codex</h1>
 
 <p align="center">
-  <strong>Use ChatGPT Web—including Pro—as native Codex models.</strong><br>
-  Change the model, not your workflow.
+  <strong>Use ChatGPT Web (including Pro) as native Codex models.</strong><br>
+  Change the model tier, save your workflow.
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -12,8 +16,6 @@
   <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
   <img src="https://img.shields.io/badge/Windows-coming_soon-0078d4?logo=windows11" alt="Windows support coming soon">
 </p>
-
-**Codex has the harness. ChatGPT has Pro. This connects them.**
 
 Pick **ChatGPT Web — Instant**, **Medium**, **High**, **Extra High**, or **Pro** in Codex's native
 model picker. The bridge sends the complete Codex task context to a fresh ChatGPT Temporary Chat,
