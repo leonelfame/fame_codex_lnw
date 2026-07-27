@@ -136,7 +136,7 @@ export interface DrainLease {
   release: () => Promise<void>;
 }
 
-async function control(config: AppConfig, action: "drain" | "resume"): Promise<Record<string, unknown>> {
+async function control(config: AppConfig, action: "drain" | "resume" | "cancel-browser-turns"): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
@@ -150,6 +150,15 @@ async function control(config: AppConfig, action: "drain" | "resume"): Promise<R
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function cancelBrowserTurns(config: AppConfig): Promise<number> {
+  const result = await control(config, "cancel-browser-turns");
+  const cancelled = result.cancelled_browser_turns;
+  if (!Number.isInteger(cancelled) || (cancelled as number) < 0) {
+    throw new Error("daemon did not acknowledge browser-turn cancellation");
+  }
+  return cancelled as number;
 }
 
 export async function negotiateDrain(

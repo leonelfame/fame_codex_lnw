@@ -10,7 +10,7 @@ import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
-import { assertServiceIdle, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
+import { assertServiceIdle, cancelBrowserTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
@@ -28,7 +28,7 @@ Usage:
   codex-chatgpt-web browser check
   codex-chatgpt-web serve
   codex-chatgpt-web mcp [--broker-socket PATH]
-  codex-chatgpt-web service <status|install|start|restart|stop>
+  codex-chatgpt-web service <status|install|start|restart|stop|cancel-turns>
   codex-chatgpt-web tunnel <status|start|restart|stop|key-import>
   codex-chatgpt-web open <tunnels|runtime-keys|connectors>
   codex-chatgpt-web uninstall --yes
@@ -176,6 +176,11 @@ async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
   const config = action === "status" ? undefined : loadConfig();
+  if (action === "cancel-turns") {
+    const cancelled = await cancelBrowserTurns(config!);
+    stdout.write(`${JSON.stringify({ cancelledBrowserTurns: cancelled }, null, 2)}\n`);
+    return;
+  }
   const status = action === "status" ? getServiceStatus()
     : action === "install" ? installService(config!)
       : action === "start" ? startService()

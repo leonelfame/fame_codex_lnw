@@ -139,6 +139,7 @@ See the full [architecture](docs/architecture.md).
 ```bash
 codex-chatgpt-web doctor
 codex-chatgpt-web service status
+codex-chatgpt-web service cancel-turns # abort browser turns after explicitly stopping their Codex tasks
 codex-chatgpt-web tunnel status       # full mode
 codex-chatgpt-web browser check       # invisible Chrome smoke test
 codex-chatgpt-web login               # refresh an expired ChatGPT session
@@ -151,6 +152,9 @@ active, so Codex keeps its built-in `openai` provider, native task history, and 
 Setup refuses to overwrite a different existing route unless
 `--replace-codex-route` is explicit. Stop, restart, setup replacement, and uninstall also refuse to
 proceed while either a Responses request or browser/tool turn is active.
+If a task is stopped between native tool rounds, Codex has no open Responses request on which to
+signal cancellation. Run `service cancel-turns` after stopping that task; it sends an authenticated
+abort to every retained browser turn without stopping the daemon.
 
 When migrating from another Codex proxy, remove it first or explicitly allow this setup to replace
 its routing assignments reversibly:

@@ -243,9 +243,11 @@ export class ChatGptTurnSessions {
     return session;
   }
 
-  clear(): void {
+  clear(): number {
+    const cancelled = this.entries.size;
     for (const session of this.entries.values()) session.cancel();
     this.entries.clear();
+    return cancelled;
   }
 
   activeCount(): number {

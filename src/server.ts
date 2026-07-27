@@ -198,10 +198,10 @@ export async function compactRequest(req: Request, _config: AppConfig): Promise<
 
 export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
   const startedAt = Date.now();
-  let activeHttpTurns = 0;
   let draining = false;
-  const activity = () => ({
-    active_http_turns: activeHttpTurns,
+  const activity = (server: { pendingRequests: number }) => ({
+    // Bun includes the health/drain request currently evaluating this value.
+    active_http_turns: Math.max(0, server.pendingRequests - 1),
     active_browser_turns: chatGptTurnSessions.activeCount(),
   });
   const controlAuthorized = (req: Request): boolean => {
@@ -214,7 +214,7 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
-    fetch(req) {
+    fetch(req, server) {
       const url = new URL(req.url);
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
@@ -226,13 +226,18 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
           accepting_turns: !draining,
-          ...activity(),
+          ...activity(server),
         });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         draining = url.pathname === "/admin/drain";
-        return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
+        return Response.json({ status: "ok", accepting_turns: !draining, ...activity(server) });
+      }
+      if (req.method === "POST" && url.pathname === "/admin/cancel-browser-turns") {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        const cancelled = chatGptTurnSessions.clear();
+        return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity(server) });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         return modelsRequest(req, config);
@@ -245,13 +250,11 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        activeHttpTurns += 1;
-        return responseRequest(req, config).finally(() => { activeHttpTurns -= 1; });
+        return responseRequest(req, config);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        activeHttpTurns += 1;
-        return compactRequest(req, config).finally(() => { activeHttpTurns -= 1; });
+        return compactRequest(req, config);
       }
       return new Response("Not found", { status: 404 });
     },
