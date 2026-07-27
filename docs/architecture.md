@@ -41,6 +41,12 @@ Playwright CLI is a development/debugging tool and is not part of the runtime. T
 long-lived Chrome process. A Codex turn gets a fresh Temporary Chat page; the preceding page is
 closed. This prevents transcript leakage without creating a new Chrome window per tool call.
 
+Contexts through 64 KiB remain an inline JSON envelope. Larger contexts become one in-memory
+JSONL attachment with a manifest, ordered system/message records, image references, and a SHA-256
+identity repeated in the short composer contract. Nothing is written to a temporary context file,
+and the complete attachment remains included in conservative usage accounting. File acceptance
+and send readiness are verified before the turn begins.
+
 ChatGPT owns context compaction inside that browser response. The appended models intentionally
 advertise no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
 fail explicitly instead of opening a second summarizer turn. A prompt-level checkpoint marker is

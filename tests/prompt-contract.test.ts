@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { CHATGPT_INTERNAL_COMPACTION_MARKER, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
+import {
+  CHATGPT_CONTEXT_FILE_NAME,
+  CHATGPT_INTERNAL_COMPACTION_MARKER,
+  compileChatGptWebPrompt,
+} from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -47,4 +52,49 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("turn_token");
   expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
+});
+
+test("large contexts move intact into an ordered JSONL attachment", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const largeContent = "x".repeat(600_000);
+  const large = request("high");
+  large.context.messages.push({
+    role: "toolResult",
+    toolCallId: "call_large",
+    toolName: "exec_command",
+    content: largeContent,
+    isError: false,
+    timestamp: 3,
+  });
+  const compiled = compileChatGptWebPrompt(
+    large,
+    { localToolsEnabled: true, proAvailable: true },
+    token,
+  );
+
+  expect(compiled.contextFile?.name).toBe(CHATGPT_CONTEXT_FILE_NAME);
+  expect(compiled.contextFile?.mimeType).toBe("application/jsonl");
+  expect(compiled.text.length).toBeLessThan(10_000);
+  expect(compiled.text).not.toContain("x".repeat(1_000));
+  expect(compiled.text).toContain(token);
+  expect(compiled.text).toContain(`<codex_context_attachment>`);
+  expect(compiled.text).toContain(compiled.contextFile!.sha256);
+
+  const records = compiled.contextFile!.content.trimEnd().split("\n").map(line => JSON.parse(line));
+  expect(records).toHaveLength(compiled.contextFile!.recordCount);
+  expect(records[0]).toMatchObject({
+    type: "codex_context_manifest",
+    version: 4,
+    system_records: 1,
+    message_records: 3,
+  });
+  expect(records[1]).toEqual({ type: "system", index: 0, content: "preserve-system" });
+  expect(records.at(-1)).toMatchObject({
+    type: "message",
+    index: 2,
+    message: { role: "tool_result", tool_call_id: "call_large" },
+  });
+  expect(records.at(-1).message.content).toBe(largeContent);
+  expect(createHash("sha256").update(compiled.contextFile!.content).digest("hex"))
+    .toBe(compiled.contextFile!.sha256);
 });

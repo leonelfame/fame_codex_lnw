@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
@@ -12,6 +12,21 @@ import { assertAuthenticatedChatGptPage, assertTemporaryChatPage, CHATGPT_TEMPOR
 import { loginVerificationMarkerPath } from "../../browser-login";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+
+export const DEFAULT_CHATGPT_TURN_TIMEOUT_MS = 40 * 60_000;
+export const CHATGPT_RESPONSE_DOM_GRACE_MS = 30_000;
+export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
+
+const browserStageTimeouts = {
+  browserPage: 60_000,
+  navigation: 70_000,
+  composerReady: 40_000,
+  sessionVerification: 40_000,
+  effortSelection: 120_000,
+  promptAttachment: 60_000,
+  fileAttachment: 120_000,
+  send: 20_000,
+} as const;
 
 export interface BrowserTurn {
   traceId: string;
@@ -39,19 +54,15 @@ interface ResolvedBrowserConfig {
 }
 
 export function chatGptTurnIsComplete(state: {
+  responsePresent: boolean;
   running: boolean;
   currentText: string;
-  initialText: string;
   completionActionVisible: boolean;
-  completionActionCount: number;
-  initialCompletionActionCount: number;
-  sawRunning: boolean;
 }): boolean {
-  return !state.running
+  return state.responsePresent
+    && !state.running
     && state.currentText.length > 0
-    && state.completionActionVisible
-    && (state.completionActionCount > state.initialCompletionActionCount
-      || (state.sawRunning && state.currentText !== state.initialText));
+    && state.completionActionVisible;
 }
 
 export class ChatGptCompletionTracker {
@@ -64,7 +75,7 @@ export class ChatGptCompletionTracker {
       this.candidate = undefined;
       return false;
     }
-    const signature = `${state.completionActionCount}\0${state.currentText}`;
+    const signature = state.currentText;
     if (this.candidate?.signature !== signature) {
       this.candidate = { signature, since: now };
       return false;
@@ -74,42 +85,37 @@ export class ChatGptCompletionTracker {
 }
 
 export class ChatGptTurnDomHealthTracker {
-  private sawAssistant = false;
-  private missingSince?: number;
+  private sawResponse = false;
+  private missingResponseSince?: number;
   private emptyCompletionSince?: number;
 
   constructor(
-    private readonly missingAssistantMs = 15_000,
-    private readonly emptyCompletionMs = 5_000,
+    private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
+    private readonly emptyCompletionMs = CHATGPT_EMPTY_RESPONSE_GRACE_MS,
   ) {}
 
   update(state: {
-    assistantPresent: boolean;
+    responsePresent: boolean;
     running: boolean;
-    sawRunning: boolean;
     currentText: string;
     completionActionVisible: boolean;
-    completionActionCount: number;
-    initialCompletionActionCount: number;
   }, now = Date.now()): string | undefined {
-    if (state.assistantPresent) {
-      this.sawAssistant = true;
-      this.missingSince = undefined;
+    if (state.responsePresent) {
+      this.sawResponse = true;
+      this.missingResponseSince = undefined;
     } else {
-      this.missingSince ??= now;
-      if (now - this.missingSince >= this.missingAssistantMs) {
-        return this.sawAssistant
+      this.missingResponseSince ??= now;
+      if (now - this.missingResponseSince >= this.missingResponseMs) {
+        return this.sawResponse
           ? "ChatGPT response DOM disappeared while the browser turn was active"
           : "ChatGPT did not create a response DOM after the message was sent";
       }
     }
 
-    const emptyCompletion = state.assistantPresent
-      && state.sawRunning
+    const emptyCompletion = state.responsePresent
       && !state.running
       && state.currentText.length === 0
-      && state.completionActionVisible
-      && state.completionActionCount > state.initialCompletionActionCount;
+      && state.completionActionVisible;
     if (!emptyCompletion) {
       this.emptyCompletionSince = undefined;
     } else {
@@ -131,6 +137,24 @@ export interface ChatGptVisibleTraceEvent {
   kind: "reasoning" | "commentary";
   text: string;
 }
+
+interface ChatGptResponseDomSnapshot {
+  responsePresent: boolean;
+  visibleText: string;
+  fullHtml: string;
+  stableHtml: string;
+  completionActionVisible: boolean;
+  traceBlocks: ChatGptVisibleTraceBlock[];
+}
+
+const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
+  responsePresent: false,
+  visibleText: "",
+  fullHtml: "",
+  stableHtml: "",
+  completionActionVisible: false,
+  traceBlocks: [],
+});
 
 /** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
 export class ChatGptVisibleTraceTracker {
@@ -174,7 +198,10 @@ export class ChatGptVisibleTraceTracker {
 }
 
 export function chatGptEffortLabelsMatch(current: string, desired: string): boolean {
-  const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+  const normalize = (value: string) => {
+    const label = value.replace(/\s+/g, " ").trim();
+    return /^(?:Instant|Instant 5\.5)$/.test(label) ? "Instant 5.5" : label;
+  };
   return normalize(current) === normalize(desired);
 }
 
@@ -190,7 +217,7 @@ function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserCon
     appName: configured.appName?.trim() || "Codex Native",
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")),
-    turnTimeoutMs: configured.turnTimeoutMs ?? 20 * 60_000,
+    turnTimeoutMs: configured.turnTimeoutMs ?? DEFAULT_CHATGPT_TURN_TIMEOUT_MS,
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
   };
@@ -221,6 +248,19 @@ export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array
     if (totalBytes > 50_000_000) throw new Error("ChatGPT web input images exceed the 50 MB per-turn limit");
     return { name: `${image.ref}.${extension}`, mimeType: parsed.mediaType.toLowerCase(), buffer };
   });
+}
+
+export function chatGptPromptFilePayloads(
+  prompt: CompiledChatGptWebPrompt,
+): Array<{ name: string; mimeType: string; buffer: Buffer }> {
+  const context = prompt.contextFile
+    ? [{
+      name: prompt.contextFile.name,
+      mimeType: prompt.contextFile.mimeType,
+      buffer: Buffer.from(prompt.contextFile.content, "utf8"),
+    }]
+    : [];
+  return [...context, ...chatGptImageFilePayloads(prompt.images)];
 }
 
 export class ChatGptBrowserWorker {
@@ -332,7 +372,7 @@ export class ChatGptBrowserWorker {
       name: /^(?:Instant(?:\s+5\.5)?|Medium|High|Extra High|Pro)$/,
     }).last();
     try {
-      await currentEffort.waitFor({ state: "visible", timeout: 35_000 });
+      await currentEffort.waitFor({ state: "visible", timeout: 70_000 });
     } catch {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
@@ -342,7 +382,7 @@ export class ChatGptBrowserWorker {
       page.getByRole("menuitemradio", { name: mode.uiEffortLabel, exact: true }),
     ).last();
     try {
-      await effortChoice.waitFor({ state: "visible", timeout: 10_000 });
+      await effortChoice.waitFor({ state: "visible", timeout: 20_000 });
     } catch {
       const choices = (await page.locator('[role="menuitem"], [role="menuitemradio"]').allInnerTexts().catch(() => []))
         .map(value => value.replace(/\s+/g, " ").trim())
@@ -354,8 +394,13 @@ export class ChatGptBrowserWorker {
     }
     await effortChoice.click();
     try {
-      await page.getByRole("button", { name: mode.uiEffortLabel, exact: true }).last()
-        .waitFor({ state: "visible", timeout: 20_000 });
+      const deadline = Date.now() + 40_000;
+      while (Date.now() < deadline) {
+        const visibleLabel = await currentEffort.innerText().catch(() => "");
+        if (chatGptEffortLabelsMatch(visibleLabel, mode.uiEffortLabel)) return mode;
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      }
+      throw new Error("effort control did not render the selected label");
     } catch {
       const visible = await page.getByRole("button", {
         name: /^(?:Instant(?:\s+5\.5)?|Medium|High|Extra High|Pro)$/,
@@ -365,7 +410,6 @@ export class ChatGptBrowserWorker {
         + (visible.length > 0 ? `; visible effort control: ${visible.at(-1)!.replace(/\s+/g, " ").trim()}` : ""),
       );
     }
-    return mode;
   }
 
   private async attachedPromptText(page: Page): Promise<string> {
@@ -378,11 +422,11 @@ export class ChatGptBrowserWorker {
         .map(child => child.textContent ?? "")
         .join("\n")
         .trimStart();
-    }, undefined, { timeout: 10_000 });
+    }, undefined, { timeout: 20_000 });
   }
 
   private async assertPromptAttached(page: Page, prompt: string): Promise<void> {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 10_000;
     let observed = "";
     while (Date.now() < deadline) {
       observed = await this.attachedPromptText(page);
@@ -405,25 +449,44 @@ export class ChatGptBrowserWorker {
     }
     await composer.fill(`@${this.config.appName}`);
     const appResult = page.getByRole("group").filter({ hasText: this.config.appName }).last();
-    await appResult.waitFor({ state: "visible", timeout: 10_000 });
+    await appResult.waitFor({ state: "visible", timeout: 20_000 });
     await appResult.click();
     const selectedPlugin = composer.getByRole("link", { name: this.config.appName, exact: true });
-    await selectedPlugin.waitFor({ state: "visible", timeout: 5_000 });
+    await selectedPlugin.waitFor({ state: "visible", timeout: 10_000 });
     await composer.focus();
     await page.keyboard.press("End");
     await page.keyboard.insertText(` ${prompt}`);
     await this.assertPromptAttached(page, prompt);
   }
 
-  private async attachImages(page: Page, images: ChatGptWebPromptImage[]): Promise<void> {
-    if (images.length === 0) return;
-    const files = chatGptImageFilePayloads(images);
+  private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt): Promise<void> {
+    const files = chatGptPromptFilePayloads(prompt);
+    if (files.length === 0) return;
     const removeButtons = page.locator('button[aria-label^="Remove file "]');
     const existing = await removeButtons.count();
-    const input = page.locator('input[data-testid="upload-photos-input"]');
-    await input.waitFor({ state: "attached", timeout: 10_000 });
+    const input = prompt.contextFile
+      ? page.locator('input#upload-files')
+      : page.locator('input[data-testid="upload-photos-input"]');
+    await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
-    await removeButtons.nth(existing + files.length - 1).waitFor({ state: "visible", timeout: 30_000 });
+    try {
+      await removeButtons.nth(existing + files.length - 1).waitFor({ state: "visible", timeout: 60_000 });
+    } catch {
+      const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
+        .map(text => text.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      throw new Error(
+        `ChatGPT did not accept all prompt attachments`
+        + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
+      );
+    }
+    const send = page.getByTestId("send-button");
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      if (await send.isEnabled().catch(() => false)) return;
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+    }
+    throw new Error("ChatGPT accepted the prompt attachments but did not make the message ready to send");
   }
 
   private async handleToolConfirmation(page: Page): Promise<boolean> {
@@ -435,47 +498,43 @@ export class ChatGptBrowserWorker {
       );
     }
     const allowOnce = page.getByRole("button", { name: "Allow once", exact: true }).last();
-    await allowOnce.waitFor({ state: "visible", timeout: 5_000 });
+    await allowOnce.waitFor({ state: "visible", timeout: 10_000 });
     await allowOnce.click();
     return true;
   }
 
-  private async expandVisibleReasoning(page: Page): Promise<void> {
-    await page.evaluate(() => {
-      const assistants = [...document.querySelectorAll<HTMLElement>('[data-message-author-role="assistant"]')];
-      const root = assistants.at(-1)?.closest<HTMLElement>('section[data-testid^="conversation-turn-"]');
-      if (!root) return;
-      const collapsed = [...root.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')]
-        .find(button => /(?:thinking|reasoning|research)/i.test(button.innerText));
-      if (!collapsed) return;
-      const style = getComputedStyle(collapsed);
-      const rect = collapsed.getBoundingClientRect();
-      if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0) {
-        collapsed.click();
-      }
-    });
-  }
-
-  private async visibleTraceBlocks(page: Page): Promise<ChatGptVisibleTraceBlock[]> {
-    return page.evaluate(() => {
-      const assistants = [...document.querySelectorAll<HTMLElement>('[data-message-author-role="assistant"]')];
-      const assistantRoot = assistants.at(-1);
-      if (!assistantRoot) return [];
-      const root = assistantRoot.closest<HTMLElement>('section[data-testid^="conversation-turn-"]') ?? assistantRoot;
+  private async responseDomSnapshot(responseTurn: Locator): Promise<ChatGptResponseDomSnapshot> {
+    return responseTurn.evaluate(element => {
+      const root = element as HTMLElement;
       const visible = (candidate: HTMLElement): boolean => {
         const style = getComputedStyle(candidate);
         const rect = candidate.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        return style.display !== "none"
+          && style.visibility !== "hidden"
+          && style.opacity !== "0"
+          && rect.width > 0
+          && rect.height > 0;
       };
+
+      const rendered = [...root.querySelectorAll<HTMLElement>(".markdown")].at(-1);
+      const renderedChildren = rendered ? [...rendered.children] : [];
+      const completionAction = [...root.querySelectorAll<HTMLElement>('button[aria-label="Copy response"]')]
+        .find(visible);
       const candidates = new Map<HTMLElement, "markdown" | "status">();
       root.querySelectorAll<HTMLElement>(".markdown").forEach(candidate => candidates.set(candidate, "markdown"));
       root.querySelectorAll<HTMLElement>(
         'button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"]',
       ).forEach(candidate => {
+        if (candidate.closest('[aria-label="Response actions"]')) return;
         const semantic = candidate.closest<HTMLElement>("button") ?? candidate;
         if (!candidates.has(semantic)) candidates.set(semantic, "status");
       });
-      return [...candidates]
+      root.querySelectorAll<HTMLElement>("[data-streaming-response-status]").forEach(container => {
+        if (![...candidates.keys()].some(candidate => container.contains(candidate))) {
+          candidates.set(container, "status");
+        }
+      });
+      const traceBlocks = [...candidates]
         .filter(([candidate]) => visible(candidate))
         .sort(([left], [right]) => left === right
           ? 0
@@ -485,13 +544,20 @@ export class ChatGptBrowserWorker {
         .filter((block, index, blocks) => (
           blocks.findIndex(other => other.kind === block.kind && other.text === block.text) === index
         ));
-    });
+      return {
+        responsePresent: true,
+        visibleText: rendered?.innerText.trim() ?? "",
+        fullHtml: rendered?.innerHTML ?? "",
+        stableHtml: renderedChildren.slice(0, -1).map(child => child.outerHTML).join(""),
+        completionActionVisible: completionAction !== undefined,
+        traceBlocks,
+      };
+    }, undefined, { timeout: 2_000 }).catch(() => absentResponseDomSnapshot());
   }
 
-  private async stalledTurnDiagnostic(page: Page): Promise<string> {
-    const assistant = page.locator('[data-message-author-role="assistant"]').last();
-    const assistantState = await assistant.count()
-      ? await assistant.evaluate(element => {
+  private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
+    const responseState = await responseTurn.count()
+      ? await responseTurn.evaluate(element => {
         const root = element as HTMLElement;
         const descriptors = [...root.querySelectorAll<HTMLElement>("[role], [data-testid], button, [aria-label]")]
           .filter(candidate => {
@@ -531,7 +597,7 @@ export class ChatGptBrowserWorker {
           };
         })
     )).catch(() => [] as Array<Record<string, string | null>>);
-    return redactChatGptUiDiagnostic(JSON.stringify({ assistant: assistantState, overlays }));
+    return redactChatGptUiDiagnostic(JSON.stringify({ response: responseState, overlays }));
   }
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
@@ -541,34 +607,38 @@ export class ChatGptBrowserWorker {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
       const deadline = Date.now() + this.config.turnTimeoutMs;
-      const page = await this.runStage(turn.traceId, "browser_page", 30_000, () => this.pageForNewTurn());
+      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, () => this.pageForNewTurn());
       console.info(
-        `[chatgpt-web] browser turn ${turn.traceId} opened (promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
+        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.contextFile ? "jsonl" : "inline"}, promptChars=${prepared.text.length}, contextFileChars=${prepared.contextFile?.content.length ?? 0}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
       );
-      await this.runStage(turn.traceId, "temporary_chat_navigation", 35_000, () => (
-        page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).then(() => undefined)
+      await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
+        page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
       ));
       const composer = page.getByRole("textbox", { name: "Chat with ChatGPT" });
       try {
-        await this.runStage(turn.traceId, "composer_ready", 20_000, () => composer.waitFor({ state: "visible", timeout: 15_000 }));
+        await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
+          composer.waitFor({ state: "visible", timeout: 30_000 })
+        ));
       } catch {
         throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
       }
-      await this.runStage(turn.traceId, "session_verification", 20_000, async () => {
+      await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {
         await assertAuthenticatedChatGptPage(page);
         await assertTemporaryChatPage(page);
       });
-      const mode = await this.runStage(turn.traceId, "effort_selection", 60_000, () => (
+      const mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
         this.selectModelAndEffort(page, turn.modelId, turn.reasoning, turn.capabilities)
       ));
-      await this.runStage(turn.traceId, "prompt_attachment", 30_000, () => this.attachPrompt(page, prepared.text, mode.localTools));
-      await this.runStage(turn.traceId, "image_attachment", 45_000, () => this.attachImages(page, prepared.images));
-      const completionActions = page.locator('[data-testid="copy-turn-action-button"], button[aria-label="Copy response"]');
-      const initialCompletionActionCount = await completionActions.count();
-      const assistantMessages = page.locator('[data-message-author-role="assistant"]');
-      const initialAssistant = assistantMessages.last().locator(".markdown").last();
-      const initialAssistantText = await initialAssistant.count() ? (await initialAssistant.innerText()).trim() : "";
-      await this.runStage(turn.traceId, "send", 10_000, () => page.getByTestId("send-button").click());
+      await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
+        this.attachPrompt(page, prepared.text, mode.localTools)
+      ));
+      await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
+        this.attachFiles(page, prepared)
+      ));
+      const responseTurns = page.locator('section[data-testid^="conversation-turn-"][data-turn="assistant"]');
+      const initialResponseTurnCount = await responseTurns.count();
+      const responseTurn = responseTurns.nth(initialResponseTurnCount);
+      await this.runStage(turn.traceId, "send", browserStageTimeouts.send, () => page.getByTestId("send-button").click());
 
       let lastHeartbeat = 0;
       let finalText = "";
@@ -597,31 +667,12 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        await this.expandVisibleReasoning(page);
-
-        const assistant = assistantMessages.last();
-        const assistantPresent = await assistant.count() > 0;
+        const snapshot = await this.responseDomSnapshot(responseTurn);
         const stop = page.getByRole("button", { name: "Stop answering" });
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
-        if (assistantPresent) {
-          const rendered = assistant.locator(".markdown").last();
-          const snapshot = await rendered.count()
-            ? await rendered.evaluate(element => {
-              const root = element as HTMLElement;
-              const children = [...root.children];
-              return {
-                visibleText: root.innerText.trim(),
-                fullHtml: root.innerHTML,
-                stableHtml: children.slice(0, -1).map(child => child.outerHTML).join(""),
-              };
-            })
-            : { visibleText: "", fullHtml: "", stableHtml: "" };
-          const completionActionCount = await completionActions.count();
-          const completionActionVisible = completionActionCount > 0
-            && await completionActions.last().isVisible().catch(() => false);
-          const traceBlocks = await this.visibleTraceBlocks(page);
-          for (const trace of visibleTrace.observe(traceBlocks, completionActionVisible)) {
+        if (snapshot.responsePresent) {
+          for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             const key = `${trace.kind}\0${trace.text}`;
             if (seenTrace.has(key)) continue;
             seenTrace.add(key);
@@ -629,29 +680,23 @@ export class ChatGptBrowserWorker {
             else turn.onReasoningSummary?.(trace.text);
           }
           const domError = domHealthTracker.update({
-            assistantPresent,
+            responsePresent: snapshot.responsePresent,
             running,
-            sawRunning,
             currentText: snapshot.visibleText,
-            completionActionVisible,
-            completionActionCount,
-            initialCompletionActionCount,
+            completionActionVisible: snapshot.completionActionVisible,
           });
           if (domError) throw new Error(domError);
           // ChatGPT can render visible commentary Markdown between tool-status rows. Only a
           // Markdown root accompanied by the response action belongs to the final answer stream.
-          if (completionActionVisible) {
+          if (snapshot.completionActionVisible) {
             const stableDelta = markdownStream.observeStableHtml(snapshot.stableHtml);
             if (stableDelta) turn.onTextDelta(stableDelta);
           }
           if (completionTracker.update({
+            responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
-            initialText: initialAssistantText,
-            completionActionVisible,
-            completionActionCount,
-            initialCompletionActionCount,
-            sawRunning,
+            completionActionVisible: snapshot.completionActionVisible,
           })) {
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
@@ -666,22 +711,19 @@ export class ChatGptBrowserWorker {
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
             loggedCompletionWait = true;
-            const diagnostic = await this.stalledTurnDiagnostic(page).catch(error => JSON.stringify({
+            const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn).catch(error => JSON.stringify({
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
             console.warn(
-              `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActions=${completionActionCount}, initialCompletionActions=${initialCompletionActionCount}, ui=${diagnostic})`,
+              `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
             );
           }
         } else {
           const domError = domHealthTracker.update({
-            assistantPresent,
+            responsePresent: false,
             running,
-            sawRunning,
             currentText: "",
             completionActionVisible: false,
-            completionActionCount: await completionActions.count(),
-            initialCompletionActionCount,
           });
           if (domError) throw new Error(domError);
         }

@@ -29,14 +29,14 @@ export async function assertTemporaryChatPage(page: Page): Promise<void> {
   if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
     throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
   }
-  await page.getByRole("heading", { name: "Temporary Chat", exact: true }).waitFor({ state: "visible", timeout: 10_000 });
+  await page.getByRole("heading", { name: "Temporary Chat", exact: true }).waitFor({ state: "visible", timeout: 20_000 });
 }
 
 export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   const effortButton = page.getByRole("button", {
     name: /^(?:Instant(?:\s+5\.5)?|Medium|High|Extra High|Pro)$/,
   }).last();
-  await effortButton.waitFor({ state: "visible", timeout: 15_000 });
+  await effortButton.waitFor({ state: "visible", timeout: 30_000 });
   await effortButton.click();
   try {
     const pro = page.getByRole("menuitem", { name: "Pro", exact: true }).or(

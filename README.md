@@ -23,6 +23,11 @@ browser mode. The bridge replays the complete task
 context into a fresh ChatGPT Temporary Chat and streams the result back through Codex's native
 Responses protocol.
 
+Small contexts stay inline. Once the serialized context exceeds 64 KiB, the bridge uploads one
+ordered, SHA-256-identified `codex-context.jsonl` attachment instead of forcing hundreds of
+thousands of characters through ChatGPT's contenteditable composer. The model receives the same
+system, message, tool-result, and image-reference records without truncation.
+
 ```text
 Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled browser──▶ ChatGPT
      ▲                                │                                      │
@@ -178,6 +183,11 @@ Maintainer details:
 
 - ChatGPT UI selectors can change without notice. UI drift fails explicitly; the runtime never
   silently changes model, effort, or transport.
+- macOS may show **“bun was prevented from modifying apps on your Mac”** on the first browser
+  launch. Unified macOS logs identify this as App Management/TCC attributing Playwright's launch
+  of the installed Google Chrome app to the bundled Bun process. The bridge does not modify Chrome
+  or another app bundle; leaving that access denied is expected and no permission should be
+  granted.
 - Current Codex Desktop always shows an Effort row and hardcodes `ultra` as **Ultra**. Each routed
   model exposes only its one fixed value, so the row cannot change the selected browser mode. The
   app also always shows a **Standard** speed row even though ChatGPT Web sends no service tier.

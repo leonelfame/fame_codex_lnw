@@ -52,8 +52,8 @@ async function inspectStoredState(
     const verifierContext = await verifierBrowser.newContext({ storageState });
     try {
       const verifierPage = await verifierContext.newPage();
-      await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 30_000 });
+      await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
       await assertTemporaryChatPage(verifierPage);
       return { proAvailable: await detectChatGptProCapability(verifierPage), url: verifierPage.url() };
@@ -121,13 +121,13 @@ export async function loginToChatGpt(
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
       waitUntil: "domcontentloaded",
-      timeout: 30_000,
+      timeout: 60_000,
     });
     const composer = page.getByRole("textbox", { name: "Chat with ChatGPT" }).or(
       page.locator('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"]'),
     ).first();
     try {
-      await composer.waitFor({ state: "visible", timeout: options.timeoutMs ?? 30_000 });
+      await composer.waitFor({ state: "visible", timeout: options.timeoutMs ?? 60_000 });
     } catch {
       throw new Error("The authenticated ChatGPT page did not produce a visible composer");
     }

@@ -4,6 +4,7 @@ import { CHATGPT_INTERNAL_COMPACTION_MARKER, stripChatGptTransportMarkers } from
 
 test("effort selection is idempotent across rendered whitespace", () => {
   expect(chatGptEffortLabelsMatch("High", "High")).toBe(true);
+  expect(chatGptEffortLabelsMatch("Instant", "Instant 5.5")).toBe(true);
   expect(chatGptEffortLabelsMatch("Instant\n5.5", "Instant 5.5")).toBe(true);
   expect(chatGptEffortLabelsMatch("High", "Extra High")).toBe(false);
 });
@@ -53,13 +54,10 @@ test("visible DOM trace translates the explicit ChatGPT compaction marker once",
 test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {
   const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
-    assistantPresent: false,
+    responsePresent: false,
     running: true,
-    sawRunning: true,
     currentText: "",
     completionActionVisible: false,
-    completionActionCount: 0,
-    initialCompletionActionCount: 0,
   };
   expect(missing.update(absent, 1_000)).toBeUndefined();
   expect(missing.update(absent, 2_000)).toContain("did not create a response DOM");
@@ -67,11 +65,22 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   const empty = new ChatGptTurnDomHealthTracker(1_000, 500);
   const terminal = {
     ...absent,
-    assistantPresent: true,
+    responsePresent: true,
     running: false,
     completionActionVisible: true,
-    completionActionCount: 1,
   };
   expect(empty.update(terminal, 1_000)).toBeUndefined();
   expect(empty.update(terminal, 1_500)).toContain("completed without a final answer");
+});
+
+test("visible reasoning keeps the browser turn healthy before final assistant markdown exists", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const reasoning = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    completionActionVisible: false,
+  };
+  expect(health.update(reasoning, 1_000)).toBeUndefined();
+  expect(health.update(reasoning, 10_000)).toBeUndefined();
 });

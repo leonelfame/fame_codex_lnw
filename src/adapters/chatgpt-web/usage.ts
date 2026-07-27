@@ -41,6 +41,7 @@ export function estimateCompiledChatGptWebInputTokens(
   );
   return CHATGPT_PLATFORM_RESERVE_TOKENS
     + conservativeTextTokens(compiled.text, modelId)
+    + conservativeTextTokens(compiled.contextFile?.content ?? "", modelId)
     + imageTokens;
 }
 
