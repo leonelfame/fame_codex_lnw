@@ -176,7 +176,6 @@ relocatable runtime smoke test, and a real headless launch of system Chrome.
 
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security-model.md)
-- [Release checklist](docs/releasing.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## Credits and disclaimer
