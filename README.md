@@ -18,11 +18,39 @@ model picker. The bridge sends the complete Codex task context to a fresh ChatGP
 attaches images, and streams visible reasoning, tool activity, and Markdown back into the same
 Codex task.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="ChatGPT Web running inside the native Codex harness" width="960">
+</p>
+
 ```text
 Codex task ──Responses + SSE──▶ codex-chatgpt-web ──controlled Chrome──▶ ChatGPT
      ▲                                │                                      │
      └──────── native UI, context, images, tracing, and tool lifecycle ──────┘
 ```
+
+## Highlights
+
+- **Native Codex harness.** This is the same model-picker, task history, context lifecycle,
+  approvals, sandbox, streaming, tracing, and tool UI you already use in Codex—not a second chat
+  client. Like OpenCodex, it changes the model backend while preserving the native workflow.
+- **Local-first task sessions.** Codex remains the source of truth for task history on your
+  computer. Every browser turn starts in a fresh ChatGPT Temporary Chat and receives the complete
+  accumulated Codex context, so browser chats are not reused across tasks or added to normal
+  ChatGPT history.
+- **ChatGPT-native capabilities stay available.** Pro and other read-only modes cannot reach the
+  local Codex computer, but they can still use first-party ChatGPT capabilities such as web search
+  and research when those capabilities are available on the account.
+- **Real outer tool loop.** In full mode, ChatGPT calls the tools from the active Codex harness and
+  their results return to the same browser response; tool calls are not simulated as text.
+- **Fail-closed and manually tested.** Model selection, long inline context, images, streaming,
+  visible trace, compaction, native tool rounds, cancellation, and Pro were exercised end-to-end on
+  macOS. UI drift and missing capabilities produce explicit errors rather than silent fallbacks.
+
+Temporary Chat is a ChatGPT privacy mode, not anonymity or local-only inference: prompts are still
+processed by OpenAI and are subject to the account's settings and OpenAI's
+[Temporary Chat policy](https://help.openai.com/en/articles/8914046-temporary-chat-faq). This project
+is unofficial; users remain responsible for complying with applicable OpenAI terms and workspace
+policies.
 
 ## Quick start
 

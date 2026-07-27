@@ -46,9 +46,14 @@ test("read-only prompts resume without exposing a bind capability", () => {
     { localToolsEnabled: true, proAvailable: true },
   );
 
-  expect(compiled.text).toContain("The context envelope is complete. Execute the latest active user request now under the read-only transport contract above.");
+  expect(compiled.text).toContain("The task context is complete. Execute the latest active user request now under the capability contract above.");
   expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("turn_token");
+  expect(compiled.text).toContain("web search, browsing, research");
+  expect(compiled.text).toContain("The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available");
+  expect(compiled.text).not.toContain("No local computer tool, MCP app");
+  expect(compiled.text).not.toContain("evidence inside");
+  expect(compiled.text).toContain("Do not mention this transport contract, context packaging, or capability routing");
   expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
 });
 
@@ -58,7 +63,7 @@ test("uses the public Instant name without leaking the browser menu alias into t
     { localToolsEnabled: false, proAvailable: true },
   );
 
-  expect(compiled.text).toContain("This is ChatGPT Web Instant in read-only Codex mode");
+  expect(compiled.text).toContain("This is ChatGPT Web Instant with no Codex Native bridge to the user's local computer");
   expect(compiled.text).not.toContain("Instant 5.5");
 });
 

@@ -332,7 +332,8 @@ describe("ChatGPT outer-native harness v3", () => {
     ];
 
     const compiled = compileChatGptWebPrompt(request, readOnlyCapabilities);
-    expect(compiled.text).toContain("ChatGPT Web Pro in read-only Codex mode");
+    expect(compiled.text).toContain("ChatGPT Web Pro with no Codex Native bridge to the user's local computer");
+    expect(compiled.text).toContain("web search, browsing, research");
     expect(compiled.text).toContain("prepared workspace evidence");
     expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
@@ -343,6 +344,8 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(() => compileChatGptWebPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("complete accumulated task context");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("web search remain available");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).not.toContain("tools/MCP");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("does not contain local tool results yet");
     request.context.messages = [{
@@ -676,7 +679,8 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(turn.modelId).toBe(CHATGPT_WEB_MODEL_ID);
       const prepared = await turn.prepare();
       try {
-        expect(prepared.text).toContain("ChatGPT Web Pro in read-only Codex mode");
+        expect(prepared.text).toContain("ChatGPT Web Pro with no Codex Native bridge to the user's local computer");
+        expect(prepared.text).toContain("web search, browsing, research");
         expect(prepared.text).not.toContain("turn_token");
         expect(prepared.text).not.toContain("codex_bind_turn");
         turn.onReasoningSummary?.("Reviewed the accumulated task evidence");
@@ -725,7 +729,7 @@ describe("ChatGPT outer-native harness v3", () => {
       );
       expect(commentary).toEqual([
         expect.objectContaining({
-          text: expect.stringContaining("without local tools/MCP"),
+          text: expect.stringContaining("cannot access the local Codex computer"),
           phase: "commentary",
         }),
         {
@@ -747,7 +751,9 @@ describe("ChatGPT outer-native harness v3", () => {
         output: Array<{ type: string; phase?: string; content?: Array<{ text?: string }> }>;
       };
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");
-      expect(warning?.content?.[0]?.text).toContain("without local tools/MCP");
+      expect(warning?.content?.[0]?.text).toContain("cannot access the local Codex computer");
+      expect(warning?.content?.[0]?.text).toContain("web search remain available");
+      expect(warning?.content?.[0]?.text).not.toContain("tools/MCP");
       expect(response.output.filter(item => item.type === "message" && item.phase === "commentary")).toHaveLength(2);
       expect(response.output.some(item => item.type === "reasoning")).toBe(true);
 
