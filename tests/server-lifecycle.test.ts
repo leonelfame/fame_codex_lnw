@@ -1,7 +1,35 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { defaultConfig } from "../src/config";
-import { startServer } from "../src/server";
+import { HttpTurnCounter, startServer } from "../src/server";
+
+test("HTTP turn tracking follows the response stream instead of Bun's global request count", async () => {
+  const turns = new HttpTurnCounter();
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const response = await turns.track(async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      source = controller;
+    },
+  })));
+  const reader = response.body!.getReader();
+
+  expect(turns.count()).toBe(1);
+  source.enqueue(new TextEncoder().encode("data"));
+  expect((await reader.read()).done).toBe(false);
+  expect(turns.count()).toBe(1);
+  source.close();
+  expect((await reader.read()).done).toBe(true);
+  expect(turns.count()).toBe(0);
+});
+
+test("HTTP turn tracking releases a cancelled response stream", async () => {
+  const turns = new HttpTurnCounter();
+  const response = await turns.track(async () => new Response(new ReadableStream<Uint8Array>()));
+
+  expect(turns.count()).toBe(1);
+  await response.body!.cancel();
+  expect(turns.count()).toBe(0);
+});
 
 test("authenticated lifecycle control cancels orphaned browser turns", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };

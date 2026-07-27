@@ -21,6 +21,64 @@ import { expandPreviousResponseInput, flushResponseState, rememberResponseState 
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
 import { VERSION } from "./version";
 
+export class HttpTurnCounter {
+  private active = 0;
+
+  count(): number {
+    return this.active;
+  }
+
+  async track(run: () => Promise<Response>): Promise<Response> {
+    this.active += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+    };
+
+    try {
+      const response = await run();
+      if (!response.body) {
+        release();
+        return response;
+      }
+      const reader = response.body.getReader();
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const chunk = await reader.read();
+            if (chunk.done) {
+              release();
+              controller.close();
+              return;
+            }
+            controller.enqueue(chunk.value);
+          } catch (error) {
+            release();
+            controller.error(error);
+          }
+        },
+        async cancel(reason) {
+          try {
+            await reader.cancel(reason);
+          } finally {
+            release();
+          }
+        },
+      });
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+}
+
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config.proAvailable);
   parsed.modelId = CHATGPT_WEB_BACKEND_MODEL;
@@ -205,9 +263,9 @@ export async function compactRequest(req: Request, _config: AppConfig): Promise<
 export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
   const startedAt = Date.now();
   let draining = false;
-  const activity = (server: { pendingRequests: number }) => ({
-    // Bun includes the health/drain request currently evaluating this value.
-    active_http_turns: Math.max(0, server.pendingRequests - 1),
+  const httpTurns = new HttpTurnCounter();
+  const activity = () => ({
+    active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount(),
   });
   const controlAuthorized = (req: Request): boolean => {
@@ -220,7 +278,7 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
-    fetch(req, server) {
+    fetch(req) {
       const url = new URL(req.url);
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
@@ -232,18 +290,18 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
           accepting_turns: !draining,
-          ...activity(server),
+          ...activity(),
         });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         draining = url.pathname === "/admin/drain";
-        return Response.json({ status: "ok", accepting_turns: !draining, ...activity(server) });
+        return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-browser-turns") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         const cancelled = chatGptTurnSessions.clear();
-        return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity(server) });
+        return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         return modelsRequest(req, config, undefined, readCodexModelContextOverride);
@@ -256,11 +314,11 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return responseRequest(req, config);
+        return httpTurns.track(() => responseRequest(req, config));
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return compactRequest(req, config);
+        return httpTurns.track(() => compactRequest(req, config));
       }
       return new Response("Not found", { status: 404 });
     },
