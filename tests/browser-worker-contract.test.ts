@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, chatGptEffortLabelsMatch, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
-import { CHATGPT_INTERNAL_COMPACTION_MARKER, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
+import { ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, chatGptEffortLabelsMatch, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("effort selection is idempotent across rendered whitespace", () => {
   expect(chatGptEffortLabelsMatch("High", "High")).toBe(true);
@@ -74,6 +74,18 @@ test("visible DOM trace translates the explicit ChatGPT compaction marker once",
   expect(stripChatGptTransportMarkers(
     `Before\n\n${CHATGPT_INTERNAL_COMPACTION_MARKER}\n\nAfter`,
   )).toBe("Before\n\nAfter");
+  const partial = "[[CODEX_INTERNAL_CONTEXT_COMPACT";
+  expect(containsChatGptCompactionMarker(partial)).toBe(true);
+  expect(stripChatGptTransportMarkers(partial)).toBe("");
+  expect(new ChatGptVisibleTraceTracker().observe([
+    { kind: "markdown", text: partial },
+  ], false)).toEqual([{ kind: "reasoning", text: "Context automatically compacted" }]);
+});
+
+test("trace parsing excludes the Answer now UI control", () => {
+  expect(isChatGptTraceControl({ kind: "status", text: "Answer now" })).toBe(true);
+  expect(isChatGptTraceControl({ kind: "status", text: "Reviewing repository invariants" })).toBe(false);
+  expect(isChatGptTraceControl({ kind: "markdown", text: "Answer now" })).toBe(false);
 });
 
 test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {

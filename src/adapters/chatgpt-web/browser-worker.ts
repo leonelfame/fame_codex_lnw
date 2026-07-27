@@ -6,7 +6,7 @@ import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import { ChatGptMarkdownStream } from "./markdown";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
-import { CHATGPT_INTERNAL_COMPACTION_MARKER, stripChatGptTransportMarkers, type CompiledChatGptWebPrompt, type ChatGptWebPromptImage } from "./prompt";
+import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers, type CompiledChatGptWebPrompt, type ChatGptWebPromptImage } from "./prompt";
 import { estimateCompiledChatGptWebInputTokens } from "./usage";
 import { assertAuthenticatedChatGptPage, assertTemporaryChatPage, CHATGPT_TEMPORARY_CHAT_URL } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
@@ -173,13 +173,12 @@ export class ChatGptVisibleTraceTracker {
     const output: ChatGptVisibleTraceEvent[] = [];
     for (let index = 0; index < blocks.length; index++) {
       const block = blocks[index]!;
-      if (block.text.includes(CHATGPT_INTERNAL_COMPACTION_MARKER)
+      if (containsChatGptCompactionMarker(block.text)
         && !this.seen.has(CHATGPT_INTERNAL_COMPACTION_MARKER)) {
         this.seen.add(CHATGPT_INTERNAL_COMPACTION_MARKER);
         output.push({ kind: "reasoning", text: "Context automatically compacted" });
       }
-      const text = block.text
-        .replaceAll(CHATGPT_INTERNAL_COMPACTION_MARKER, "")
+      const text = stripChatGptTransportMarkers(block.text)
         .replace(/\r\n/g, "\n")
         .split("\n")
         .map(line => line.replace(/[\t ]+/g, " ").trim())
@@ -224,6 +223,10 @@ export function chatGptEffortLabelsMatch(current: string, desired: string): bool
     return /^(?:Instant|Instant 5\.5)$/.test(label) ? "Instant 5.5" : label;
   };
   return normalize(current) === normalize(desired);
+}
+
+export function isChatGptTraceControl(block: ChatGptVisibleTraceBlock): boolean {
+  return block.kind === "status" && block.text.replace(/\s+/g, " ").trim() === "Answer now";
 }
 
 export function redactChatGptUiDiagnostic(value: string): string {
@@ -274,14 +277,7 @@ export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array
 export function chatGptPromptFilePayloads(
   prompt: CompiledChatGptWebPrompt,
 ): Array<{ name: string; mimeType: string; buffer: Buffer }> {
-  const context = prompt.contextFile
-    ? [{
-      name: prompt.contextFile.name,
-      mimeType: prompt.contextFile.mimeType,
-      buffer: Buffer.from(prompt.contextFile.content, "utf8"),
-    }]
-    : [];
-  return [...context, ...chatGptImageFilePayloads(prompt.images)];
+  return chatGptImageFilePayloads(prompt.images);
 }
 
 export class ChatGptBrowserWorker {
@@ -486,9 +482,7 @@ export class ChatGptBrowserWorker {
     if (files.length === 0) return;
     const removeButtons = page.locator('button[aria-label^="Remove file "]');
     const existing = await removeButtons.count();
-    const input = prompt.contextFile
-      ? page.locator('input#upload-files')
-      : page.locator('input[data-testid="upload-photos-input"]');
+    const input = page.locator('input[data-testid="upload-photos-input"]');
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
@@ -526,7 +520,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async responseDomSnapshot(responseTurn: Locator): Promise<ChatGptResponseDomSnapshot> {
-    return responseTurn.evaluate(element => {
+    const snapshot = await responseTurn.evaluate(element => {
       const root = element as HTMLElement;
       const visible = (candidate: HTMLElement): boolean => {
         const style = getComputedStyle(candidate);
@@ -575,6 +569,8 @@ export class ChatGptBrowserWorker {
         traceBlocks,
       };
     }, undefined, { timeout: 2_000 }).catch(() => absentResponseDomSnapshot());
+    snapshot.traceBlocks = snapshot.traceBlocks.filter(block => !isChatGptTraceControl(block));
+    return snapshot;
   }
 
   private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
@@ -631,7 +627,7 @@ export class ChatGptBrowserWorker {
       const deadline = Date.now() + this.config.turnTimeoutMs;
       const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, () => this.pageForNewTurn());
       console.info(
-        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.contextFile ? "jsonl" : "inline"}, promptChars=${prepared.text.length}, contextFileChars=${prepared.contextFile?.content.length ?? 0}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
+        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
       );
       await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
         page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)

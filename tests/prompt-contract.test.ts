@@ -1,7 +1,5 @@
 import { expect, test } from "bun:test";
 import {
-  CHATGPT_CONTEXT_FILE_NAME,
-  CHATGPT_INLINE_CONTEXT_MAX_CHARS,
   CHATGPT_INTERNAL_COMPACTION_MARKER,
   compileChatGptWebPrompt,
 } from "../src/adapters/chatgpt-web/prompt";
@@ -64,7 +62,7 @@ test("uses the public Instant name without leaking the browser menu alias into t
   expect(compiled.text).not.toContain("Instant 5.5");
 });
 
-test("large contexts move intact into an ordered JSONL attachment", () => {
+test("keeps large contexts intact in the inline text envelope", () => {
   const token = "turn_12345678901234567890123456789012";
   const largeContent = "x".repeat(600_000);
   const large = request("high");
@@ -82,60 +80,11 @@ test("large contexts move intact into an ordered JSONL attachment", () => {
     token,
   );
 
-  expect(compiled.contextFile?.name).toBe(CHATGPT_CONTEXT_FILE_NAME);
-  expect(compiled.contextFile?.mimeType).toBe("application/jsonl");
-  expect(compiled.text.length).toBeLessThan(10_000);
-  expect(compiled.text).not.toContain("x".repeat(1_000));
+  expect(compiled.text.length).toBeGreaterThan(600_000);
+  expect(compiled.text).toContain(largeContent);
   expect(compiled.text).toContain(token);
-  expect(compiled.text).toContain(`<codex_context_attachment>`);
+  expect(compiled.text).toContain(`<codex_context_json>`);
+  expect(compiled.text).not.toContain(`<codex_context_attachment>`);
   expect(compiled.text).not.toContain("sha256");
   expect(compiled.text).not.toContain("SHA-256");
-
-  const records = compiled.contextFile!.content.trimEnd().split("\n").map(line => JSON.parse(line));
-  expect(records).toHaveLength(compiled.contextFile!.recordCount);
-  expect(records[0]).toMatchObject({
-    type: "codex_context_manifest",
-    version: 4,
-    system_records: 1,
-    message_records: 3,
-  });
-  expect(records[1]).toEqual({ type: "system", index: 0, content: "preserve-system" });
-  expect(records.at(-1)).toMatchObject({
-    type: "message",
-    index: 2,
-    message: { role: "tool_result", tool_call_id: "call_large" },
-  });
-  expect(records.at(-1).message.content).toBe(largeContent);
-});
-
-test("keeps exactly 40,000 serialized context characters inline and attaches only above it", () => {
-  const token = "turn_12345678901234567890123456789012";
-  const makeRequest = (contentLength: number): CodexParsedRequest => ({
-    modelId: CHATGPT_WEB_MODEL_ID,
-    context: { messages: [{ role: "user", content: "x".repeat(contentLength), timestamp: 1 }] },
-    stream: true,
-    options: { reasoning: "high" },
-  });
-  const emptyEnvelopeLength = JSON.stringify({
-    version: 3,
-    system: [],
-    messages: [{ role: "user", content: "" }],
-  }).length;
-  const exactContentLength = CHATGPT_INLINE_CONTEXT_MAX_CHARS - emptyEnvelopeLength;
-
-  const exact = compileChatGptWebPrompt(
-    makeRequest(exactContentLength),
-    { localToolsEnabled: true, proAvailable: true },
-    token,
-  );
-  const above = compileChatGptWebPrompt(
-    makeRequest(exactContentLength + 1),
-    { localToolsEnabled: true, proAvailable: true },
-    token,
-  );
-
-  expect(exact.contextFile).toBeUndefined();
-  expect(exact.text).toContain("x".repeat(exactContentLength));
-  expect(above.contextFile?.name).toBe(CHATGPT_CONTEXT_FILE_NAME);
-  expect(above.text).not.toContain("x".repeat(1_000));
 });

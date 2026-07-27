@@ -272,7 +272,7 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(files[0]?.buffer.length).toBeGreaterThan(0);
   });
 
-  test("uploads a large JSONL context and its referenced images in one browser attachment batch", () => {
+  test("keeps a large context inline and uploads only its referenced images", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const request = parsed();
     request.context.systemPrompt = ["d".repeat(70_000)];
@@ -283,10 +283,10 @@ describe("ChatGPT outer-native harness v3", () => {
     const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
     const files = chatGptPromptFilePayloads(compiled);
 
-    expect(compiled.contextFile).toBeDefined();
-    expect(files.map(file => file.name)).toEqual(["codex-context.jsonl", "codex-input-image-1.png"]);
-    expect(files[0]!.mimeType).toBe("application/jsonl");
-    expect(files[0]!.buffer.toString("utf8")).toBe(compiled.contextFile!.content);
+    expect(compiled.text).toContain("d".repeat(70_000));
+    expect(compiled.text).toContain("<codex_context_json>");
+    expect(files.map(file => file.name)).toEqual(["codex-input-image-1.png"]);
+    expect(files[0]!.mimeType).toBe("image/png");
   });
 
   test("maps one ChatGPT Web model to explicit effort modes and fails closed on invalid combinations", () => {
