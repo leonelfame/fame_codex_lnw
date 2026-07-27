@@ -39,7 +39,7 @@ export interface BrowserTurn {
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
-  onCommentary?: (text: string) => void;
+  onCommentary?: (text: string, continuation?: boolean) => void;
   /** Append-only, structurally stable Markdown chunks. */
   onTextDelta: (delta: string) => void;
 }
@@ -136,6 +136,7 @@ export interface ChatGptVisibleTraceBlock {
 export interface ChatGptVisibleTraceEvent {
   kind: "reasoning" | "commentary";
   text: string;
+  continuation?: boolean;
 }
 
 interface ChatGptResponseDomSnapshot {
@@ -159,8 +160,12 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
 /** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
 export class ChatGptVisibleTraceTracker {
   private readonly seen = new Set<string>();
+  private readonly emittedCommentary = new Map<number, string>();
+  private readonly commentaryChangedAt = new Map<number, number>();
 
-  observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean): ChatGptVisibleTraceEvent[] {
+  constructor(private readonly commentaryStabilityMs = 1_000) {}
+
+  observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
     let lastMarkdown = -1;
     for (let index = 0; index < blocks.length; index++) {
       if (blocks[index]!.kind === "markdown") lastMarkdown = index;
@@ -188,10 +193,26 @@ export class ChatGptVisibleTraceTracker {
         && (completionActionVisible ? index === lastMarkdown : index === blocks.length - 1)) {
         continue;
       }
+      if (block.kind === "markdown") {
+        const previous = this.emittedCommentary.get(index);
+        if (previous === text) {
+          const changedAt = this.commentaryChangedAt.get(index) ?? now;
+          if (now - changedAt < this.commentaryStabilityMs) break;
+          continue;
+        }
+        this.commentaryChangedAt.set(index, now);
+        if (previous && text.startsWith(previous)) {
+          this.emittedCommentary.set(index, text);
+          output.push({ kind: "commentary", text: text.slice(previous.length), continuation: true });
+          break;
+        }
+        this.emittedCommentary.set(index, text);
+      }
       const key = `${block.kind}\0${text}`;
       if (this.seen.has(key)) continue;
       this.seen.add(key);
       output.push({ kind: block.kind === "markdown" ? "commentary" : "reasoning", text });
+      if (block.kind === "markdown") break;
     }
     return output;
   }
@@ -646,7 +667,6 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       const sentAt = Date.now();
-      const seenTrace = new Set<string>();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownStream = new ChatGptMarkdownStream(stripChatGptTransportMarkers);
       const completionTracker = new ChatGptCompletionTracker();
@@ -674,10 +694,7 @@ export class ChatGptBrowserWorker {
         if (running) sawRunning = true;
         if (snapshot.responsePresent) {
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
-            const key = `${trace.kind}\0${trace.text}`;
-            if (seenTrace.has(key)) continue;
-            seenTrace.add(key);
-            if (trace.kind === "commentary") turn.onCommentary?.(trace.text);
+            if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text);
           }
           const domError = domHealthTracker.update({

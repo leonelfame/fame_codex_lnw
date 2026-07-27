@@ -10,6 +10,7 @@ export type ChatGptBrowserOutcome =
 export interface ChatGptTraceEvent {
   kind: "reasoning" | "commentary";
   text: string;
+  continuation?: boolean;
 }
 
 interface TraceWaiter {
@@ -24,7 +25,7 @@ export class ChatGptTraceFeed {
   private readonly waiters = new Set<TraceWaiter>();
 
   push(event: ChatGptTraceEvent): void {
-    const normalized = event.text.trim();
+    const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
     const normalizedEvent = { ...event, text: normalized };
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;

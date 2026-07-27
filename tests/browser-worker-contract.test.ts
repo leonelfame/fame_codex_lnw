@@ -19,23 +19,48 @@ test("browser diagnostics redact context envelopes and capability values", () =>
 });
 
 test("visible DOM trace emits statuses and stable commentary but withholds the final answer", () => {
-  const tracker = new ChatGptVisibleTraceTracker();
+  const tracker = new ChatGptVisibleTraceTracker(100);
   expect(tracker.observe([
     { kind: "status", text: "Reviewed architecture documentation" },
     { kind: "markdown", text: "The implementation has a concrete state drift." },
   ], false)).toEqual([{ kind: "reasoning", text: "Reviewed architecture documentation" }]);
-  expect(tracker.observe([
+  const commentaryBlocks = [
     { kind: "status", text: "Reviewed architecture documentation" },
     { kind: "markdown", text: "The implementation has a concrete state drift." },
     { kind: "status", text: "Inspecting runtime evidence" },
     { kind: "markdown", text: "Final answer still streaming" },
-  ], false)).toEqual([
+  ] as const;
+  expect(tracker.observe([...commentaryBlocks], false, 1_000)).toEqual([
     { kind: "commentary", text: "The implementation has a concrete state drift." },
+  ]);
+  expect(tracker.observe([...commentaryBlocks], false, 1_100)).toEqual([
     { kind: "reasoning", text: "Inspecting runtime evidence" },
   ]);
   expect(tracker.observe([
     { kind: "markdown", text: "Final answer complete" },
   ], true)).toEqual([]);
+});
+
+test("visible DOM trace streams a growing commentary block as append-only deltas", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100);
+  const initial = [
+    { kind: "markdown", text: "I’m reading" },
+    { kind: "status", text: "Read context file contents" },
+  ] as const;
+  expect(tracker.observe([...initial], false, 1_000)).toEqual([
+    { kind: "commentary", text: "I’m reading" },
+  ]);
+  const expanded = [
+    { kind: "markdown", text: "I’m reading the repository’s mandatory architecture" },
+    { kind: "status", text: "Read context file contents" },
+  ] as const;
+  expect(tracker.observe([...expanded], false, 1_050)).toEqual([
+    { kind: "commentary", text: " the repository’s mandatory architecture", continuation: true },
+  ]);
+  expect(tracker.observe([...expanded], false, 1_100)).toEqual([]);
+  expect(tracker.observe([...expanded], false, 1_150)).toEqual([
+    { kind: "reasoning", text: "Read context file contents" },
+  ]);
 });
 
 test("visible DOM trace translates the explicit ChatGPT compaction marker once", () => {

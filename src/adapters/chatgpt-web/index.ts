@@ -104,7 +104,7 @@ function emitBrowserCompletion(outcome: ChatGptBrowserOutcome, usage: CodexUsage
 
 function emitTraceEvents(trace: ChatGptTraceEvent[], emit: (event: AdapterEvent) => void): void {
   for (const event of trace) {
-    emit({ type: "assistant_boundary" });
+    if (!event.continuation) emit({ type: "assistant_boundary" });
     if (event.kind === "commentary") {
       emit({ type: "text_delta", text: event.text, phase: "commentary" });
     } else {
@@ -188,7 +188,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         prepare: async () => ({ ...compileChatGptWebPrompt(parsed, capabilities), release: () => {} }),
         abortSignal: browserAbort.signal,
         onReasoningSummary: text => trace.push({ kind: "reasoning", text }),
-        onCommentary: text => trace.push({ kind: "commentary", text }),
+        onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
       });
       return {
@@ -223,7 +223,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       },
       abortSignal: browserAbort.signal,
       onReasoningSummary: text => trace.push({ kind: "reasoning", text }),
-      onCommentary: text => trace.push({ kind: "commentary", text }),
+      onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
     });
     void browser.catch(error => {
