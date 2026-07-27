@@ -8,6 +8,7 @@ import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
+import { readCodexModelContextOverride, type CodexModelContextOverride } from "./codex-integration";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   isChatGptWebModelSlug,
@@ -27,7 +28,12 @@ export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppCo
   return route;
 }
 
-export async function modelsRequest(req: Request, config: AppConfig, fetchUpstream?: NativeFetch): Promise<Response> {
+export async function modelsRequest(
+  req: Request,
+  config: AppConfig,
+  fetchUpstream?: NativeFetch,
+  contextOverride?: () => CodexModelContextOverride | undefined,
+): Promise<Response> {
   let upstream: Response;
   try {
     upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
@@ -37,7 +43,7 @@ export async function modelsRequest(req: Request, config: AppConfig, fetchUpstre
   if (!upstream.ok) return upstream;
   let catalog: Record<string, unknown>;
   try {
-    catalog = augmentNativeModelCatalog(await upstream.json(), config);
+    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
   } catch (error) {
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
   }
@@ -240,7 +246,7 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
         return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity(server) });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        return modelsRequest(req, config);
+        return modelsRequest(req, config, undefined, readCodexModelContextOverride);
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {

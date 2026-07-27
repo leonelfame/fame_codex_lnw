@@ -88,6 +88,25 @@ describe("native /models augmentation", () => {
     expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
   });
 
+  test("honors an explicit Codex context override without replacing or reordering native models", () => {
+    const native = source();
+    const nativeSnapshot = structuredClone(native);
+    const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
+      model: "gpt-5.6-sol",
+      contextWindow: 371_851,
+    });
+    const models = result.models as Array<Record<string, unknown>>;
+    const originalModels = nativeSnapshot.models as Array<Record<string, unknown>>;
+
+    expect(native).toEqual(nativeSnapshot);
+    expect(models.slice(0, 3)).toEqual([
+      originalModels[0],
+      { ...originalModels[1], max_context_window: 371_851 },
+      originalModels[2],
+    ]);
+    expect(models[1]!.context_window).toBe(300_000);
+  });
+
   test("fails closed when the official native template is absent", () => {
     expect(() => augmentNativeModelCatalog({ models: [{ slug: "other" }] }, defaultConfig("full")))
       .toThrow("missing gpt-5.6-sol");

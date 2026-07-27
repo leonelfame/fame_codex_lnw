@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getCodexJournalPath, installCodexIntegration, uninstallCodexIntegration } from "../src/codex-integration";
+import {
+  getCodexJournalPath,
+  installCodexIntegration,
+  readCodexModelContextOverride,
+  uninstallCodexIntegration,
+} from "../src/codex-integration";
 import { defaultConfig } from "../src/config";
 
 const roots: string[] = [];
@@ -25,6 +30,19 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("reads the selected model's explicit context override from Codex config", () => {
+    const { codexHome } = fixture();
+    writeFileSync(
+      join(codexHome, "config.toml"),
+      'model = "gpt-5.6-sol"\nmodel_context_window = 371_851 # explicit override\n',
+    );
+
+    expect(readCodexModelContextOverride()).toEqual({
+      model: "gpt-5.6-sol",
+      contextWindow: 371_851,
+    });
+  });
+
   test("installs only openai_base_url and keeps the built-in openai provider", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

@@ -49,6 +49,11 @@ export interface UninstallCodexIntegrationResult {
   changed: boolean;
 }
 
+export interface CodexModelContextOverride {
+  model: string;
+  contextWindow: number;
+}
+
 export function getCodexHome(): string {
   const configured = process.env.CODEX_HOME?.trim();
   return resolve(configured || join(homedir(), ".codex"));
@@ -129,6 +134,35 @@ function findTopLevelAssignment(lines: string[], key: string): PreviousAssignmen
   }
   if (matches.length > 1) throw new Error(`Codex config contains duplicate top-level ${key} assignments`);
   return matches[0] ?? { present: false };
+}
+
+function findTopLevelPositiveInteger(lines: string[], key: string): number | undefined {
+  const regex = assignmentRegex(key);
+  const matches: string[] = [];
+  for (let index = 0; index < firstTableIndex(lines); index += 1) {
+    const line = lines[index]!;
+    if (/^\s*#/.test(line)) continue;
+    const match = regex.exec(line);
+    if (match) matches.push(stripTomlComment(match[1]!).trim());
+  }
+  if (matches.length > 1) throw new Error(`Codex config contains duplicate top-level ${key} assignments`);
+  if (matches.length === 0) return undefined;
+  const normalized = matches[0]!.replaceAll("_", "");
+  if (!/^\d+$/.test(normalized)) throw new Error(`${key} in Codex config must be a positive integer`);
+  const value = Number(normalized);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${key} in Codex config must be a positive integer`);
+  return value;
+}
+
+export function readCodexModelContextOverride(): CodexModelContextOverride | undefined {
+  const path = getCodexConfigPath();
+  if (!existsSync(path)) return undefined;
+  const text = readFileSync(path, "utf8");
+  const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
+  const contextWindow = findTopLevelPositiveInteger(lines, "model_context_window");
+  if (contextWindow === undefined) return undefined;
+  const model = findTopLevelAssignment(lines, "model").value;
+  return model ? { model, contextWindow } : undefined;
 }
 
 function assignments(lines: string[]): Record<ManagedAssignmentKey, PreviousAssignment> {

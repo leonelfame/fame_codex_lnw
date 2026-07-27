@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config";
+import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_BACKEND_MODEL,
@@ -68,7 +69,11 @@ export function buildChatGptWebModel(
   return model;
 }
 
-export function augmentNativeModelCatalog(value: unknown, config: AppConfig): JsonObject {
+export function augmentNativeModelCatalog(
+  value: unknown,
+  config: AppConfig,
+  contextOverride?: CodexModelContextOverride,
+): JsonObject {
   const catalog = object(value, "native Codex models response");
   if (!Array.isArray(catalog.models)) {
     throw new Error("Native Codex models response is missing a models array");
@@ -77,11 +82,27 @@ export function augmentNativeModelCatalog(value: unknown, config: AppConfig): Js
   if (!template) {
     throw new Error(`Native Codex models response is missing ${NATIVE_TEMPLATE_MODEL}`);
   }
-  const nativeModels = catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX));
+  const nativeModels = structuredClone(
+    catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)),
+  );
+  if (contextOverride) {
+    const selected = nativeModels.find(model => slug(model) === contextOverride.model);
+    if (selected) {
+      const model = object(selected, `native ${contextOverride.model} model`);
+      const current = model.max_context_window;
+      if (current !== undefined && current !== null
+        && (typeof current !== "number" || !Number.isSafeInteger(current) || current <= 0)) {
+        throw new Error(`Native ${contextOverride.model} max_context_window must be a positive integer`);
+      }
+      if (current === undefined || current === null || current < contextOverride.contextWindow) {
+        model.max_context_window = contextOverride.contextWindow;
+      }
+    }
+  }
   const webModels = availableChatGptWebModelRoutes(config.proAvailable)
     .map(route => buildChatGptWebModel(template, route, config));
   return {
     ...structuredClone(catalog),
-    models: [...structuredClone(nativeModels), ...webModels],
+    models: [...nativeModels, ...webModels],
   };
 }

@@ -82,8 +82,10 @@ rows, but changing them cannot silently change the selected browser model. Pro r
 context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
 
 The proxy keeps Codex's built-in `openai` provider and live model catalog. It forwards the official
-catalog unchanged and appends only its ChatGPT Web entries, so native models, task history,
-approvals, sandboxing, and tool results remain owned by Codex.
+catalog and appends only its ChatGPT Web entries, so native models, task history, approvals,
+sandboxing, and tool results remain owned by Codex. If the selected native model has an explicit
+`model_context_window` override, the proxy preserves that user-selected ceiling instead of letting
+Codex clamp it to the catalog default.
 
 ## Full harness
 
