@@ -64,6 +64,32 @@ test("browser surface reactivation preserves its last measured bounds", () => {
   assert.equal(fixture.boundsReady, true);
 });
 
+test("manual browser operations wait for the first measured surface", async () => {
+  let readinessReads = 0;
+  const fixture = {
+    surfaceActive: true,
+    get boundsReady() {
+      readinessReads += 1;
+      return readinessReads >= 3;
+    },
+  };
+
+  await BrowserHost.prototype.waitForSurfaceReady.call(fixture, 100, 1);
+
+  assert.equal(readinessReads, 3);
+});
+
+test("manual browser operations fail closed without measured surface bounds", async () => {
+  await assert.rejects(
+    BrowserHost.prototype.waitForSurfaceReady.call(
+      { surfaceActive: true, boundsReady: false },
+      2,
+      1,
+    ),
+    /did not receive measured bounds/,
+  );
+});
+
 test("browser bounds are clipped to the launcher content area", () => {
   assert.deepEqual(
     constrainBrowserBounds({ x: 260, y: 78, width: 1000, height: 900 }, { width: 1200, height: 800 }),

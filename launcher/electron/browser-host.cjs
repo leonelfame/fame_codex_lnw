@@ -331,6 +331,17 @@ class BrowserHost {
     return this.snapshot();
   }
 
+  async waitForSurfaceReady(timeoutMs = 15_000, pollMs = 50) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.surfaceActive && this.boundsReady) return;
+      await sleep(pollMs);
+    }
+    throw new Error(
+      "Embedded browser surface did not receive measured bounds before the operation",
+    );
+  }
+
   navigate(action) {
     if (this.activeTraceId) {
       throw new Error("Browser navigation is locked while ChatGPT is running a Codex turn");
@@ -497,6 +508,7 @@ class BrowserHost {
 
   async runSmokeTest() {
     this.show();
+    await this.waitForSurfaceReady();
     this.setState({ status: "testing", message: "Running browser smoke test" });
     this.logger.info("smoke.started");
     await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
