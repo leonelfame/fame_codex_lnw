@@ -57,6 +57,49 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
 });
 
+test("assigns prior assistant output to the model and never attributes Codex context to the human", () => {
+  const attributed = request("max");
+  attributed.context.messages = [
+    { role: "user", content: "hi", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Hi! How can I help?" }],
+      timestamp: 2,
+    },
+    {
+      role: "user",
+      content: "what did I write before?\n<environment_context><cwd>/private/project</cwd></environment_context>",
+      timestamp: 3,
+    },
+  ];
+  const compiled = compileChatGptWebPrompt(
+    attributed,
+    { localToolsEnabled: true, proAvailable: true },
+  );
+  const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
+  const envelope = JSON.parse(encoded!) as { messages: Array<Record<string, unknown>> };
+
+  expect(envelope.messages[1]).toEqual({
+    role: "assistant",
+    content: [{ type: "text", text: "Hi! How can I help?" }],
+  });
+  expect(compiled.text).toContain("assistant messages are your own earlier replies");
+  expect(compiled.text).toContain("environment_context, are operational context rather than human-authored text");
+  expect(compiled.text).toContain("answer only from the human-authored text in user messages");
+  expect(compiled.text).toContain("do not attribute, quote, summarize, or otherwise mention them");
+});
+
+test("requires ChatGPT-native rich results to include a safe Markdown answer for Codex", () => {
+  const compiled = compileChatGptWebPrompt(
+    request("max"),
+    { localToolsEnabled: true, proAvailable: true },
+  );
+
+  expect(compiled.text).toContain("also provide the relevant result as ordinary Markdown in the final answer");
+  expect(compiled.text).toContain("A private ChatGPT UI widget never replaces the Markdown answer returned to Codex");
+  expect(compiled.text).toContain("Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup");
+});
+
 test("uses the public Instant name without leaking the browser menu alias into the prompt", () => {
   const compiled = compileChatGptWebPrompt(
     request("low"),
