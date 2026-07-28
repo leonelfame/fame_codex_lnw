@@ -26,7 +26,19 @@ void (async () => {
     if (!renderer) throw new Error("Launcher renderer page was not found");
     smokeResult = await renderer.page.evaluate(async () => {
       if (!globalThis.codexWebLauncher) throw new Error("Launcher renderer API is unavailable");
-      return await globalThis.codexWebLauncher.smokeTest();
+      await globalThis.codexWebLauncher.setBrowserBounds({
+        x: 170,
+        y: 0,
+        width: Math.max(1, innerWidth - 170),
+        height: Math.max(1, innerHeight),
+      });
+      await globalThis.codexWebLauncher.setBrowserSurfaceActive(true);
+      await globalThis.codexWebLauncher.showBrowser();
+      try {
+        return await globalThis.codexWebLauncher.smokeTest();
+      } finally {
+        await globalThis.codexWebLauncher.setBrowserSurfaceActive(false);
+      }
     });
   }
   const inspected = await Promise.all(pages.map(async ({ contextIndex, pageIndex, page }) => ({
