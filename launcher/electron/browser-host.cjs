@@ -616,11 +616,8 @@ class BrowserHost {
     );
   }
 
-  async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
-    const deadline = Date.now() + timeoutMs;
-    let menu;
-    do {
-      menu = await this.view.webContents.executeJavaScript(`(() => {
+  async readEffortMenu(targetIndex) {
+    return await this.view.webContents.executeJavaScript(`(() => {
         /* effort-menu-read */
         const targetIndex = ${targetIndex};
         const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -650,6 +647,13 @@ class BrowserHost {
           },
         };
       })()`, true);
+  }
+
+  async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
+    const deadline = Date.now() + timeoutMs;
+    let menu;
+    do {
+      menu = await this.readEffortMenu(targetIndex);
       if (menu.target) return menu;
       await sleep(pollMs);
     } while (Date.now() < deadline);
@@ -667,8 +671,11 @@ class BrowserHost {
   } = {}) {
     const targetIndex = 2;
     const control = await this.waitForEffortControl(readyTimeoutMs, pollMs);
-    this.clickBrowserPoint(control.point);
-    const menu = await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs);
+    let menu = await this.readEffortMenu(targetIndex);
+    if (!menu.target) {
+      this.clickBrowserPoint(control.point);
+      menu = await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs);
+    }
     if (control.label === menu.target.label) {
       this.pressBrowserKey("Escape");
       return { effort: "High", changed: false };
@@ -764,8 +771,11 @@ class BrowserHost {
     let proAvailable;
     if (detectPro) {
       const control = await this.waitForEffortControl(30_000, 200);
-      this.clickBrowserPoint(control.point);
-      const menu = await this.waitForEffortMenu(0, 20_000, 200);
+      let menu = await this.readEffortMenu(0);
+      if (!menu.target) {
+        this.clickBrowserPoint(control.point);
+        menu = await this.waitForEffortMenu(0, 20_000, 200);
+      }
       proAvailable = menu.count >= 5;
       this.pressBrowserKey("Escape");
     }

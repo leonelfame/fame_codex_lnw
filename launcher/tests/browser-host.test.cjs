@@ -134,6 +134,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
     clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
     pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
     readEffortControl: BrowserHost.prototype.readEffortControl,
+    readEffortMenu: BrowserHost.prototype.readEffortMenu,
     waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
     view: {
@@ -162,7 +163,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
           }
           if (source.includes("effort-menu-read")) {
             menuReads += 1;
-            return menuReads === 1
+            return menuReads <= 2
               ? { open: false, count: 0, target: null }
               : {
                   open: true,
@@ -185,7 +186,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
 
   assert.deepEqual(result, { effort: "High", changed: true });
   assert.equal(controlReads, 4);
-  assert.equal(menuReads, 2);
+  assert.equal(menuReads, 3);
   assert.deepEqual(inputEvents, [
     { type: "mouseDown", x: 120, y: 80, button: "left", clickCount: 1 },
     { type: "mouseUp", x: 120, y: 80, button: "left", clickCount: 1 },
@@ -199,6 +200,11 @@ test("smoke effort selection is idempotent without understanding the localized l
   const fixture = {
     clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
     pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
+    readEffortMenu: async () => ({
+      open: true,
+      count: 5,
+      target: { label: "高", point: { x: 140, y: 130 } },
+    }),
     waitForEffortControl: async () => ({
       found: true,
       label: "高",
@@ -220,8 +226,6 @@ test("smoke effort selection is idempotent without understanding the localized l
 
   assert.deepEqual(result, { effort: "High", changed: false });
   assert.deepEqual(inputEvents, [
-    { type: "mouseDown", x: 90, y: 70, button: "left", clickCount: 1 },
-    { type: "mouseUp", x: 90, y: 70, button: "left", clickCount: 1 },
     { type: "keyDown", keyCode: "Escape" },
     { type: "keyUp", keyCode: "Escape" },
   ]);
@@ -232,6 +236,7 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
     clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
     pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
     readEffortControl: BrowserHost.prototype.readEffortControl,
+    readEffortMenu: BrowserHost.prototype.readEffortMenu,
     waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
     view: {

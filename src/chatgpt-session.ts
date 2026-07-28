@@ -41,9 +41,9 @@ export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   const composerForm = composer.locator("xpath=ancestor::form[1]");
   const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
   await effortButton.waitFor({ state: "visible", timeout: 30_000 });
-  await effortButton.click();
+  const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
+  if (!await menu.isVisible().catch(() => false)) await effortButton.click();
   try {
-    const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     await efforts.first().waitFor({ state: "visible", timeout: 20_000 });
     return await efforts.count() >= 5;

@@ -450,8 +450,8 @@ export class ChatGptBrowserWorker {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
     const currentLabel = (await currentEffort.innerText()).replace(/\s+/g, " ").trim();
-    await currentEffort.click();
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
+    if (!await effortMenu.isVisible().catch(() => false)) await currentEffort.click();
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
     try {
