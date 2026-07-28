@@ -386,6 +386,32 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   }
 });
 
+test("launcher clears an empty stale ownership marker when Windows reuses its PID", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-reused-owner-pid-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, `${JSON.stringify({
+    version: 1,
+    ownerPid: process.pid,
+    daemonPid: null,
+    tunnelPid: null,
+    status: "failed",
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  try {
+    assert.deepEqual(await supervisor.startConfigured(), { status: "not-configured" });
+    assert.equal(fs.existsSync(supervisor.statePath), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("external migration clears only stale launcher ownership evidence", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-external-migration-"));
   const supervisor = new RuntimeSupervisor({

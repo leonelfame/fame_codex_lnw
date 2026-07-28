@@ -512,7 +512,7 @@ class RuntimeSupervisor {
     if (!config) {
       const ownershipState = this.readState();
       if (ownershipState && (
-        processRunning(ownershipState.ownerPid)
+        (ownershipState.ownerPid !== process.pid && processRunning(ownershipState.ownerPid))
         || processRunning(ownershipState.daemonPid)
         || processRunning(ownershipState.tunnelPid)
       )) {
@@ -1101,7 +1101,7 @@ class RuntimeSupervisor {
         if (!config) {
           const ownershipState = this.readState();
           if (ownershipState && (
-            processRunning(ownershipState.ownerPid)
+            (ownershipState.ownerPid !== process.pid && processRunning(ownershipState.ownerPid))
             || processRunning(ownershipState.daemonPid)
             || processRunning(ownershipState.tunnelPid)
           )) {
