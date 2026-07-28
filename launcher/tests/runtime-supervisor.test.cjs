@@ -164,10 +164,34 @@ test("launcher supervisor refuses shutdown while a Codex turn is active and comp
       : { accepting_turns: true, active_http_turns: 1, active_browser_turns: 0 };
   };
   await assert.rejects(
-    supervisor.acquireDrain({}),
+    supervisor.acquireDrain({}, 0),
     /atomic idleness could not be proven.*1 active HTTP turn/,
   );
   assert.deepEqual(actions, ["drain", "resume"]);
+});
+
+test("launcher supervisor waits for an in-flight HTTP turn to finish after draining", async () => {
+  const actions = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  let drainChecks = 0;
+  supervisor.control = async (_config, action) => {
+    actions.push(action);
+    drainChecks += 1;
+    return {
+      accepting_turns: false,
+      active_http_turns: drainChecks === 1 ? 1 : 0,
+      active_browser_turns: 0,
+    };
+  };
+
+  await supervisor.acquireDrain({}, 1_000);
+  assert.deepEqual(actions, ["drain", "drain"]);
 });
 
 test("launcher resumes an owned drained daemon before reporting it ready", async () => {

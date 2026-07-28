@@ -14,6 +14,8 @@ const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
+const DRAIN_IDLE_TIMEOUT_MS = 15_000;
+const DRAIN_POLL_INTERVAL_MS = 100;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -996,22 +998,26 @@ class RuntimeSupervisor {
     return true;
   }
 
-  async acquireDrain(config) {
+  async acquireDrain(config, timeoutMs = DRAIN_IDLE_TIMEOUT_MS) {
     let attempted = false;
     try {
       attempted = true;
-      const health = await this.control(config, "drain");
-      if (health.accepting_turns !== false
-        || !Number.isInteger(health.active_http_turns)
-        || !Number.isInteger(health.active_browser_turns)) {
-        throw new Error("daemon did not acknowledge the drain contract");
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const health = await this.control(config, "drain");
+        if (health.accepting_turns !== false
+          || !Number.isInteger(health.active_http_turns)
+          || !Number.isInteger(health.active_browser_turns)) {
+          throw new Error("daemon did not acknowledge the drain contract");
+        }
+        if (health.active_http_turns === 0 && health.active_browser_turns === 0) return true;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `daemon has ${health.active_http_turns} active HTTP turn(s) and ${health.active_browser_turns} active browser turn(s)`,
+          );
+        }
+        await sleep(Math.min(DRAIN_POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
       }
-      if (health.active_http_turns > 0 || health.active_browser_turns > 0) {
-        throw new Error(
-          `daemon has ${health.active_http_turns} active HTTP turn(s) and ${health.active_browser_turns} active browser turn(s)`,
-        );
-      }
-      return true;
     } catch (error) {
       let resumeError;
       if (attempted) {
