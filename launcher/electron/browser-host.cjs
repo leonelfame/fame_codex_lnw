@@ -549,12 +549,35 @@ class BrowserHost {
     throw new Error("ChatGPT smoke test timed out before the expected answer appeared");
   }
 
-  clickBrowserPoint(point) {
+  async clickBrowserPoint(point) {
     const contents = this.view.webContents;
     const x = Math.round(point.x);
     const y = Math.round(point.y);
-    contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
-    contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+    const protocol = contents.debugger;
+    const attachedHere = !protocol.isAttached();
+    try {
+      if (attachedHere) protocol.attach("1.3");
+      await protocol.sendCommand("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button: "left",
+        clickCount: 1,
+      });
+      await protocol.sendCommand("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button: "left",
+        clickCount: 1,
+      });
+    } catch (error) {
+      throw new Error(
+        `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      if (attachedHere && protocol.isAttached()) protocol.detach();
+    }
   }
 
   pressBrowserKey(keyCode) {
@@ -673,14 +696,14 @@ class BrowserHost {
     const control = await this.waitForEffortControl(readyTimeoutMs, pollMs);
     let menu = await this.readEffortMenu(targetIndex);
     if (!menu.target) {
-      this.clickBrowserPoint(control.point);
+      await this.clickBrowserPoint(control.point);
       menu = await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs);
     }
     if (control.label === menu.target.label) {
       this.pressBrowserKey("Escape");
       return { effort: "High", changed: false };
     }
-    this.clickBrowserPoint(menu.target.point);
+    await this.clickBrowserPoint(menu.target.point);
 
     const deadline = Date.now() + confirmTimeoutMs;
     let confirmed;
@@ -773,7 +796,7 @@ class BrowserHost {
       const control = await this.waitForEffortControl(30_000, 200);
       let menu = await this.readEffortMenu(0);
       if (!menu.target) {
-        this.clickBrowserPoint(control.point);
+        await this.clickBrowserPoint(control.point);
         menu = await this.waitForEffortMenu(0, 20_000, 200);
       }
       proAvailable = menu.count >= 5;
