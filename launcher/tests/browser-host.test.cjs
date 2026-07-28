@@ -10,6 +10,7 @@ const {
   allowedAuthUrl,
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
+  isTemporaryChatUrl,
 } = require("../electron/browser-host.cjs");
 
 function createContents() {
@@ -38,6 +39,13 @@ test("browser surface visibility requires both requested and active state", () =
   assert.equal(browserViewVisible(false, true, true), false);
   assert.equal(browserViewVisible(true, true, false), false);
   assert.equal(browserViewVisible(true, true, true), true);
+});
+
+test("smoke preserves an already-hydrated Temporary Chat page", () => {
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=true"), true);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=false"), false);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/c/abc?temporary-chat=true"), false);
+  assert.equal(isTemporaryChatUrl("not a url"), false);
 });
 
 test("browser surface reactivation preserves its last measured bounds", () => {

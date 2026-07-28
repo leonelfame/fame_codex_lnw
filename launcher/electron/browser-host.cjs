@@ -78,6 +78,18 @@ function allowedAuthUrl(value) {
   );
 }
 
+function isTemporaryChatUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.origin === CHATGPT_ORIGIN
+    && parsed.pathname === "/"
+    && parsed.searchParams.get("temporary-chat") === "true";
+}
+
 class BrowserHost {
   constructor({ window, descriptorPath, cdpPort, control, helper, logger, publishState }) {
     this.window = window;
@@ -511,7 +523,9 @@ class BrowserHost {
     await this.waitForSurfaceReady();
     this.setState({ status: "testing", message: "Running browser smoke test" });
     this.logger.info("smoke.started");
-    await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
+      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    }
     await this.waitForAuthenticated(60_000);
 
     const effortResult = await this.selectHighEffort();
@@ -852,5 +866,6 @@ module.exports = {
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
+  isTemporaryChatUrl,
   TEMPORARY_CHAT_URL,
 };
