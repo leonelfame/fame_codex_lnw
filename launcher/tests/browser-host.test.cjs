@@ -120,56 +120,49 @@ test("embedded ChatGPT is constrained to the owned horizontal viewport", () => {
   assert.match(CHATGPT_VIEWPORT_CSS, /overscroll-behavior-x:\s*none !important/);
 });
 
-test("smoke effort selection waits for the control and confirms High", async () => {
+test("smoke effort selection uses trusted input and localized labels only for confirmation", async () => {
   let controlReads = 0;
-  let optionReads = 0;
-  let confirmationReads = 0;
+  let menuReads = 0;
+  const inputEvents = [];
   const fixture = {
+    clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
+    pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
+    readEffortControl: BrowserHost.prototype.readEffortControl,
+    waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
+    waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        sendInputEvent: (event) => inputEvents.push(event),
         executeJavaScript: async (source) => {
-          if (source.includes("effort-control-open")) {
+          if (source.includes("effort-control-read")) {
             controlReads += 1;
             if (controlReads === 1) {
               return {
                 found: false,
-                current: null,
-                labels: [],
                 composer: true,
                 readyState: "complete",
-                loading: true,
                 url: "https://chatgpt.com/?temporary-chat=true",
               };
             }
             return {
               found: true,
-              current: "Medium",
-              labels: ["Medium"],
+              label: controlReads < 4 ? "Средний" : "Высокий",
+              point: { x: 120, y: 80 },
               composer: true,
               readyState: "complete",
-              loading: false,
-              url: "https://chatgpt.com/?temporary-chat=true",
-              opened: true,
-            };
-          }
-          if (source.includes("effort-option-select")) {
-            optionReads += 1;
-            return optionReads === 1
-              ? { selected: false, choices: ["Instant", "Medium"] }
-              : { selected: true, choices: ["Instant", "Medium", "High"] };
-          }
-          if (source.includes("effort-control-read")) {
-            confirmationReads += 1;
-            return {
-              found: true,
-              current: confirmationReads === 1 ? "Medium" : "High",
-              labels: [confirmationReads === 1 ? "Medium" : "High"],
-              composer: true,
-              readyState: "complete",
-              loading: false,
               url: "https://chatgpt.com/?temporary-chat=true",
             };
+          }
+          if (source.includes("effort-menu-read")) {
+            menuReads += 1;
+            return menuReads === 1
+              ? { open: false, count: 0, target: null }
+              : {
+                  open: true,
+                  count: 5,
+                  target: { label: "Высокий", point: { x: 160, y: 140 } },
+                };
           }
           throw new Error("Unexpected browser script");
         },
@@ -185,23 +178,64 @@ test("smoke effort selection waits for the control and confirms High", async () 
   });
 
   assert.deepEqual(result, { effort: "High", changed: true });
-  assert.equal(controlReads, 2);
-  assert.equal(optionReads, 2);
-  assert.equal(confirmationReads, 2);
+  assert.equal(controlReads, 4);
+  assert.equal(menuReads, 2);
+  assert.deepEqual(inputEvents, [
+    { type: "mouseDown", x: 120, y: 80, button: "left", clickCount: 1 },
+    { type: "mouseUp", x: 120, y: 80, button: "left", clickCount: 1 },
+    { type: "mouseDown", x: 160, y: 140, button: "left", clickCount: 1 },
+    { type: "mouseUp", x: 160, y: 140, button: "left", clickCount: 1 },
+  ]);
+});
+
+test("smoke effort selection is idempotent without understanding the localized label", async () => {
+  const inputEvents = [];
+  const fixture = {
+    clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
+    pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
+    waitForEffortControl: async () => ({
+      found: true,
+      label: "高",
+      point: { x: 90, y: 70 },
+    }),
+    waitForEffortMenu: async () => ({
+      open: true,
+      count: 5,
+      target: { label: "高", point: { x: 140, y: 130 } },
+    }),
+    view: {
+      webContents: {
+        sendInputEvent: (event) => inputEvents.push(event),
+      },
+    },
+  };
+
+  const result = await BrowserHost.prototype.selectHighEffort.call(fixture);
+
+  assert.deepEqual(result, { effort: "High", changed: false });
+  assert.deepEqual(inputEvents, [
+    { type: "mouseDown", x: 90, y: 70, button: "left", clickCount: 1 },
+    { type: "mouseUp", x: 90, y: 70, button: "left", clickCount: 1 },
+    { type: "keyDown", keyCode: "Escape" },
+    { type: "keyUp", keyCode: "Escape" },
+  ]);
 });
 
 test("smoke effort selection fails closed with rendering diagnostics", async () => {
   const fixture = {
+    clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
+    pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
+    readEffortControl: BrowserHost.prototype.readEffortControl,
+    waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
+    waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        sendInputEvent() {},
         executeJavaScript: async () => ({
           found: false,
-          current: null,
-          labels: [],
           composer: true,
           readyState: "complete",
-          loading: true,
           url: "https://chatgpt.com/?temporary-chat=true",
         }),
       },
@@ -215,7 +249,7 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
       confirmTimeoutMs: 2,
       pollMs: 1,
     }),
-    /effort control did not become ready .*composer=ready; loading=visible/,
+    /effort control did not become ready .*composer=ready/,
   );
 });
 

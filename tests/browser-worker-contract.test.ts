@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, chatGptEffortLabelsMatch, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -10,11 +10,14 @@ test("Codex context uses the owned CDP composer transport, never the operating-s
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
 });
 
-test("effort selection is idempotent across rendered whitespace", () => {
-  expect(chatGptEffortLabelsMatch("High", "High")).toBe(true);
-  expect(chatGptEffortLabelsMatch("Instant", "Instant 5.5")).toBe(true);
-  expect(chatGptEffortLabelsMatch("Instant\n5.5", "Instant 5.5")).toBe(true);
-  expect(chatGptEffortLabelsMatch("High", "Extra High")).toBe(false);
+test("effort selection uses structural menu indices instead of localized labels", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("mode.uiEffortIndex");
+  expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
+  expect(sessionSource).toContain('[data-radix-collection-item]:not([aria-haspopup="menu"])');
+  expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
+  expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {

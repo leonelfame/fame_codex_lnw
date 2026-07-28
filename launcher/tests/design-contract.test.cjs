@@ -7,7 +7,6 @@ const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
 const styles = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
-const browserHost = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 
 test("launcher uses native macOS chrome and controlled window translucency", () => {
   assert.match(electronMain, /backgroundColor:\s*isMac\s*\?\s*"#00000000"\s*:\s*"#181818"/);
@@ -58,11 +57,6 @@ test("embedded ChatGPT is measured after its animated surface mounts", () => {
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);
   assert.match(appSource, /observer\.observe\(browserSlot\)/);
   assert.match(appSource, /ref=\{browserSlotRef\}/);
-});
-
-test("the automated ChatGPT surface uses one canonical UI locale", () => {
-  assert.match(electronMain, /appendSwitch\("lang", "en-US"\)/);
-  assert.match(browserHost, /setUserAgent\(this\.view\.webContents\.getUserAgent\(\), "en-US,en"\)/);
 });
 
 test("launcher keeps browser chrome flush and MCP instructions below the video", () => {

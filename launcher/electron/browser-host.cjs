@@ -118,7 +118,6 @@ class BrowserHost {
         backgroundThrottling: true,
       },
     });
-    this.view.webContents.session.setUserAgent(this.view.webContents.getUserAgent(), "en-US,en");
     window.contentView.addChildView(this.view);
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);
@@ -450,9 +449,8 @@ class BrowserHost {
     }
     const probe = (contents) => contents.executeJavaScript(`(() => {
       const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      const login = Array.from(document.querySelectorAll('button, a')).some((element) => /^(log in|sign in)$/i.test((element.textContent || '').trim()));
-      return { composer: Boolean(composer), login };
-    })()`, true).catch(() => ({ composer: false, login: false }));
+      return { composer: Boolean(composer), readyState: document.readyState };
+    })()`, true).catch(() => ({ composer: false, readyState: "unknown" }));
     let result = await probe(this.view.webContents);
     if (!result.composer && this.authView && !this.authView.webContents.isDestroyed()) {
       const authResult = await probe(this.authView.webContents);
@@ -471,7 +469,13 @@ class BrowserHost {
       this.setState({ ...availability, authenticated: true, url });
       if (!wasAuthenticated) this.logger.info("browser.authenticated", { url });
     } else {
-      this.setState({ status: result.login ? "signed-out" : "loading", message: result.login ? "Sign in to ChatGPT" : "Waiting for ChatGPT", authenticated: false, url });
+      const loaded = result.readyState === "complete";
+      this.setState({
+        status: loaded ? "signed-out" : "loading",
+        message: loaded ? "Sign in to ChatGPT" : "Waiting for ChatGPT",
+        authenticated: false,
+        url,
+      });
     }
     return this.snapshot();
   }
@@ -514,7 +518,7 @@ class BrowserHost {
     this.view.webContents.insertText(SMOKE_TEXT);
     await sleep(250);
     const sent = await this.view.webContents.executeJavaScript(`(() => {
-      const button = ${visibleElementScript('[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]')};
+      const button = ${visibleElementScript('[data-testid="send-button"]')};
       if (!button || button.disabled) return false;
       button.click();
       return true;
@@ -527,10 +531,9 @@ class BrowserHost {
         const turns = Array.from(document.querySelectorAll('section[data-testid^="conversation-turn-"][data-turn="assistant"]'));
         const latest = turns.at(-1);
         const text = latest ? (latest.innerText || latest.textContent || '') : '';
-        const stopVisible = Array.from(document.querySelectorAll('button')).some((button) => {
-          const label = button.getAttribute('aria-label') || button.textContent || '';
+        const stopVisible = Array.from(document.querySelectorAll('[data-testid="stop-button"]')).some((button) => {
           const rect = button.getBoundingClientRect();
-          return /stop answering/i.test(label) && rect.width > 0 && rect.height > 0;
+          return rect.width > 0 && rect.height > 0;
         });
         return { count: turns.length, text, stopVisible };
       })()`, true);
@@ -546,116 +549,146 @@ class BrowserHost {
     throw new Error("ChatGPT smoke test timed out before the expected answer appeared");
   }
 
+  clickBrowserPoint(point) {
+    const contents = this.view.webContents;
+    const x = Math.round(point.x);
+    const y = Math.round(point.y);
+    contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+    contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+  }
+
+  pressBrowserKey(keyCode) {
+    const contents = this.view.webContents;
+    contents.sendInputEvent({ type: "keyDown", keyCode });
+    contents.sendInputEvent({ type: "keyUp", keyCode });
+  }
+
+  async readEffortControl() {
+    return this.view.webContents.executeJavaScript(`(() => {
+      /* effort-control-read */
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      const form = composer?.closest('form');
+      const controls = Array.from(form?.querySelectorAll(
+        'button[aria-haspopup="menu"][data-tone="neutral"]'
+      ) || []).filter(visible);
+      const control = controls.at(-1);
+      if (!control) {
+        return {
+          found: false,
+          composer: Boolean(composer),
+          form: Boolean(form),
+          readyState: document.readyState,
+          url: location.href,
+        };
+      }
+      const rect = control.getBoundingClientRect();
+      return {
+        found: true,
+        label: normalize(control.innerText || control.textContent),
+        point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+        composer: Boolean(composer),
+        form: true,
+        readyState: document.readyState,
+        url: location.href,
+      };
+    })()`, true);
+  }
+
+  async waitForEffortControl(timeoutMs, pollMs) {
+    const deadline = Date.now() + timeoutMs;
+    let control;
+    do {
+      control = await this.readEffortControl();
+      if (control.found) return control;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT effort control did not become ready`
+      + ` (url=${control?.url || this.view.webContents.getURL()};`
+      + ` document=${control?.readyState || "unknown"}; composer=${control?.composer ? "ready" : "missing"};`
+      + ` composerForm=${control?.form ? "ready" : "missing"})`,
+    );
+  }
+
+  async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
+    const deadline = Date.now() + timeoutMs;
+    let menu;
+    do {
+      menu = await this.view.webContents.executeJavaScript(`(() => {
+        /* effort-menu-read */
+        const targetIndex = ${targetIndex};
+        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+        const visible = (element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const popovers = Array.from(document.querySelectorAll(':popover-open')).filter(visible);
+        const candidates = popovers.map((popover) => {
+          const items = Array.from(popover.querySelectorAll(
+            '[data-radix-collection-item]:not([aria-haspopup="menu"])'
+          )).filter(visible);
+          return { popover, items };
+        }).filter(({ items }) => items.length > 0);
+        const candidate = candidates.at(-1);
+        const target = candidate?.items[targetIndex];
+        if (!candidate || !target) {
+          return { open: Boolean(candidate), count: candidate?.items.length || 0, target: null };
+        }
+        const rect = target.getBoundingClientRect();
+        return {
+          open: true,
+          count: candidate.items.length,
+          target: {
+            label: normalize(target.innerText || target.textContent),
+            point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+          },
+        };
+      })()`, true);
+      if (menu.target) return menu;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT effort menu did not expose item index ${targetIndex}`
+      + ` (open=${menu?.open === true}; itemCount=${menu?.count || 0})`,
+    );
+  }
+
   async selectHighEffort({
     readyTimeoutMs = 70_000,
     optionTimeoutMs = 20_000,
     confirmTimeoutMs = 40_000,
     pollMs = 200,
   } = {}) {
-    const readControl = async (open) => this.view.webContents.executeJavaScript(`(() => {
-      /* effort-control-${open ? "open" : "read"} */
-      const labels = /^(Instant(?:\\s+5\\.5)?|Medium|High|Extra High|Pro)$/;
-      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-      const labelOf = (element) => [
-        element.innerText,
-        element.textContent,
-        element.getAttribute('aria-label'),
-        element.getAttribute('title'),
-      ].map(normalize).find((value) => labels.test(value)) || '';
-      const visible = (element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const controls = Array.from(document.querySelectorAll('button, [role="button"]'))
-        .filter((element) => !element.matches('[role="menuitem"], [role="menuitemradio"], [role="option"]'))
-        .filter(visible)
-        .map((element) => ({ element, label: labelOf(element) }))
-        .filter(({ label }) => label);
-      const current = controls.at(-1);
-      const diagnostic = {
-        found: Boolean(current),
-        current: current?.label || null,
-        labels: [...new Set(controls.map(({ label }) => label))],
-        composer: Boolean(${visibleElementScript(COMPOSER_SELECTOR)}),
-        readyState: document.readyState,
-        loading: Array.from(document.querySelectorAll('body *')).some((element) => {
-          if (element.children.length > 0 || !visible(element)) return false;
-          return normalize(element.textContent) === 'Loading';
-        }),
-        url: location.href,
-      };
-      if (!current || !${open ? "true" : "false"}) return diagnostic;
-      if (current.label === 'High') return { ...diagnostic, alreadySelected: true };
-      current.element.click();
-      return { ...diagnostic, opened: true };
-    })()`, true);
-
-    const describe = (probe) => {
-      const parts = [
-        `url=${probe?.url || this.view.webContents.getURL()}`,
-        `document=${probe?.readyState || "unknown"}`,
-        `composer=${probe?.composer ? "ready" : "missing"}`,
-        `loading=${probe?.loading ? "visible" : "not-visible"}`,
-      ];
-      if (probe?.labels?.length) parts.push(`visible efforts=${probe.labels.join(", ")}`);
-      return parts.join("; ");
-    };
-
-    let opened;
-    const readyDeadline = Date.now() + readyTimeoutMs;
-    do {
-      opened = await readControl(true);
-      if (opened.alreadySelected) return { effort: "High", changed: false };
-      if (opened.opened) break;
-      await sleep(pollMs);
-    } while (Date.now() < readyDeadline);
-    if (!opened?.opened) {
-      throw new Error(`ChatGPT effort control did not become ready (${describe(opened)})`);
+    const targetIndex = 2;
+    const control = await this.waitForEffortControl(readyTimeoutMs, pollMs);
+    this.clickBrowserPoint(control.point);
+    const menu = await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs);
+    if (control.label === menu.target.label) {
+      this.pressBrowserKey("Escape");
+      return { effort: "High", changed: false };
     }
+    this.clickBrowserPoint(menu.target.point);
 
-    let optionResult;
-    const optionDeadline = Date.now() + optionTimeoutMs;
-    do {
-      optionResult = await this.view.webContents.executeJavaScript(`(() => {
-        /* effort-option-select */
-        const labels = /^(Instant(?:\\s+5\\.5)?|Medium|High|Extra High|Pro)$/;
-        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-        const labelOf = (element) => [
-          element.innerText,
-          element.textContent,
-          element.getAttribute('aria-label'),
-          element.getAttribute('title'),
-        ].map(normalize).find((value) => labels.test(value)) || '';
-        const candidates = Array.from(document.querySelectorAll(
-          '[role="menuitem"], [role="menuitemradio"], [role="option"], button'
-        )).filter((element) => {
-          const style = getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        });
-        const choices = [...new Set(candidates.map(labelOf).filter(Boolean))];
-        const high = candidates.find((element) => labelOf(element) === 'High');
-        if (!high) return { selected: false, choices };
-        high.click();
-        return { selected: true, choices };
-      })()`, true);
-      if (optionResult.selected) break;
-      await sleep(pollMs);
-    } while (Date.now() < optionDeadline);
-    if (!optionResult?.selected) {
-      const choices = optionResult?.choices?.length ? `; available: ${optionResult.choices.join(", ")}` : "";
-      throw new Error(`ChatGPT High effort option did not become ready${choices}`);
-    }
-
+    const deadline = Date.now() + confirmTimeoutMs;
     let confirmed;
-    const confirmDeadline = Date.now() + confirmTimeoutMs;
     do {
-      confirmed = await readControl(false);
-      if (confirmed.current === "High") return { effort: "High", changed: true };
+      confirmed = await this.readEffortControl();
+      if (confirmed.found && confirmed.label === menu.target.label) {
+        return { effort: "High", changed: true };
+      }
       await sleep(pollMs);
-    } while (Date.now() < confirmDeadline);
-    throw new Error(`ChatGPT did not confirm High effort (${describe(confirmed)})`);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT did not confirm effort item index ${targetIndex}`
+      + ` (current=${JSON.stringify(confirmed?.label || null)})`,
+    );
   }
 
   async assistantTurnCount() {
@@ -731,24 +764,11 @@ class BrowserHost {
     }
     let proAvailable;
     if (detectPro) {
-      const result = await this.view.webContents.executeJavaScript(`(async () => {
-        const labels = /^(Instant(?:\\s+5\\.5)?|Medium|High|Extra High|Pro)$/;
-        const current = Array.from(document.querySelectorAll('button')).find((button) => {
-          const rect = button.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0 && labels.test((button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim());
-        });
-        if (!current) return { control: false, pro: false };
-        current.click();
-        await new Promise(resolve => setTimeout(resolve, 250));
-        const pro = Array.from(document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]')).some((element) => {
-          const rect = element.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0 && (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Pro';
-        });
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-        return { control: true, pro };
-      })()`, true);
-      if (!result.control) throw new Error("ChatGPT effort control is unavailable");
-      proAvailable = result.pro === true;
+      const control = await this.waitForEffortControl(30_000, 200);
+      this.clickBrowserPoint(control.point);
+      const menu = await this.waitForEffortMenu(0, 20_000, 200);
+      proAvailable = menu.count >= 5;
+      this.pressBrowserKey("Escape");
     }
     if (startedIdle) await this.returnToIdle();
     return { authenticated: true, temporary: true, url, ...(detectPro ? { proAvailable } : {}) };

@@ -301,11 +301,11 @@ describe("ChatGPT outer-native harness v3", () => {
       modelId: CHATGPT_WEB_MODEL_ID,
       effort: "max",
       displayLabel: "Pro",
-      uiEffortLabel: "Pro",
+      uiEffortIndex: 4,
       localTools: false,
     });
     expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", toolCapabilities)).toMatchObject({
-      uiEffortLabel: "Extra High",
+      uiEffortIndex: 3,
       localTools: true,
     });
     expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", {

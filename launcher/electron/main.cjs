@@ -55,7 +55,6 @@ const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
 app.setName("Codex Web GPT");
-app.commandLine.appendSwitch("lang", "en-US");
 if (process.platform === "win32") app.setAppUserModelId("dev.codexwebgpt.launcher");
 const configuredUserData = process.env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim();
 const launcherUserData = configuredUserData
