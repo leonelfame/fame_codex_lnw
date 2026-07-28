@@ -2,12 +2,9 @@ import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
-  CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_MODEL_PREFIX,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
-
-const NATIVE_TEMPLATE_MODEL = CHATGPT_WEB_BACKEND_MODEL;
 
 type JsonObject = Record<string, unknown>;
 
@@ -45,8 +42,7 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
 function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject {
   const requireTools = config.mode === "full";
   const candidates = models.filter(model => nativeTemplateCandidate(model, requireTools)) as JsonObject[];
-  const preferred = candidates.find(model => slug(model) === NATIVE_TEMPLATE_MODEL);
-  const template = preferred ?? candidates[0];
+  const template = candidates[0];
   if (template) return template;
   throw new Error(
     requireTools

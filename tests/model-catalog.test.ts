@@ -107,7 +107,7 @@ describe("native /models augmentation", () => {
     expect(models[1]!.context_window).toBe(300_000);
   });
 
-  test("uses the first compatible official model when the preferred native template is account-gated", () => {
+  test("uses an available compatible official model when an account exposes a smaller catalog", () => {
     const native = source();
     const models = native.models as Array<Record<string, unknown>>;
     models.splice(1, 1);
@@ -125,6 +125,24 @@ describe("native /models augmentation", () => {
     expect(web.length).toBe(4);
     expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
     expect(web.every(model => model.tool_mode === "code_mode_only")).toBe(true);
+  });
+
+  test("follows official catalog order instead of preferring a named paid-tier model", () => {
+    const native = source();
+    const sourceModels = native.models as Array<Record<string, unknown>>;
+    const sol = sourceModels[1]!;
+    const terra = {
+      ...structuredClone(sol),
+      slug: "gpt-5.6-terra",
+      display_name: "5.6 Terra",
+      shell_type: "terra-shell",
+    };
+    native.models = [sourceModels[0], terra, sol];
+
+    const result = augmentNativeModelCatalog(native, defaultConfig("full"));
+    const web = (result.models as Array<Record<string, unknown>>)
+      .filter(model => String(model.slug).startsWith("chatgpt-web/"));
+    expect(web.every(model => model.shell_type === "terra-shell")).toBe(true);
   });
 
   test("fails closed when no official model satisfies the harness contract", () => {
