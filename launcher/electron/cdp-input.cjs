@@ -135,8 +135,43 @@ async function dispatchTrustedClick({
   });
 }
 
+async function evaluatePage({
+  endpoint,
+  pageUrl,
+  expression,
+  fetchImpl,
+  WebSocketImpl,
+  timeoutMs,
+}) {
+  if (typeof expression !== "string" || !expression.trim()) {
+    throw new Error("CDP evaluation expression is required");
+  }
+  return await withPageCdp({
+    endpoint,
+    pageUrl,
+    fetchImpl,
+    WebSocketImpl,
+    timeoutMs,
+    action: async ({ send }) => {
+      const response = await send("Runtime.evaluate", {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      if (response?.exceptionDetails) {
+        const detail = response.exceptionDetails.exception?.description
+          || response.exceptionDetails.text
+          || "unknown page exception";
+        throw new Error(`CDP page evaluation failed: ${detail}`);
+      }
+      return response?.result?.value;
+    },
+  });
+}
+
 module.exports = {
   dispatchTrustedClick,
+  evaluatePage,
   resolvePageTarget,
   withPageCdp,
 };

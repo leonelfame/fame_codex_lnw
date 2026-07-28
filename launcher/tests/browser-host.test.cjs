@@ -199,41 +199,42 @@ test("smoke effort selection uses trusted input and localized labels only for co
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
     cdpPort: 17842,
     dispatchTrustedClick: async (input) => clicks.push(input),
+    evaluatePage: async ({ expression }) => {
+      if (expression.includes("effort-control-read")) {
+        controlReads += 1;
+        if (controlReads === 1) {
+          return {
+            found: false,
+            composer: true,
+            readyState: "complete",
+            url: "https://chatgpt.com/?temporary-chat=true",
+          };
+        }
+        return {
+          found: true,
+          label: controlReads < 4 ? "Средний" : "Высокий",
+          point: { x: 120, y: 80 },
+          composer: true,
+          readyState: "complete",
+          url: "https://chatgpt.com/?temporary-chat=true",
+        };
+      }
+      if (expression.includes("effort-menu-read")) {
+        menuReads += 1;
+        return menuReads <= 2
+          ? { open: false, count: 0, target: null }
+          : {
+              open: true,
+              count: 5,
+              target: { label: "Высокий", point: { x: 160, y: 140 } },
+            };
+      }
+      throw new Error("Unexpected browser script");
+    },
+    evaluateBrowserPage: BrowserHost.prototype.evaluateBrowserPage,
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
-        executeJavaScript: async (source) => {
-          if (source.includes("effort-control-read")) {
-            controlReads += 1;
-            if (controlReads === 1) {
-              return {
-                found: false,
-                composer: true,
-                readyState: "complete",
-                url: "https://chatgpt.com/?temporary-chat=true",
-              };
-            }
-            return {
-              found: true,
-              label: controlReads < 4 ? "Средний" : "Высокий",
-              point: { x: 120, y: 80 },
-              composer: true,
-              readyState: "complete",
-              url: "https://chatgpt.com/?temporary-chat=true",
-            };
-          }
-          if (source.includes("effort-menu-read")) {
-            menuReads += 1;
-            return menuReads <= 2
-              ? { open: false, count: 0, target: null }
-              : {
-                  open: true,
-                  count: 5,
-                  target: { label: "Высокий", point: { x: 160, y: 140 } },
-                };
-          }
-          throw new Error("Unexpected browser script");
-        },
       },
     },
   };
@@ -306,16 +307,18 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
     readEffortMenu: BrowserHost.prototype.readEffortMenu,
     waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
+    evaluateBrowserPage: BrowserHost.prototype.evaluateBrowserPage,
+    evaluatePage: async () => ({
+      found: false,
+      composer: true,
+      readyState: "complete",
+      url: "https://chatgpt.com/?temporary-chat=true",
+    }),
+    cdpPort: 17842,
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
         sendInputEvent() {},
-        executeJavaScript: async () => ({
-          found: false,
-          composer: true,
-          readyState: "complete",
-          url: "https://chatgpt.com/?temporary-chat=true",
-        }),
       },
     },
   };

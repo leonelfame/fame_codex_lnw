@@ -3,7 +3,7 @@ const path = require("node:path");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { dispatchTrustedClick } = require("./cdp-input.cjs");
+const { dispatchTrustedClick, evaluatePage } = require("./cdp-input.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -100,6 +100,7 @@ class BrowserHost {
     this.logger = logger;
     this.publishState = publishState;
     this.dispatchTrustedClick = dispatchTrustedClick;
+    this.evaluatePage = evaluatePage;
     this.visible = false;
     this.surfaceActive = true;
     this.activeTraceId = null;
@@ -591,6 +592,21 @@ class BrowserHost {
     }
   }
 
+  async evaluateBrowserPage(expression) {
+    const contents = this.view.webContents;
+    try {
+      return await this.evaluatePage({
+        endpoint: `http://127.0.0.1:${this.cdpPort}`,
+        pageUrl: contents.getURL(),
+        expression,
+      });
+    } catch (error) {
+      throw new Error(
+        `ChatGPT page inspection failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   pressBrowserKey(keyCode) {
     const contents = this.view.webContents;
     contents.sendInputEvent({ type: "keyDown", keyCode });
@@ -598,7 +614,7 @@ class BrowserHost {
   }
 
   async readEffortControl() {
-    return this.view.webContents.executeJavaScript(`(() => {
+    return this.evaluateBrowserPage(`(() => {
       /* effort-control-read */
       const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const visible = (element) => {
@@ -631,7 +647,7 @@ class BrowserHost {
         readyState: document.readyState,
         url: location.href,
       };
-    })()`, true);
+    })()`);
   }
 
   async waitForEffortControl(timeoutMs, pollMs) {
@@ -651,7 +667,7 @@ class BrowserHost {
   }
 
   async readEffortMenu(targetIndex) {
-    return await this.view.webContents.executeJavaScript(`(() => {
+    return await this.evaluateBrowserPage(`(() => {
         /* effort-menu-read */
         const targetIndex = ${targetIndex};
         const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -680,7 +696,7 @@ class BrowserHost {
             point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
           },
         };
-      })()`, true);
+      })()`);
   }
 
   async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
