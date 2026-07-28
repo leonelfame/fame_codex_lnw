@@ -1,13 +1,44 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain("composer.fill(prompt)");
+  expect(workerSource).toContain('composer.fill("")');
+  expect(workerSource).toContain("page.keyboard.insertText(prompt)");
   expect(workerSource).toContain("page.keyboard.insertText(` ${prompt}`)");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
+});
+
+test("read-only multiline context is inserted atomically before exact verification", async () => {
+  const prompt = `Act as the model backend for the Codex task encoded below.\n${"x".repeat(44_550)}`;
+  const calls: Array<[string, string?]> = [];
+  let asserted = "";
+  const composer = {
+    fill: async (value: string) => { calls.push(["fill", value]); },
+    focus: async () => { calls.push(["focus"]); },
+  };
+  const page = {
+    locator: () => ({ last: () => composer }),
+    keyboard: {
+      insertText: async (value: string) => { calls.push(["insertText", value]); },
+    },
+  };
+  const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
+  }).attachPrompt;
+
+  await attachPrompt.call({
+    assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
+  }, page, prompt, false);
+
+  expect(calls).toEqual([
+    ["fill", ""],
+    ["focus"],
+    ["insertText", prompt],
+  ]);
+  expect(asserted).toBe(prompt);
 });
 
 test("effort selection uses structural menu indices instead of localized labels", () => {

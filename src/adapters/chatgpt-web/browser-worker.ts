@@ -528,7 +528,12 @@ export class ChatGptBrowserWorker {
   private async attachPrompt(page: Page, prompt: string, localTools: boolean): Promise<void> {
     const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
     if (!localTools) {
-      await composer.fill(prompt);
+      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
+      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
+      // then transport the complete text in one CDP Input.insertText command.
+      await composer.fill("");
+      await composer.focus();
+      await page.keyboard.insertText(prompt);
       await this.assertPromptAttached(page, prompt);
       return;
     }
