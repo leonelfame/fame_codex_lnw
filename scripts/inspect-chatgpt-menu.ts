@@ -16,7 +16,7 @@ const target = targets.find(candidate => (
 ));
 if (!target?.webSocketDebuggerUrl) throw new Error("The launcher CDP endpoint has no ChatGPT page target");
 
-const expression = `(() => {
+const inspectExpression = `(() => {
   const visible = (candidate) => {
     const style = getComputedStyle(candidate);
     const rect = candidate.getBoundingClientRect();
@@ -113,6 +113,76 @@ const expression = `(() => {
   };
 })()`;
 
+const exerciseExpression = `(async () => {
+  const visible = (candidate) => {
+    const style = getComputedStyle(candidate);
+    const rect = candidate.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const sleep = (milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const effortControl = Array.from(document.querySelectorAll('button[aria-haspopup="menu"][data-tone="neutral"]'))
+    .filter(visible)
+    .at(-1);
+  if (!effortControl) return { ok: false, stage: 'control', error: 'effort control not found' };
+  const menuSelector = '[data-testid="composer-intelligence-picker-content"][role="group"]';
+  const readMenu = () => {
+    const menu = Array.from(document.querySelectorAll(menuSelector)).filter(visible).at(-1);
+    const items = menu
+      ? Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible)
+      : [];
+    return { menu, items };
+  };
+  const waitFor = async (predicate, timeoutMs) => {
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      const value = predicate();
+      if (value) return value;
+      await sleep(50);
+    }
+    return null;
+  };
+
+  if (readMenu().menu) {
+    effortControl.click();
+    if (!await waitFor(() => !readMenu().menu, 5_000)) {
+      return { ok: false, stage: 'close', error: 'menu did not close after semantic control click' };
+    }
+  }
+
+  const openedAt = performance.now();
+  effortControl.click();
+  const opened = await waitFor(() => {
+    const state = readMenu();
+    return state.items.length >= 5 ? state : null;
+  }, 5_000);
+  if (!opened) {
+    const state = readMenu();
+    return { ok: false, stage: 'open', itemCount: state.items.length };
+  }
+
+  const target = opened.items[2];
+  const targetLabel = (target.innerText || target.textContent || '').replace(/\\s+/g, ' ').trim();
+  target.click();
+  const confirmed = await waitFor(() => {
+    const label = (effortControl.innerText || effortControl.textContent || '').replace(/\\s+/g, ' ').trim();
+    return label === targetLabel ? label : null;
+  }, 5_000);
+  return {
+    ok: Boolean(confirmed),
+    stage: confirmed ? 'confirmed' : 'confirm',
+    itemCount: opened.items.length,
+    openLatencyMs: Math.round(performance.now() - openedAt),
+    targetIndex: 2,
+    targetLabel,
+    confirmedLabel: confirmed,
+  };
+})()`;
+
+const expression = process.argv.includes("--exercise") ? exerciseExpression : inspectExpression;
+
 const popovers = await new Promise<unknown>((resolveResult, rejectResult) => {
   const socket = new WebSocket(target.webSocketDebuggerUrl!);
   const timeout = setTimeout(() => {
@@ -123,7 +193,7 @@ const popovers = await new Promise<unknown>((resolveResult, rejectResult) => {
     socket.send(JSON.stringify({
       id: 1,
       method: "Runtime.evaluate",
-      params: { expression, returnByValue: true },
+      params: { expression, returnByValue: true, awaitPromise: true },
     }));
   });
   socket.addEventListener("message", (event) => {
