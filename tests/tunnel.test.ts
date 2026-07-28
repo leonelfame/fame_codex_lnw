@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTunnelStatus } from "../src/tunnel";
+import { parseTunnelStatus, tunnelConnectLaunchError } from "../src/tunnel";
 
 describe("tunnel status boundary", () => {
   test("requires the managed runtime process, health, and readiness together", () => {
@@ -31,5 +31,35 @@ describe("tunnel status boundary", () => {
     );
     expect(result.detail).toBe("failed [tunnel-id] with [redacted-key]");
     expect(result.detail).not.toContain("0123456789abcdef");
+  });
+
+  test("surfaces and redacts an immediate managed-runtime launch failure", () => {
+    const detail = tunnelConnectLaunchError(JSON.stringify({
+      running: false,
+      exit_code: 1,
+      launch_diagnostics: {
+        log_tail: "403 for tunnel_0123456789abcdef0123456789abcdef using sk-secretsecretsecret",
+      },
+    }));
+
+    expect(detail).toBe("exit_code=1; runtime_log=403 for [tunnel-id] using [redacted-key]");
+  });
+
+  test("includes the managed runtime log tail in stopped status diagnostics", () => {
+    const result = parseTunnelStatus(JSON.stringify({
+      process_running: false,
+      healthy: false,
+      ready: false,
+      runtime_state: "stopped",
+      local: {
+        issues: ["recorded process pid is not running"],
+        log: {
+          tail: "runtime startup failed with sk-secretsecretsecret",
+        },
+      },
+    }));
+
+    expect(result.detail).toContain("runtime_log=runtime startup failed with [redacted-key]");
+    expect(result.detail).not.toContain("sk-secret");
   });
 });

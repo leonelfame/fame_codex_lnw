@@ -209,7 +209,7 @@ function tunnel(config: AppConfig): TunnelConfig {
 export function connectTunnel(config: AppConfig): void {
   const settings = tunnel(config);
   mkdirSync(settings.profileDir, { recursive: true, mode: 0o700 });
-  runChecked(settings.binaryPath, [
+  const result = runChecked(settings.binaryPath, [
     "runtimes", "connect",
     "--alias", settings.alias,
     "--profile", settings.profileName,
@@ -220,6 +220,8 @@ export function connectTunnel(config: AppConfig): void {
     "--mcp-command", mcpCommand(config),
     "--json",
   ], { timeout: 60_000 });
+  const launchError = tunnelConnectLaunchError(result.stdout);
+  if (launchError) throw new Error(`Tunnel runtime exited during launch: ${launchError}`);
 }
 
 export function stopTunnel(config: AppConfig): void {
@@ -249,6 +251,45 @@ function safeTunnelDetail(value: unknown): string {
     .replace(/tunnel_[a-f0-9]{32}/g, "[tunnel-id]")
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, "[redacted-key]")
     .slice(0, 2_000);
+}
+
+function nestedRecord(value: unknown, key: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const nested = (value as Record<string, unknown>)[key];
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : undefined;
+}
+
+function runtimeLogTail(parsed: Record<string, unknown>): string | undefined {
+  const launchTail = nestedRecord(parsed, "launch_diagnostics")?.log_tail;
+  if (typeof launchTail === "string" && launchTail.trim()) return launchTail.trim();
+  const statusTail = nestedRecord(nestedRecord(parsed, "local"), "log")?.tail;
+  return typeof statusTail === "string" && statusTail.trim() ? statusTail.trim() : undefined;
+}
+
+export function tunnelConnectLaunchError(output: string): string | undefined {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(output) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  if (parsed.running !== false) return undefined;
+  const diagnostics = nestedRecord(parsed, "launch_diagnostics");
+  const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code
+    : typeof diagnostics?.exit_code === "number" ? diagnostics.exit_code
+      : undefined;
+  const remoteError = typeof parsed.remote_error === "string" && parsed.remote_error.trim()
+    ? parsed.remote_error.trim()
+    : undefined;
+  const logTail = runtimeLogTail(parsed);
+  return safeTunnelDetail([
+    ...(exitCode !== undefined ? [`exit_code=${exitCode}`] : []),
+    ...(remoteError ? [`remote_error=${remoteError}`] : []),
+    ...(logTail ? [`runtime_log=${logTail}`] : []),
+    ...(!remoteError && !logTail ? ["runtime exited before becoming healthy"] : []),
+  ].join("; "));
 }
 
 function launcherTunnelProcessRunning(): boolean {
@@ -289,10 +330,19 @@ export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntime
       ? ((parsed.local as { issues: unknown[] }).issues).filter(issue => typeof issue === "string").slice(0, 3)
       : [];
     const explicitError = typeof parsed.error === "string" && parsed.error ? parsed.error : undefined;
+    const logTail = runtimeLogTail(parsed);
     const ok = processRunning && healthy && ready;
     const detail = ok
       ? "process_running=true healthy=true ready=true"
-      : safeTunnelDetail([`process_running=${processRunning}`, `healthy=${healthy}`, `ready=${ready}`, ...(state ? [`state=${state}`] : []), ...(explicitError ? [explicitError] : []), ...issues].join("; "));
+      : safeTunnelDetail([
+        `process_running=${processRunning}`,
+        `healthy=${healthy}`,
+        `ready=${ready}`,
+        ...(state ? [`state=${state}`] : []),
+        ...(explicitError ? [explicitError] : []),
+        ...issues,
+        ...(logTail ? [`runtime_log=${logTail}`] : []),
+      ].join("; "));
     return { ok, processRunning, healthy, ready, ...(state ? { state } : {}), detail };
   } catch {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: `tunnel-client returned non-JSON status: ${safeTunnelDetail(output)}` };
