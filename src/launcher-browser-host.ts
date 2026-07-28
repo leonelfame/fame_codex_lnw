@@ -20,6 +20,7 @@ export interface LauncherBrowserHostDescriptor {
   };
   partition: string;
   idleUrl: string;
+  surfaceId: string;
   createdAt: string;
 }
 
@@ -80,6 +81,9 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (descriptor.idleUrl !== "about:blank#codex-web-gpt-browser-host") {
     throw new Error("Launcher browser descriptor identifies an unexpected idle surface");
   }
+  if (typeof descriptor.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(descriptor.surfaceId)) {
+    throw new Error("Launcher browser descriptor has an invalid owned surface id");
+  }
   if (typeof descriptor.createdAt !== "string" || Number.isNaN(Date.parse(descriptor.createdAt))) {
     throw new Error("Launcher browser descriptor has an invalid creation time");
   }
@@ -92,6 +96,7 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
     helper: { executable: helperExecutable, script: helperScript },
     partition: descriptor.partition,
     idleUrl: descriptor.idleUrl,
+    surfaceId: descriptor.surfaceId,
     createdAt: descriptor.createdAt,
   };
 }
@@ -136,22 +141,31 @@ async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeout
   }
 }
 
-async function selectLauncherPage(
+export async function selectLauncherPage(
   browser: Browser,
   descriptor: LauncherBrowserHostDescriptor,
+  timeoutMs: number,
 ): Promise<{ context: BrowserContext; page: Page }> {
-  const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
-  const temporary = candidates.find(({ page }) => {
-    try {
-      const url = new URL(page.url());
-      return url.origin === "https://chatgpt.com" && url.searchParams.get("temporary-chat") === "true";
-    } catch { return false; }
-  });
-  const chatGpt = temporary ?? candidates.find(({ page }) => page.url().startsWith("https://chatgpt.com/"));
-  const idle = candidates.find(({ page }) => page.url() === descriptor.idleUrl);
-  const owned = chatGpt ?? idle;
-  if (!owned) throw new Error("Launcher browser host has no owned ChatGPT surface");
-  return owned;
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
+    const inspected = await Promise.all(candidates.map(async candidate => ({
+      ...candidate,
+      surfaceId: await candidate.page.evaluate(
+        () => (globalThis as typeof globalThis & { __CODEX_WEB_GPT_SURFACE_ID__?: unknown })
+          .__CODEX_WEB_GPT_SURFACE_ID__,
+      ).catch(() => undefined),
+    })));
+    const owned = inspected.filter(candidate => candidate.surfaceId === descriptor.surfaceId);
+    if (owned.length === 1) {
+      return { context: owned[0].context, page: owned[0].page };
+    }
+    if (owned.length > 1) {
+      throw new Error(`Launcher browser host exposed ${owned.length} surfaces with the same ownership id`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  throw new Error("Launcher browser host did not expose its owned browser surface");
 }
 
 export async function connectLauncherBrowserHost(
@@ -166,7 +180,7 @@ export async function connectLauncherBrowserHost(
   } catch (error) {
     throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const { context, page } = await selectLauncherPage(browser, descriptor);
+  const { context, page } = await selectLauncherPage(browser, descriptor, timeoutMs);
   return { descriptor, browser, context, page };
 }
 

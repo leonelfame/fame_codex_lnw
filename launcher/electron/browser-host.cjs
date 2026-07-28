@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
@@ -101,6 +102,7 @@ class BrowserHost {
     this.publishState = publishState;
     this.dispatchTrustedClick = dispatchTrustedClick;
     this.evaluatePage = evaluatePage;
+    this.surfaceId = randomBytes(24).toString("base64url");
     this.visible = false;
     this.surfaceActive = true;
     this.activeTraceId = null;
@@ -171,7 +173,14 @@ class BrowserHost {
     contents.on("did-finish-load", () => {
       this.setState({ url: contents.getURL(), loading: false });
       void this.applyViewportCss();
-      void this.probeAuthentication();
+      void this.markOwnedSurface()
+        .then(() => this.probeAuthentication())
+        .catch((error) => {
+          this.logger.error("browser.surface_mark_failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          this.setState({ status: "error", message: "Embedded browser ownership could not be established" });
+        });
     });
     contents.on("did-start-loading", () => this.setState({ loading: true }));
     contents.on("did-stop-loading", () => this.setState({ loading: false }));
@@ -313,6 +322,19 @@ class BrowserHost {
       this.viewportCssKey = null;
     }
     this.viewportCssKey = await contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => null);
+  }
+
+  async markOwnedSurface() {
+    const surfaceId = JSON.stringify(this.surfaceId);
+    await this.view.webContents.executeJavaScript(`(() => {
+      Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
+        value: ${surfaceId},
+        configurable: true,
+        enumerable: false,
+        writable: false,
+      });
+      document.documentElement.dataset.codexWebGptSurface = ${surfaceId};
+    })()`, true);
   }
 
   show() {
@@ -581,8 +603,7 @@ class BrowserHost {
     const contents = this.view.webContents;
     try {
       await this.dispatchTrustedClick({
-        endpoint: `http://127.0.0.1:${this.cdpPort}`,
-        pageUrl: contents.getURL(),
+        debuggerClient: contents.debugger,
         point,
       });
     } catch (error) {
@@ -596,8 +617,7 @@ class BrowserHost {
     const contents = this.view.webContents;
     try {
       return await this.evaluatePage({
-        endpoint: `http://127.0.0.1:${this.cdpPort}`,
-        pageUrl: contents.getURL(),
+        debuggerClient: contents.debugger,
         expression,
       });
     } catch (error) {
@@ -862,6 +882,7 @@ class BrowserHost {
       helper: this.helper,
       partition: "persist:codex-web-gpt-chatgpt",
       idleUrl: IDLE_BROWSER_URL,
+      surfaceId: this.surfaceId,
       createdAt: new Date().toISOString(),
     };
     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);

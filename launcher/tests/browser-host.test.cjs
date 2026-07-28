@@ -184,6 +184,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
   assert.match(source, /\[data-testid="composer-intelligence-picker-content"\]\[role="group"\]/);
   assert.match(source, /\[role="menuitemradio"\]/);
   assert.match(cdpSource, /Input\.dispatchMouseEvent/);
+  assert.match(cdpSource, /debuggerClient/);
   assert.doesNotMatch(source, /:popover-open/);
   assert.doesNotMatch(source, /data-radix-collection-item/);
 
@@ -197,7 +198,6 @@ test("smoke effort selection uses trusted input and localized labels only for co
     readEffortMenu: BrowserHost.prototype.readEffortMenu,
     waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
-    cdpPort: 17842,
     dispatchTrustedClick: async (input) => clicks.push(input),
     evaluatePage: async ({ expression }) => {
       if (expression.includes("effort-control-read")) {
@@ -234,6 +234,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
     evaluateBrowserPage: BrowserHost.prototype.evaluateBrowserPage,
     view: {
       webContents: {
+        debugger: {},
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
       },
     },
@@ -251,13 +252,11 @@ test("smoke effort selection uses trusted input and localized labels only for co
   assert.equal(menuReads, 3);
   assert.deepEqual(clicks, [
     {
-      endpoint: "http://127.0.0.1:17842",
-      pageUrl: "https://chatgpt.com/?temporary-chat=true",
+      debuggerClient: {},
       point: { x: 120, y: 80 },
     },
     {
-      endpoint: "http://127.0.0.1:17842",
-      pageUrl: "https://chatgpt.com/?temporary-chat=true",
+      debuggerClient: {},
       point: { x: 160, y: 140 },
     },
   ]);
@@ -314,9 +313,9 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
       readyState: "complete",
       url: "https://chatgpt.com/?temporary-chat=true",
     }),
-    cdpPort: 17842,
     view: {
       webContents: {
+        debugger: {},
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
         sendInputEvent() {},
       },

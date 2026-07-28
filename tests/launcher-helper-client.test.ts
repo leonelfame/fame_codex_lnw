@@ -41,6 +41,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
     helper: { executable: process.execPath, script: helper },
     partition: "persist:codex-web-gpt-chatgpt",
     idleUrl: "about:blank#codex-web-gpt-browser-host",
+    surfaceId: "launcher_surface_id_0123456789AB",
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
   const config: ResolvedBrowserConfig = {
