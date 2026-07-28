@@ -545,30 +545,116 @@ class BrowserHost {
     throw new Error("ChatGPT smoke test timed out before the expected answer appeared");
   }
 
-  async selectHighEffort() {
-    const opened = await this.view.webContents.executeJavaScript(`(() => {
+  async selectHighEffort({
+    readyTimeoutMs = 70_000,
+    optionTimeoutMs = 20_000,
+    confirmTimeoutMs = 40_000,
+    pollMs = 200,
+  } = {}) {
+    const readControl = async (open) => this.view.webContents.executeJavaScript(`(() => {
+      /* effort-control-${open ? "open" : "read"} */
       const labels = /^(Instant(?:\\s+5\\.5)?|Medium|High|Extra High|Pro)$/;
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const current = buttons.find((button) => labels.test((button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim()) && button.getBoundingClientRect().width > 0);
-      if (!current) return { opened: false, current: null };
-      const currentLabel = (current.innerText || current.textContent || '').replace(/\\s+/g, ' ').trim();
-      if (currentLabel === 'High') return { opened: false, current: currentLabel, alreadySelected: true };
-      current.click();
-      return { opened: true, current: currentLabel };
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const labelOf = (element) => [
+        element.innerText,
+        element.textContent,
+        element.getAttribute('aria-label'),
+        element.getAttribute('title'),
+      ].map(normalize).find((value) => labels.test(value)) || '';
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const controls = Array.from(document.querySelectorAll('button, [role="button"]'))
+        .filter((element) => !element.matches('[role="menuitem"], [role="menuitemradio"], [role="option"]'))
+        .filter(visible)
+        .map((element) => ({ element, label: labelOf(element) }))
+        .filter(({ label }) => label);
+      const current = controls.at(-1);
+      const diagnostic = {
+        found: Boolean(current),
+        current: current?.label || null,
+        labels: [...new Set(controls.map(({ label }) => label))],
+        composer: Boolean(${visibleElementScript(COMPOSER_SELECTOR)}),
+        readyState: document.readyState,
+        loading: Array.from(document.querySelectorAll('body *')).some((element) => {
+          if (element.children.length > 0 || !visible(element)) return false;
+          return normalize(element.textContent) === 'Loading';
+        }),
+        url: location.href,
+      };
+      if (!current || !${open ? "true" : "false"}) return diagnostic;
+      if (current.label === 'High') return { ...diagnostic, alreadySelected: true };
+      current.element.click();
+      return { ...diagnostic, opened: true };
     })()`, true);
-    if (opened.alreadySelected) return { effort: "High", changed: false };
-    if (!opened.opened) throw new Error("ChatGPT effort control was not found");
-    await sleep(300);
-    const selected = await this.view.webContents.executeJavaScript(`(() => {
-      const candidates = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button'));
-      const high = candidates.find((element) => (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim() === 'High' && element.getBoundingClientRect().width > 0);
-      if (!high) return false;
-      high.click();
-      return true;
-    })()`, true);
-    if (!selected) throw new Error("ChatGPT High effort option was not found");
-    await sleep(250);
-    return { effort: "High", changed: true };
+
+    const describe = (probe) => {
+      const parts = [
+        `url=${probe?.url || this.view.webContents.getURL()}`,
+        `document=${probe?.readyState || "unknown"}`,
+        `composer=${probe?.composer ? "ready" : "missing"}`,
+        `loading=${probe?.loading ? "visible" : "not-visible"}`,
+      ];
+      if (probe?.labels?.length) parts.push(`visible efforts=${probe.labels.join(", ")}`);
+      return parts.join("; ");
+    };
+
+    let opened;
+    const readyDeadline = Date.now() + readyTimeoutMs;
+    do {
+      opened = await readControl(true);
+      if (opened.alreadySelected) return { effort: "High", changed: false };
+      if (opened.opened) break;
+      await sleep(pollMs);
+    } while (Date.now() < readyDeadline);
+    if (!opened?.opened) {
+      throw new Error(`ChatGPT effort control did not become ready (${describe(opened)})`);
+    }
+
+    let optionResult;
+    const optionDeadline = Date.now() + optionTimeoutMs;
+    do {
+      optionResult = await this.view.webContents.executeJavaScript(`(() => {
+        /* effort-option-select */
+        const labels = /^(Instant(?:\\s+5\\.5)?|Medium|High|Extra High|Pro)$/;
+        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+        const labelOf = (element) => [
+          element.innerText,
+          element.textContent,
+          element.getAttribute('aria-label'),
+          element.getAttribute('title'),
+        ].map(normalize).find((value) => labels.test(value)) || '';
+        const candidates = Array.from(document.querySelectorAll(
+          '[role="menuitem"], [role="menuitemradio"], [role="option"], button'
+        )).filter((element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        });
+        const choices = [...new Set(candidates.map(labelOf).filter(Boolean))];
+        const high = candidates.find((element) => labelOf(element) === 'High');
+        if (!high) return { selected: false, choices };
+        high.click();
+        return { selected: true, choices };
+      })()`, true);
+      if (optionResult.selected) break;
+      await sleep(pollMs);
+    } while (Date.now() < optionDeadline);
+    if (!optionResult?.selected) {
+      const choices = optionResult?.choices?.length ? `; available: ${optionResult.choices.join(", ")}` : "";
+      throw new Error(`ChatGPT High effort option did not become ready${choices}`);
+    }
+
+    let confirmed;
+    const confirmDeadline = Date.now() + confirmTimeoutMs;
+    do {
+      confirmed = await readControl(false);
+      if (confirmed.current === "High") return { effort: "High", changed: true };
+      await sleep(pollMs);
+    } while (Date.now() < confirmDeadline);
+    throw new Error(`ChatGPT did not confirm High effort (${describe(confirmed)})`);
   }
 
   async assistantTurnCount() {

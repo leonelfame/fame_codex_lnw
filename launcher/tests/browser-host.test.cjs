@@ -120,6 +120,105 @@ test("embedded ChatGPT is constrained to the owned horizontal viewport", () => {
   assert.match(CHATGPT_VIEWPORT_CSS, /overscroll-behavior-x:\s*none !important/);
 });
 
+test("smoke effort selection waits for the control and confirms High", async () => {
+  let controlReads = 0;
+  let optionReads = 0;
+  let confirmationReads = 0;
+  const fixture = {
+    view: {
+      webContents: {
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        executeJavaScript: async (source) => {
+          if (source.includes("effort-control-open")) {
+            controlReads += 1;
+            if (controlReads === 1) {
+              return {
+                found: false,
+                current: null,
+                labels: [],
+                composer: true,
+                readyState: "complete",
+                loading: true,
+                url: "https://chatgpt.com/?temporary-chat=true",
+              };
+            }
+            return {
+              found: true,
+              current: "Medium",
+              labels: ["Medium"],
+              composer: true,
+              readyState: "complete",
+              loading: false,
+              url: "https://chatgpt.com/?temporary-chat=true",
+              opened: true,
+            };
+          }
+          if (source.includes("effort-option-select")) {
+            optionReads += 1;
+            return optionReads === 1
+              ? { selected: false, choices: ["Instant", "Medium"] }
+              : { selected: true, choices: ["Instant", "Medium", "High"] };
+          }
+          if (source.includes("effort-control-read")) {
+            confirmationReads += 1;
+            return {
+              found: true,
+              current: confirmationReads === 1 ? "Medium" : "High",
+              labels: [confirmationReads === 1 ? "Medium" : "High"],
+              composer: true,
+              readyState: "complete",
+              loading: false,
+              url: "https://chatgpt.com/?temporary-chat=true",
+            };
+          }
+          throw new Error("Unexpected browser script");
+        },
+      },
+    },
+  };
+
+  const result = await BrowserHost.prototype.selectHighEffort.call(fixture, {
+    readyTimeoutMs: 100,
+    optionTimeoutMs: 100,
+    confirmTimeoutMs: 100,
+    pollMs: 1,
+  });
+
+  assert.deepEqual(result, { effort: "High", changed: true });
+  assert.equal(controlReads, 2);
+  assert.equal(optionReads, 2);
+  assert.equal(confirmationReads, 2);
+});
+
+test("smoke effort selection fails closed with rendering diagnostics", async () => {
+  const fixture = {
+    view: {
+      webContents: {
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        executeJavaScript: async () => ({
+          found: false,
+          current: null,
+          labels: [],
+          composer: true,
+          readyState: "complete",
+          loading: true,
+          url: "https://chatgpt.com/?temporary-chat=true",
+        }),
+      },
+    },
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.selectHighEffort.call(fixture, {
+      readyTimeoutMs: 2,
+      optionTimeoutMs: 2,
+      confirmTimeoutMs: 2,
+      pollMs: 1,
+    }),
+    /effort control did not become ready .*composer=ready; loading=visible/,
+  );
+});
+
 test("a stale helper cannot end a replacement turn with the same trace id", async () => {
   await assert.rejects(
     BrowserHost.prototype.endTurn.call(
