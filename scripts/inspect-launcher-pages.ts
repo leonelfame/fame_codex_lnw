@@ -11,6 +11,20 @@ try {
   const pages = browser.contexts().flatMap((context, contextIndex) => (
     context.pages().map((page, pageIndex) => ({ contextIndex, pageIndex, page }))
   ));
+  let smokeResult: unknown;
+  if (process.argv.includes("--smoke")) {
+    const renderer = pages.find(({ page }) => page.url().startsWith("http://127.0.0.1:4178"));
+    if (!renderer) throw new Error("Launcher renderer page was not found");
+    smokeResult = await renderer.page.evaluate(async () => {
+      const launcher = (globalThis as typeof globalThis & {
+        codexWebLauncher?: {
+          smokeTest(): Promise<unknown>;
+        };
+      }).codexWebLauncher;
+      if (!launcher) throw new Error("Launcher renderer API is unavailable");
+      return await launcher.smokeTest();
+    });
+  }
   const inspected = await Promise.all(pages.map(async ({ contextIndex, pageIndex, page }) => ({
     contextIndex,
     pageIndex,
@@ -45,6 +59,7 @@ try {
   })));
   console.log(JSON.stringify({
     descriptorSurfaceId: descriptor.surfaceId,
+    ...(process.argv.includes("--smoke") ? { smokeResult } : {}),
     pages: inspected,
   }, null, 2));
 } finally {
