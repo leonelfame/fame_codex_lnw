@@ -15,7 +15,8 @@ Core invariants:
 
 Before opening a pull request:
 
-1. Run `bun install --frozen-lockfile` and `bun run verify` on macOS.
+1. Run `bun install --frozen-lockfile`, `bun install --frozen-lockfile` in `launcher/`, and
+   `bun run verify`.
 2. Add a focused regression test for protocol, compaction, MCP, browser parsing, or installer changes.
 3. Do not commit cookies, browser state, tunnel ids, API keys, local absolute paths, or generated logs.
 4. Preserve fail-closed behavior. A UI selector failure must not pick another model or claim success.
@@ -23,3 +24,7 @@ Before opening a pull request:
 
 Browser UI changes should include the exact observed DOM evidence and a reproducible test fixture.
 Do not broaden selectors speculatively.
+
+Launcher changes must preserve native packaging on macOS, Windows, and Linux. Each package embeds a
+platform-matched Bun runtime, so build it on the matching OS rather than cross-packaging. CI runs
+the full verification and native package job on all three operating systems.

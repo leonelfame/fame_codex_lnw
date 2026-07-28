@@ -7,6 +7,7 @@ import { CHATGPT_TEMPORARY_CHAT_URL } from "../src/chatgpt-session";
 import { defaultConfig } from "../src/config";
 
 test("login starts with normal Chrome and captures state in a headed Keychain-aware context", async () => {
+  if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-login-"));
   const executable = join(root, "fake-chrome");
   const argsLog = join(root, "args.log");

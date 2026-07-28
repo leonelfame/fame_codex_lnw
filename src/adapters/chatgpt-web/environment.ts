@@ -38,6 +38,11 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function pathIdentity(value: string): string {
+  const normalized = resolve(value);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 function clientTurnMetadata(parsed: CodexParsedRequest): Record<string, unknown> | undefined {
   const body = record(parsed._rawBody);
   const metadata = record(body?.client_metadata);
@@ -112,7 +117,7 @@ function workspaceMetadataEnvironmentBeforeUser(
   if (!workspaces || !metadataSandbox) return undefined;
   const metadataRoots = Object.keys(workspaces);
   if (metadataRoots.length === 0 || metadataRoots.some(path => !isAbsolute(path))) return undefined;
-  const normalizedMetadataRoots = [...new Set(metadataRoots.map(path => resolve(path)))];
+  const normalizedMetadataRoots = [...new Set(metadataRoots.map(pathIdentity))];
 
   const user = record(input[userIndex]);
   const candidate = record(input[userIndex - 1]);
@@ -130,9 +135,9 @@ function workspaceMetadataEnvironmentBeforeUser(
     if (cwdMatches.length !== 1 || !isAbsolute(cwdMatches[0]!)) continue;
     const rootMatches = [...trimmed.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
       .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => decodeXmlText(match[1]!.trim())));
-    const declaredRoots = [...new Set((rootMatches.length > 0 ? rootMatches : cwdMatches).map(path => resolve(path)))];
+    const declaredRoots = [...new Set((rootMatches.length > 0 ? rootMatches : cwdMatches).map(pathIdentity))];
     if (declaredRoots.some(path => !normalizedMetadataRoots.includes(path))) continue;
-    if (!normalizedMetadataRoots.some(root => matchesPath(root, resolve(cwdMatches[0]!)))) continue;
+    if (!normalizedMetadataRoots.some(root => matchesPath(root, pathIdentity(cwdMatches[0]!)))) continue;
     if (sandboxTypeFromEnvironment(trimmed) !== metadataSandbox) continue;
     return trimmed;
   }
@@ -215,11 +220,15 @@ function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
   if (decoded.some(path => !isAbsolute(path))) throw new Error(`ChatGPT web ${field} must contain absolute paths`);
-  return [...new Set(decoded.map(path => resolve(path)))];
+  const unique = new Map<string, string>();
+  for (const path of decoded.map(value => resolve(value))) {
+    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
+  }
+  return [...unique.values()];
 }
 
 function matchesPath(root: string, path: string): boolean {
-  const rel = relative(root, path);
+  const rel = relative(pathIdentity(root), pathIdentity(path));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 

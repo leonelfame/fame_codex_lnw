@@ -14,6 +14,7 @@ import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapter
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
+import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
@@ -37,6 +38,12 @@ const environmentXml = `<environment_context>
 </environment_context>`;
 const toolCapabilities = { localToolsEnabled: true, proAvailable: true };
 const readOnlyCapabilities = { localToolsEnabled: false, proAvailable: true };
+
+function brokerTestEndpoint(name: string): string {
+  return process.platform === "win32"
+    ? defaultBrokerEndpoint(join(tmpdir(), name), "win32")
+    : join(tmpdir(), `${name}.sock`);
+}
 
 function parsed(developerText?: string): CodexParsedRequest {
   return {
@@ -487,7 +494,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("holds an MCP invocation until the outer Codex result arrives", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
     const token = await broker.register(environment, 10_000);
@@ -508,7 +515,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("makes capability claim retries idempotent until the turn is revoked", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-claim-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-claim-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const token = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000);
     const first = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -518,7 +525,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("batches parallel ChatGPT MCP calls into one native Responses round", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-parallel-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-parallel-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const token = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000);
     const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -539,7 +546,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("revoking a turn rejects pending invocations and invalidates its binding", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-revoke-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-revoke-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const token = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000);
     const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -558,7 +565,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("keeps one browser response alive across the native outer Codex tool loop", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-adapter-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt",
@@ -664,7 +671,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("runs Pro as one context-complete read-only browser turn with native warning, tracing, and exact replay", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-pro-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-pro-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt-pro-test",
@@ -768,7 +775,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("serves the complete outer-native bridge contract over MCP stdio", async () => {
-    const socketPath = join(tmpdir(), `cgw-h3-mcp-${process.pid}-${Date.now()}.sock`);
+    const socketPath = brokerTestEndpoint(`cgw-h3-mcp-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const gatewayOnlyEnvironment = extractChatGptTurnEnvironment(parsed(environmentXml));
     gatewayOnlyEnvironment.tools = gatewayOnlyEnvironment.tools.filter(tool => (

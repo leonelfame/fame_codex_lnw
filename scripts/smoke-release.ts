@@ -1,6 +1,8 @@
 import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { defaultBrokerEndpoint } from "../src/config";
+import { VERSION } from "../src/version";
 
 const sourceBundle = resolve(process.argv[2] ?? "dist/runtime");
 const sourceRoot = resolve(import.meta.dir, "..");
@@ -10,7 +12,17 @@ const runtimeRoot = join(root, "relocated-runtime");
 cpSync(sourceBundle, firstLocation, { recursive: true });
 renameSync(firstLocation, runtimeRoot);
 
-const launcher = join(runtimeRoot, "bin", "codex-chatgpt-web");
+const manifest = JSON.parse(readFileSync(join(runtimeRoot, "manifest.json"), "utf8")) as Record<string, unknown>;
+if (manifest.schemaVersion !== 1 || manifest.appVersion !== VERSION || manifest.playwright !== "1.62.0") {
+  throw new Error(`Unexpected runtime manifest: ${JSON.stringify(manifest)}`);
+}
+if (typeof manifest.launcher !== "string" || typeof manifest.entrypoint !== "string") {
+  throw new Error(`Runtime manifest has no launcher or entrypoint: ${JSON.stringify(manifest)}`);
+}
+const launcher = join(runtimeRoot, manifest.launcher);
+const runtimeExecutable = join(runtimeRoot, "runtime", process.platform === "win32" ? "bun.exe" : "bun");
+const entrypoint = join(runtimeRoot, manifest.entrypoint);
+const runtimeCommand = [runtimeExecutable, entrypoint];
 const cliBundle = readFileSync(join(runtimeRoot, "app", "cli.js"), "utf8");
 const launcherText = readFileSync(launcher, "utf8");
 for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/codex-chatgpt-web-verify", "/tmp/codex-chatgpt-web-verify"]) {
@@ -19,12 +31,8 @@ for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/codex-
   }
 }
 
-const manifest = JSON.parse(readFileSync(join(runtimeRoot, "manifest.json"), "utf8")) as Record<string, unknown>;
-if (manifest.schemaVersion !== 1 || manifest.appVersion !== "0.1.16" || manifest.playwright !== "1.62.0") {
-  throw new Error(`Unexpected runtime manifest: ${JSON.stringify(manifest)}`);
-}
-const version = Bun.spawnSync([launcher, "--version"], { stdout: "pipe", stderr: "pipe" });
-if (version.exitCode !== 0 || version.stdout.toString().trim() !== "0.1.16") {
+const version = Bun.spawnSync([...runtimeCommand, "--version"], { stdout: "pipe", stderr: "pipe" });
+if (version.exitCode !== 0 || version.stdout.toString().trim() !== VERSION) {
   throw new Error(`Relocated launcher failed: ${version.stderr.toString()}`);
 }
 
@@ -36,28 +44,30 @@ const portServer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data()
 const port = portServer.port;
 portServer.stop();
 const config = {
-  version: 2,
-  releaseVersion: "0.1.16",
+  version: 3,
+  releaseVersion: VERSION,
   mode: "browser-only",
   host: "127.0.0.1",
   port,
   contextWindow: 256_000,
   appName: "Codex Native",
+  browserHost: "managed-chrome",
   chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   storageStatePath: join(appHome, "browser", "storage-state.json"),
-  brokerSocketPath: join(appHome, "runtime", "turn-broker.sock"),
+  brokerSocketPath: defaultBrokerEndpoint(appHome),
   headed: true,
   proAvailable: true,
   autoApproveToolCalls: false,
   controlToken: "release-smoke-control-token-0123456789abcdef",
-  runtimeCommand: [launcher],
+  runtimeCommand,
   acknowledgedUnofficialAt: new Date().toISOString(),
 };
 writeFileSync(join(appHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
 
 const env = { ...process.env, CODEX_CHATGPT_WEB_HOME: appHome, CODEX_HOME: codexHome };
-const child = Bun.spawn([launcher, "serve"], { env, stdout: "pipe", stderr: "pipe" });
+const child = Bun.spawn([...runtimeCommand, "serve"], { env, stdout: "pipe", stderr: "pipe" });
+let stoppedGracefully = false;
 try {
   const deadline = Date.now() + 10_000;
   let health: Response | undefined;
@@ -124,12 +134,29 @@ try {
   }
 
   if (process.platform === "darwin") {
-    const browser = Bun.spawnSync([launcher, "browser", "check"], { env, stdout: "pipe", stderr: "pipe" });
+    const browser = Bun.spawnSync([...runtimeCommand, "browser", "check"], { env, stdout: "pipe", stderr: "pipe" });
     if (browser.exitCode !== 0) throw new Error(`relocated Playwright smoke failed: ${browser.stderr.toString()}`);
   }
+  const finalDrain = await fetch(`http://127.0.0.1:${port}/admin/drain`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.controlToken}` },
+  });
+  if (!finalDrain.ok) throw new Error(`relocated daemon refused final drain: HTTP ${finalDrain.status}`);
+  const shutdown = await fetch(`http://127.0.0.1:${port}/admin/shutdown`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.controlToken}` },
+  });
+  if (!shutdown.ok) throw new Error(`relocated daemon refused graceful shutdown: HTTP ${shutdown.status}`);
+  await Promise.race([
+    child.exited,
+    Bun.sleep(10_000).then(() => { throw new Error("relocated daemon did not exit after graceful shutdown"); }),
+  ]);
+  stoppedGracefully = true;
   process.stdout.write("RELOCATABLE_RUNTIME_SMOKE_OK\n");
 } finally {
-  child.kill("SIGTERM");
-  await child.exited;
+  if (!stoppedGracefully) {
+    child.kill("SIGTERM");
+    await child.exited;
+  }
   rmSync(root, { recursive: true, force: true });
 }

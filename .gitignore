@@ -12,3 +12,8 @@ output/
 *.key
 storage-state.json
 runtime/
+references/
+.launcher-runtime/
+launcher/build/
+launcher/release/
+launcher/artifacts/

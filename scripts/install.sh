@@ -2,13 +2,13 @@
 set -eu
 
 REPOSITORY="${CODEX_CHATGPT_WEB_REPOSITORY:-miuuyy/codex-chatgpt-web}"
-VERSION="${CODEX_CHATGPT_WEB_VERSION:-0.1.16}"
+VERSION="${CODEX_CHATGPT_WEB_VERSION:-0.2.0}"
 BIN_DIR="${CODEX_CHATGPT_WEB_BIN_DIR:-$HOME/.local/bin}"
 LIB_DIR="${CODEX_CHATGPT_WEB_LIB_DIR:-$HOME/.local/lib/codex-chatgpt-web}"
 DOC_DIR="${CODEX_CHATGPT_WEB_DOC_DIR:-$HOME/.local/share/doc/codex-chatgpt-web}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  echo "codex-chatgpt-web 0.1 supports macOS only" >&2
+  echo "The terminal-only installer supports macOS only; use the desktop launcher on Windows or Linux" >&2
   exit 1
 fi
 

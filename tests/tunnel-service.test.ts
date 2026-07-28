@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
-import { createTunnelConfig } from "../src/tunnel";
+import { buildWindowsMcpLauncher, createTunnelConfig, mcpCommand } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
 import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
@@ -80,5 +80,29 @@ describe("tunnel launchd ownership", () => {
     rmSync(key);
     expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: false });
     expect(existingFullSetupCredentials(defaultConfig("browser-only"))).toEqual({ tunnelId: false, runtimeKey: false });
+  });
+
+  test("writes a shell-independent Windows MCP launcher for named-pipe transport", () => {
+    const root = join(tmpdir(), `codex-chatgpt-web-windows-mcp-${process.pid}-${Date.now()}`);
+    roots.push(root);
+    process.env.CODEX_CHATGPT_WEB_HOME = root;
+    const runtime = join(root, "Program Files", "runtime", "bun.exe");
+    mkdirSync(join(root, "Program Files", "runtime"), { recursive: true });
+    writeFileSync(runtime, "runtime");
+    const config = defaultConfig("browser-only");
+    config.runtimeCommand = [runtime, join(root, "Program Files", "app", "cli.js")];
+    config.brokerSocketPath = "\\\\.\\pipe\\codex-chatgpt-web-test";
+
+    const launcher = buildWindowsMcpLauncher(config);
+    expect(launcher).toContain("\r\n");
+    expect(launcher).toContain("chcp 65001 >nul");
+    expect(launcher).toContain(`"${runtime}"`);
+    expect(launcher).toContain('"\\\\.\\pipe\\codex-chatgpt-web-test"');
+    expect(launcher).not.toContain("'\"'\"'");
+
+    const command = mcpCommand(config, "win32");
+    expect(command).toStartWith("cmd.exe /d /s /c call ");
+    expect(command).toContain("mcp-launcher.cmd");
+    expect(existsSync(join(root, "bin", "mcp-launcher.cmd"))).toBe(true);
   });
 });

@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
+import { defaultBrokerEndpoint } from "../src/config";
 
 test("explicit browser-turn cancellation aborts and removes every registered session", () => {
   const sessions = new ChatGptTurnSessions();
@@ -29,8 +31,8 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
 });
 
 test("turn broker creates its private runtime directory on a cold start", async () => {
-  const root = mkdtempSync("/tmp/cgw-broker-");
-  const socketPath = join(root, "runtime", "turn-broker.sock");
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
+  const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {
     await broker.register({
@@ -40,8 +42,12 @@ test("turn broker creates its private runtime directory on a cold start", async 
       sandboxPolicy: { type: "dangerFullAccess" },
       tools: [],
     }, 10_000);
-    expect(existsSync(socketPath)).toBe(true);
-    expect(statSync(dirname(socketPath)).mode & 0o777).toBe(0o700);
+    if (process.platform === "win32") {
+      expect(existsSync(socketPath)).toBe(false);
+    } else {
+      expect(existsSync(socketPath)).toBe(true);
+      expect(statSync(dirname(socketPath)).mode & 0o777).toBe(0o700);
+    }
   } finally {
     await broker.close();
     rmSync(root, { recursive: true, force: true });

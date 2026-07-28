@@ -10,8 +10,22 @@ import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, st
 import { estimateCompiledChatGptWebInputTokens } from "./usage";
 import { assertAuthenticatedChatGptPage, assertTemporaryChatPage, CHATGPT_TEMPORARY_CHAT_URL } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
+import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
+import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+
+export async function closeChatGptBrowserWorkers(): Promise<void> {
+  const active = [...workers.values()];
+  workers.clear();
+  const results = await Promise.allSettled(active.map(worker => worker.close()));
+  const failures = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map(result => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `${failures.length} ChatGPT browser worker(s) failed to close`);
+  }
+}
 
 export const DEFAULT_CHATGPT_TURN_TIMEOUT_MS = 40 * 60_000;
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 30_000;
@@ -44,8 +58,10 @@ export interface BrowserTurn {
   onTextDelta: (delta: string) => void;
 }
 
-interface ResolvedBrowserConfig {
+export interface ResolvedBrowserConfig {
   appName: string;
+  browserHost: "managed-chrome" | "launcher";
+  browserHostDescriptorPath?: string;
   storageStatePath: string;
   chromeExecutablePath: string;
   turnTimeoutMs: number;
@@ -237,8 +253,15 @@ export function redactChatGptUiDiagnostic(value: string): string {
 
 function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
   const configured = provider.chatgptWeb ?? {};
+  const browserHost = configured.browserHost ?? "managed-chrome";
+  const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
+  if (browserHost === "launcher" && !browserHostDescriptorPath) {
+    throw new Error("Launcher browser host requires chatgptWeb.browserHostDescriptorPath");
+  }
   return {
     appName: configured.appName?.trim() || "Codex Native",
+    browserHost,
+    ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")),
     turnTimeoutMs: configured.turnTimeoutMs ?? DEFAULT_CHATGPT_TURN_TIMEOUT_MS,
@@ -295,22 +318,35 @@ export class ChatGptBrowserWorker {
   private browser?: Browser;
   private context?: BrowserContext;
   private page?: Page;
+  private launcherHelper?: LauncherBrowserHelperClient;
   private tail: Promise<void> = Promise.resolve();
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
   run(turn: BrowserTurn): Promise<string> {
-    const run = this.tail.then(() => this.runExclusive(turn));
+    const useHelper = this.config.browserHost === "launcher" && process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS !== "1";
+    if (useHelper) {
+      this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
+    }
+    const run = this.tail.then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
     this.tail = run.then(() => undefined, () => undefined);
     return run;
   }
 
   async close(): Promise<void> {
+    if (this.launcherHelper) {
+      const helper = this.launcherHelper;
+      this.launcherHelper = undefined;
+      await helper.close();
+    }
     await this.tail;
     const browser = this.browser;
     this.browser = undefined;
     this.context = undefined;
     this.page = undefined;
+    // For connectOverCDP, Playwright implements Browser.close as a transport disconnect; it does
+    // not close the launcher-owned Electron process. Always release that connection and its
+    // artifact directory instead of leaking one per timeout/helper lifecycle.
     if (browser) await browser.close();
   }
 
@@ -319,7 +355,13 @@ export class ChatGptBrowserWorker {
     this.browser = undefined;
     this.context = undefined;
     this.page = undefined;
-    if (browser) void browser.close().catch(() => {});
+    if (browser) {
+      void browser.close().catch(error => {
+        console.error(
+          `[chatgpt-web] failed to discard browser connection: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
   }
 
   private async runStage<T>(traceId: string, stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T> {
@@ -348,6 +390,13 @@ export class ChatGptBrowserWorker {
 
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
+    if (this.config.browserHost === "launcher") {
+      const connection = await connectLauncherBrowserHost(this.config.browserHostDescriptorPath!);
+      this.browser = connection.browser;
+      this.context = connection.context;
+      this.page = connection.page;
+      return this.page;
+    }
     if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
       throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
     }
@@ -370,12 +419,17 @@ export class ChatGptBrowserWorker {
    */
   private async pageForNewTurn(): Promise<Page> {
     const previous = await this.ensurePage();
+    if (this.config.browserHost === "launcher") return previous;
     if (previous.url() === "about:blank") return previous;
     const context = this.context;
     if (!context) throw new Error("ChatGPT web browser context is unavailable");
     const page = await context.newPage();
     this.page = page;
-    await previous.close().catch(() => {});
+    await previous.close().catch(error => {
+      console.error(
+        `[chatgpt-web] failed to close previous browser page: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     return page;
   }
 
@@ -620,6 +674,43 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+
+    await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+      phase: "start",
+      traceId: turn.traceId,
+      helperPid: process.pid,
+    });
+    let terminal: "completed" | "failed" | "aborted" = "completed";
+    let terminalMessage: string | undefined;
+    let originalError: unknown;
+    try {
+      return await this.runBrowserTurn(turn);
+    } catch (error) {
+      originalError = error;
+      terminal = error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed";
+      terminalMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+      throw error;
+    } finally {
+      try {
+        await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+          phase: "end",
+          traceId: turn.traceId,
+          helperPid: process.pid,
+          status: terminal,
+          ...(terminalMessage ? { message: terminalMessage } : {}),
+        });
+      } catch (controlError) {
+        if (!originalError) throw controlError;
+        console.error(
+          `[chatgpt-web] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+        );
+      }
+    }
+  }
+
+  private async runBrowserTurn(turn: BrowserTurn): Promise<string> {
+    if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const prepared = await turn.prepare();
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -744,7 +835,7 @@ export class ChatGptBrowserWorker {
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
       }
 
-      if (this.context) {
+      if (this.context && this.config.browserHost === "managed-chrome") {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }

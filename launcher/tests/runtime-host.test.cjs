@@ -1,0 +1,349 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { RuntimeHost } = require("../electron/runtime.cjs");
+
+function hostFor(existingConfig) {
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-test") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {
+      readConfig: () => existingConfig,
+      readSetupConfig: () => existingConfig,
+    },
+  });
+  let invocation;
+  host.runSetup = async (name, args) => {
+    invocation = { name, args };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  return { host, invocation: () => invocation };
+}
+
+test("core setup preserves an existing full-harness installation", async () => {
+  const fixture = hostFor({ mode: "full" });
+  const result = await fixture.host.setupCore();
+  assert.equal(result.mode, "full");
+  assert.deepEqual(fixture.invocation().args.slice(0, 2), ["setup", "--full"]);
+});
+
+test("core setup starts in browser-only mode when no installation exists", async () => {
+  const fixture = hostFor(null);
+  const result = await fixture.host.setupCore();
+  assert.equal(result.mode, "browser-only");
+  assert.deepEqual(fixture.invocation().args.slice(0, 2), ["setup", "--browser-only"]);
+});
+
+test("mutating launcher operations are serialized before lifecycle changes begin", async () => {
+  const fixture = hostFor(null);
+  fixture.host.lifecycleOperation = "mcp-setup";
+  await assert.rejects(fixture.host.setupCore(), /Another launcher operation is active: mcp-setup/);
+  assert.equal(fixture.invocation(), undefined);
+});
+
+test("connector verification uses the configured full-mode connector name", () => {
+  const full = hostFor({ mode: "full", appName: "My Codex Connector" });
+  assert.equal(full.host.mcpConnectorName(), "My Codex Connector");
+  const browserOnly = hostFor({ mode: "browser-only", appName: "Codex Native" });
+  assert.throws(() => browserOnly.host.mcpConnectorName(), /MCP runtime is not configured/);
+});
+
+test("launcher-controlled CLI operations use the live descriptor token", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-control-"));
+  const descriptorPath = path.join(root, "launcher-browser.json");
+  fs.writeFileSync(descriptorPath, `${JSON.stringify({
+    pid: process.pid,
+    control: { token: "launcher-live-control-token-0123456789abcdefghijkl" },
+  })}\n`);
+  const host = new RuntimeHost({
+    app: { getPath: () => root },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: descriptorPath,
+    supervisor: { readConfig: () => null },
+  });
+  try {
+    assert.deepEqual(host.launcherControlEnvironment(), {
+      CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: "launcher-live-control-token-0123456789abcdefghijkl",
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed first-time setup removes its route before restoring the unconfigured state", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-first-setup-rollback-"));
+  const configPath = path.join(root, "config.json");
+  let configured = false;
+  let cleared = 0;
+  const calls = [];
+  const supervisor = {
+    configPath,
+    readConfig: () => configured ? { mode: "browser-only" } : null,
+    readSetupConfig: () => configured ? { mode: "browser-only", browserHost: "launcher" } : null,
+    stopForSetup: async () => ({ status: "stopped" }),
+    startIfConfigured: async () => ({ status: configured ? "ready" : "not-configured" }),
+    clearState: () => { cleared += 1; },
+  };
+  const host = new RuntimeHost({
+    app: { getPath: () => root },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    supervisor,
+  });
+  host.launcherControlEnvironment = () => ({});
+  host.run = async (_name, args) => {
+    calls.push(args);
+    if (args[0] === "setup") {
+      configured = true;
+      fs.writeFileSync(configPath, "{}\n");
+      throw new Error("synthetic setup failure");
+    }
+    configured = false;
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  try {
+    await assert.rejects(
+      host.runSetup("core-setup", ["setup", "--browser-only"], {}),
+      /synthetic setup failure; incomplete first-time setup was rolled back/,
+    );
+    assert.deepEqual(calls.map((args) => args[0]), ["setup", "uninstall"]);
+    assert.equal(fs.existsSync(configPath), false);
+    assert.equal(cleared, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher delegates an existing terminal-managed installation to the migration-aware CLI", async () => {
+  let config = { mode: "full", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
+  let prepared = 0;
+  let launcherStops = 0;
+  const coreHome = path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration-core");
+  const supervisor = {
+    coreHome,
+    configPath: path.join(coreHome, "config.json"),
+    readSetupConfig: () => config,
+    readConfig: () => {
+      if (config.browserHost !== "launcher") throw new Error("not launcher-owned");
+      return config;
+    },
+    prepareExternalMigration: () => { prepared += 1; },
+    stopForSetup: async () => { launcherStops += 1; },
+    startIfConfigured: async () => ({ status: "ready" }),
+  };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    codexHome: path.join(coreHome, "codex"),
+    launchAgentsDir: path.join(coreHome, "LaunchAgents"),
+    supervisor,
+  });
+  host.run = async () => {
+    config = { mode: "full", browserHost: "launcher", releaseVersion: "0.2.0" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  await host.runSetup("core-setup", ["setup", "--full"], {});
+  assert.equal(prepared, 1);
+  assert.equal(launcherStops, 0);
+});
+
+test("failed terminal migration verifies the unchanged previous runtime instead of claiming recovery", async () => {
+  const config = { mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
+  const calls = [];
+  const coreHome = path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration-failure-core");
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration-failure") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    codexHome: path.join(coreHome, "codex"),
+    launchAgentsDir: path.join(coreHome, "LaunchAgents"),
+    supervisor: {
+      coreHome,
+      configPath: path.join(coreHome, "config.json"),
+      readSetupConfig: () => config,
+      readConfig: () => { throw new Error("not launcher-owned"); },
+      prepareExternalMigration() {},
+    },
+  });
+  host.run = async (_name, args) => {
+    calls.push(args[0]);
+    if (args[0] === "setup") throw new Error("synthetic migration failure");
+    return { code: 0, stdout: '{"ok":true}', stderr: "" };
+  };
+
+  await assert.rejects(
+    host.runSetup("core-setup", ["setup", "--browser-only"], {}),
+    /synthetic migration failure$/,
+  );
+  assert.deepEqual(calls, ["setup", "doctor"]);
+});
+
+test("failed launcher update restores every mutable setup file before restarting the previous runtime", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-checkpoint-"));
+  const coreHome = path.join(root, "core");
+  const codexHome = path.join(root, "codex");
+  const configPath = path.join(coreHome, "config.json");
+  const journalPath = path.join(coreHome, "codex", "integration-journal.json");
+  const keyPath = path.join(coreHome, "secrets", "tunnel-runtime.key");
+  const profileDir = path.join(coreHome, "tunnel", "profiles");
+  const profilePath = path.join(profileDir, "custom.yaml");
+  const windowsLauncherPath = path.join(coreHome, "bin", "mcp-launcher.cmd");
+  const codexConfigPath = path.join(codexHome, "config.toml");
+  const oldConfig = {
+    mode: "full",
+    browserHost: "launcher",
+    releaseVersion: "0.1.16",
+    tunnel: {
+      runtimeKeyFile: keyPath,
+      profileDir,
+      profileName: "custom",
+    },
+  };
+  for (const file of [configPath, journalPath, keyPath, profilePath, windowsLauncherPath, codexConfigPath]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  }
+  fs.writeFileSync(configPath, `${JSON.stringify(oldConfig)}\n`, { mode: 0o600 });
+  fs.writeFileSync(journalPath, "old journal\n", { mode: 0o600 });
+  fs.writeFileSync(keyPath, "old key\n", { mode: 0o600 });
+  fs.writeFileSync(profilePath, "old profile\n", { mode: 0o600 });
+  fs.writeFileSync(windowsLauncherPath, "old launcher\n", { mode: 0o600 });
+  fs.writeFileSync(codexConfigPath, "old codex config\n", { mode: 0o600 });
+
+  let startAttempts = 0;
+  const readConfig = () => JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const supervisor = {
+    coreHome,
+    configPath,
+    readSetupConfig: readConfig,
+    readConfig,
+    stopForSetup: async () => ({ status: "stopped" }),
+    startIfConfigured: async () => {
+      startAttempts += 1;
+      if (readConfig().releaseVersion !== oldConfig.releaseVersion) {
+        throw new Error("synthetic updated runtime startup failure");
+      }
+      return { status: "ready" };
+    },
+  };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(root, "launcher") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(coreHome, "runtime", "launcher-browser.json"),
+    codexHome,
+    supervisor,
+  });
+  host.run = async () => {
+    fs.writeFileSync(configPath, `${JSON.stringify({ ...oldConfig, releaseVersion: "0.2.0" })}\n`);
+    fs.writeFileSync(journalPath, "new journal\n");
+    fs.writeFileSync(keyPath, "new key\n");
+    fs.writeFileSync(profilePath, "new profile\n");
+    fs.writeFileSync(windowsLauncherPath, "new launcher\n");
+    fs.writeFileSync(codexConfigPath, "new codex config\n");
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  try {
+    await assert.rejects(
+      host.runSetup("core-setup", ["setup", "--full"], {}),
+      /synthetic updated runtime startup failure$/,
+    );
+    assert.equal(startAttempts, 2);
+    assert.deepEqual(readConfig(), oldConfig);
+    assert.equal(fs.readFileSync(journalPath, "utf8"), "old journal\n");
+    assert.equal(fs.readFileSync(keyPath, "utf8"), "old key\n");
+    assert.equal(fs.readFileSync(profilePath, "utf8"), "old profile\n");
+    assert.equal(fs.readFileSync(windowsLauncherPath, "utf8"), "old launcher\n");
+    assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "old codex config\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed terminal migration restores removed launchd ownership before verifying the old runtime", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-terminal-checkpoint-"));
+  const coreHome = path.join(root, "core");
+  const codexHome = path.join(root, "codex");
+  const launchAgentsDir = path.join(root, "LaunchAgents");
+  const configPath = path.join(coreHome, "config.json");
+  const daemonPlist = path.join(launchAgentsDir, "io.github.codex-chatgpt-web.daemon.plist");
+  const tunnelPlist = path.join(launchAgentsDir, "io.github.codex-chatgpt-web.tunnel.plist");
+  const oldConfig = {
+    mode: "full",
+    browserHost: "managed-chrome",
+    releaseVersion: "0.1.16",
+  };
+  for (const file of [configPath, daemonPlist, tunnelPlist]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  }
+  fs.writeFileSync(configPath, `${JSON.stringify(oldConfig)}\n`, { mode: 0o600 });
+  fs.writeFileSync(daemonPlist, "old daemon plist\n", { mode: 0o600 });
+  fs.writeFileSync(tunnelPlist, "old tunnel plist\n", { mode: 0o600 });
+
+  let startAttempts = 0;
+  const calls = [];
+  const readConfig = () => JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const supervisor = {
+    coreHome,
+    configPath,
+    readSetupConfig: readConfig,
+    readConfig: () => {
+      const config = readConfig();
+      if (config.browserHost !== "launcher") throw new Error("not launcher-owned");
+      return config;
+    },
+    prepareExternalMigration() {},
+    startIfConfigured: async () => {
+      startAttempts += 1;
+      throw new Error("synthetic launcher startup failure");
+    },
+  };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(root, "launcher") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(coreHome, "runtime", "launcher-browser.json"),
+    codexHome,
+    launchAgentsDir,
+    platform: "darwin",
+    supervisor,
+  });
+  host.run = async (_name, args) => {
+    calls.push(args.join(" "));
+    if (args[0] === "setup") {
+      fs.writeFileSync(configPath, `${JSON.stringify({ ...oldConfig, browserHost: "launcher", releaseVersion: "0.2.0" })}\n`);
+      fs.rmSync(daemonPlist);
+      fs.rmSync(tunnelPlist);
+    }
+    return { code: 0, stdout: args[0] === "doctor" ? '{"ok":true}' : "", stderr: "" };
+  };
+
+  try {
+    await assert.rejects(
+      host.runSetup("core-setup", ["setup", "--full"], {}),
+      /synthetic launcher startup failure$/,
+    );
+    assert.equal(startAttempts, 1);
+    assert.deepEqual(readConfig(), oldConfig);
+    assert.equal(fs.readFileSync(daemonPlist, "utf8"), "old daemon plist\n");
+    assert.equal(fs.readFileSync(tunnelPlist, "utf8"), "old tunnel plist\n");
+    assert.deepEqual(calls, [
+      "setup --full",
+      "service install",
+      "tunnel start",
+      "doctor --json",
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

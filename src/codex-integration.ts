@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AppConfig } from "./config";
-import { atomicWriteFile, getConfigDir } from "./config";
+import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
 const MANAGED_COMMENT = "# Managed by codex-chatgpt-web; `codex-chatgpt-web uninstall` restores prior values.";
 
@@ -23,6 +23,10 @@ export interface CodexIntegrationJournal {
     openai_base_url: string;
   };
   previous: Record<ManagedAssignmentKey, PreviousAssignment>;
+  format?: {
+    lineEnding: "\n" | "\r\n";
+    trailingNewline: boolean;
+  };
 }
 
 interface LegacyCodexIntegrationJournal {
@@ -41,6 +45,12 @@ interface LegacyCodexIntegrationJournal {
   };
 }
 
+interface FileSnapshot {
+  path: string;
+  exists: boolean;
+  data?: Buffer;
+}
+
 export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
 }
@@ -56,7 +66,7 @@ export interface CodexModelContextOverride {
 
 export function getCodexHome(): string {
   const configured = process.env.CODEX_HOME?.trim();
-  return resolve(configured || join(homedir(), ".codex"));
+  return resolve(expandUserPath(configured || join(homedir(), ".codex")));
 }
 
 export function getCodexConfigPath(): string {
@@ -73,6 +83,45 @@ function routeUrl(config: AppConfig): string {
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function snapshotFile(path: string): FileSnapshot {
+  return existsSync(path)
+    ? { path, exists: true, data: readFileSync(path) }
+    : { path, exists: false };
+}
+
+function restoreFileSnapshot(snapshot: FileSnapshot): void {
+  if (snapshot.exists) {
+    if (!snapshot.data) throw new Error(`File snapshot is missing data: ${snapshot.path}`);
+    atomicWriteFile(snapshot.path, snapshot.data);
+  } else {
+    rmSync(snapshot.path, { force: true });
+  }
+}
+
+function writeFilesWithCompensation(
+  writes: Array<{ path: string; data: string | Uint8Array }>,
+): void {
+  const snapshots = writes.map(write => snapshotFile(write.path));
+  try {
+    for (const write of writes) atomicWriteFile(write.path, write.data);
+  } catch (error) {
+    const rollbackFailures: string[] = [];
+    for (const snapshot of [...snapshots].reverse()) {
+      try {
+        restoreFileSnapshot(snapshot);
+      } catch (rollbackError) {
+        rollbackFailures.push(`${snapshot.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+    }
+    const primary = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      rollbackFailures.length > 0
+        ? `${primary}; Codex integration rollback also failed: ${rollbackFailures.join("; ")}`
+        : primary,
+    );
+  }
 }
 
 function firstTableIndex(lines: string[]): number {
@@ -158,7 +207,7 @@ export function readCodexModelContextOverride(): CodexModelContextOverride | und
   const path = getCodexConfigPath();
   if (!existsSync(path)) return undefined;
   const text = readFileSync(path, "utf8");
-  const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
+  const lines = splitLines(text);
   const contextWindow = findTopLevelPositiveInteger(lines, "model_context_window");
   if (contextWindow === undefined) return undefined;
   const model = findTopLevelAssignment(lines, "model").value;
@@ -173,8 +222,24 @@ function assignments(lines: string[]): Record<ManagedAssignmentKey, PreviousAssi
   };
 }
 
-function withTrailingNewline(lines: string[]): string {
-  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+function textFormat(text: string): NonNullable<CodexIntegrationJournal["format"]> {
+  return {
+    lineEnding: text.includes("\r\n") ? "\r\n" : "\n",
+    trailingNewline: /\r?\n$/.test(text),
+  };
+}
+
+function splitLines(text: string): string[] {
+  return text.length > 0 ? text.replace(/\r?\n$/, "").split(/\r?\n/) : [];
+}
+
+function renderLines(
+  lines: string[],
+  format: NonNullable<CodexIntegrationJournal["format"]>,
+): string {
+  if (lines.length === 0) return "";
+  const body = lines.join(format.lineEnding);
+  return format.trailingNewline ? `${body}${format.lineEnding}` : body;
 }
 
 function removeManagedComment(lines: string[]): void {
@@ -188,7 +253,8 @@ function installRoute(
   installedUrl: string,
   replaceExistingRoute: boolean,
 ): { text: string; previous: CodexIntegrationJournal["previous"] } {
-  const lines = text.length > 0 ? text.replace(/\n$/, "").split("\n") : [];
+  const format = textFormat(text);
+  const lines = splitLines(text);
   const previous = assignments(lines);
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([, assignment]) => assignment.present)
@@ -213,11 +279,11 @@ function installRoute(
   removeManagedComment(lines);
   const installedBaseUrl = findTopLevelAssignment(lines, "openai_base_url");
   lines.splice(installedBaseUrl.index!, 0, MANAGED_COMMENT);
-  return { text: withTrailingNewline(lines), previous };
+  return { text: renderLines(lines, format), previous };
 }
 
 function verifyInstalledV3(text: string, journal: CodexIntegrationJournal): void {
-  const lines = text.replace(/\n$/, "").split("\n");
+  const lines = splitLines(text);
   const current = assignments(lines);
   if (current.openai_base_url.value !== journal.installed.openai_base_url) {
     throw new Error("Codex openai_base_url changed after setup; refusing to overwrite the user's newer value");
@@ -232,7 +298,7 @@ function verifyInstalledV3(text: string, journal: CodexIntegrationJournal): void
 
 function restoreV3(text: string, journal: CodexIntegrationJournal): string {
   verifyInstalledV3(text, journal);
-  const lines = text.replace(/\n$/, "").split("\n");
+  const lines = splitLines(text);
   removeManagedComment(lines);
   const currentBaseUrl = findTopLevelAssignment(lines, "openai_base_url");
   if (currentBaseUrl.index === undefined) throw new Error("Managed Codex openai_base_url is missing");
@@ -252,7 +318,7 @@ function restoreV3(text: string, journal: CodexIntegrationJournal): string {
     const index = Math.min(item.previous.index ?? firstTableIndex(lines), firstTableIndex(lines));
     lines.splice(index, 0, item.previous.rawLine);
   }
-  return withTrailingNewline(lines).replace(/\n{3,}/g, "\n\n");
+  return renderLines(lines, journal.format ?? textFormat(text));
 }
 
 function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): string {
@@ -260,7 +326,7 @@ function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): 
     throw new Error("Managed legacy Codex provider block changed after setup; refusing migration");
   }
   const withoutProvider = text.replace(journal.providerBlock, "").replace(/\n{3,}/g, "\n\n");
-  const lines = withoutProvider.replace(/\n$/, "").split("\n");
+  const lines = splitLines(withoutProvider);
   for (const key of ["model_provider", "model_catalog_json"] as const) {
     const current = findTopLevelAssignment(lines, key);
     if (current.value !== journal.installed[key] || current.index === undefined) {
@@ -279,7 +345,10 @@ function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): 
   if (restoredCatalog.index !== undefined && restoredCatalog.value && !existsSync(resolve(restoredCatalog.value))) {
     lines.splice(restoredCatalog.index, 1);
   }
-  return withTrailingNewline(lines).replace(/\n{3,}/g, "\n\n");
+  return renderLines(lines, textFormat(withoutProvider)).replace(/(?:\r?\n){3,}/g, match => {
+    const lineEnding = match.includes("\r\n") ? "\r\n" : "\n";
+    return `${lineEnding}${lineEnding}`;
+  });
 }
 
 function readJournal(): CodexIntegrationJournal | LegacyCodexIntegrationJournal | undefined {
@@ -295,6 +364,44 @@ function readJournal(): CodexIntegrationJournal | LegacyCodexIntegrationJournal 
   throw new Error(`Invalid Codex integration journal: ${path}`);
 }
 
+function assertJournalTargetsConfig(
+  journal: CodexIntegrationJournal | LegacyCodexIntegrationJournal,
+  configPath: string,
+): void {
+  const pathIdentity = (value: string): string => {
+    const normalized = resolve(value);
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  if (pathIdentity(journal.configPath) !== pathIdentity(configPath)) {
+    throw new Error(
+      `Codex integration journal belongs to ${journal.configPath}, not the active config ${configPath}`,
+    );
+  }
+}
+
+export function preflightCodexIntegration(
+  config: AppConfig,
+  options: InstallCodexIntegrationOptions = {},
+): void {
+  const configPath = getCodexConfigPath();
+  const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+  const existing = readJournal();
+  const installedUrl = routeUrl(config);
+  if (existing) assertJournalTargetsConfig(existing, configPath);
+  if (existing?.version === 3) {
+    verifyInstalledV3(currentText, existing);
+    return;
+  }
+  let baseline = currentText;
+  if (existing?.version === 2) {
+    if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
+      throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
+    }
+    baseline = restoreLegacyV2(currentText, existing);
+  }
+  installRoute(baseline, installedUrl, options.replaceExistingRoute === true);
+}
+
 export function installCodexIntegration(
   config: AppConfig,
   options: InstallCodexIntegrationOptions = {},
@@ -304,18 +411,21 @@ export function installCodexIntegration(
   const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
   const existing = readJournal();
   const installedUrl = routeUrl(config);
+  if (existing) assertJournalTargetsConfig(existing, configPath);
 
   if (existing?.version === 3) {
     verifyInstalledV3(currentText, existing);
-    const lines = currentText.replace(/\n$/, "").split("\n");
+    const lines = splitLines(currentText);
     const current = findTopLevelAssignment(lines, "openai_base_url");
     lines[current.index!] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
     const updated: CodexIntegrationJournal = {
       ...existing,
       installed: { openai_base_url: installedUrl },
     };
-    atomicWriteFile(configPath, withTrailingNewline(lines));
-    atomicWriteFile(getCodexJournalPath(), `${JSON.stringify(updated, null, 2)}\n`);
+    writeFilesWithCompensation([
+      { path: configPath, data: renderLines(lines, textFormat(currentText)) },
+      { path: getCodexJournalPath(), data: `${JSON.stringify(updated, null, 2)}\n` },
+    ]);
     return updated;
   }
 
@@ -332,9 +442,12 @@ export function installCodexIntegration(
     configPath,
     installed: { openai_base_url: installedUrl },
     previous: patched.previous,
+    format: textFormat(baseline),
   };
-  atomicWriteFile(configPath, patched.text);
-  atomicWriteFile(getCodexJournalPath(), `${JSON.stringify(journal, null, 2)}\n`);
+  writeFilesWithCompensation([
+    { path: configPath, data: patched.text },
+    { path: getCodexJournalPath(), data: `${JSON.stringify(journal, null, 2)}\n` },
+  ]);
   if (existing?.version === 2 && existsSync(existing.catalogPath)) rmSync(existing.catalogPath);
   return journal;
 }
@@ -344,16 +457,36 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   if (!journal) return { changed: false };
   if (!existsSync(journal.configPath)) throw new Error(`Codex config is missing: ${journal.configPath}`);
   const current = readFileSync(journal.configPath, "utf8");
+  let restored: string;
   if (journal.version === 2) {
     if (existsSync(journal.catalogPath) && sha256(readFileSync(journal.catalogPath)) !== journal.catalogSha256) {
       throw new Error(`Managed legacy catalog changed after setup: ${journal.catalogPath}`);
     }
-    atomicWriteFile(journal.configPath, restoreLegacyV2(current, journal));
-    if (existsSync(journal.catalogPath)) rmSync(journal.catalogPath);
+    restored = restoreLegacyV2(current, journal);
   } else {
-    atomicWriteFile(journal.configPath, restoreV3(current, journal));
+    restored = restoreV3(current, journal);
   }
-  rmSync(getCodexJournalPath());
+  const configSnapshot = snapshotFile(journal.configPath);
+  const catalogSnapshot = journal.version === 2 ? snapshotFile(journal.catalogPath) : undefined;
+  try {
+    atomicWriteFile(journal.configPath, restored);
+    if (catalogSnapshot?.exists) rmSync(catalogSnapshot.path);
+    rmSync(getCodexJournalPath(), { force: true });
+  } catch (error) {
+    const rollbackFailures: string[] = [];
+    for (const snapshot of [catalogSnapshot, configSnapshot]) {
+      if (!snapshot) continue;
+      try {
+        restoreFileSnapshot(snapshot);
+      } catch (caught) {
+        rollbackFailures.push(`${snapshot.path}: ${caught instanceof Error ? caught.message : String(caught)}`);
+      }
+    }
+    const primary = error instanceof Error ? error.message : String(error);
+    throw new Error(rollbackFailures.length > 0
+      ? `${primary}; Codex integration rollback also failed: ${rollbackFailures.join("; ")}`
+      : primary);
+  }
   return { changed: true };
 }
 
@@ -368,10 +501,11 @@ export function inspectCodexIntegration(): {
   const errors: string[] = [];
   if (journal) {
     try {
+      assertJournalTargetsConfig(journal, getCodexConfigPath());
       const text = readFileSync(journal.configPath, "utf8");
       if (journal.version === 3) verifyInstalledV3(text, journal);
       else {
-        const lines = text.replace(/\n$/, "").split("\n");
+        const lines = splitLines(text);
         for (const key of ["model_provider", "model_catalog_json"] as const) {
           if (findTopLevelAssignment(lines, key).value !== journal.installed[key]) {
             errors.push(`Codex ${key} no longer matches this installation`);

@@ -55,3 +55,20 @@ test("rejects the Pro routed model before opening a browser when the account has
   const body = await response.json() as { error: { message: string } };
   expect(body.error.message).toContain("Pro is not available for this account");
 });
+
+test("refuses a ChatGPT Web continuation when local previous-response state is unavailable", async () => {
+  const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model,
+      previous_response_id: "resp_missing_after_restart",
+      input: "continue",
+      stream: false,
+    }),
+  }), defaultConfig("browser-only"));
+
+  expect(response.status).toBe(409);
+  const body = await response.json() as { error: { message: string } };
+  expect(body.error.message).toContain("partial Codex context");
+});

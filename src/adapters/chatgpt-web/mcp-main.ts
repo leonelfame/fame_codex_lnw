@@ -1,5 +1,4 @@
-import { join, resolve } from "node:path";
-import { expandUserPath, getConfigDir } from "../../config";
+import { defaultBrokerEndpoint, resolveBrokerEndpoint } from "../../config";
 import { runChatGptMcpServer } from "./mcp-server";
 
 function option(args: string[], name: string, fallback: string): string {
@@ -7,14 +6,13 @@ function option(args: string[], name: string, fallback: string): string {
   if (index < 0) return fallback;
   const value = args[index + 1]?.trim();
   if (!value) throw new Error(`${name} requires a value`);
+  args.splice(index, 2);
   return value;
 }
 
 export async function runChatGptMcpMain(args: string[]): Promise<void> {
-  const brokerSocketPath = resolve(expandUserPath(option(
-    args,
-    "--broker-socket",
-    join(getConfigDir(), "runtime", "turn-broker.sock"),
-  )));
+  const remaining = [...args];
+  const brokerSocketPath = resolveBrokerEndpoint(option(remaining, "--broker-socket", defaultBrokerEndpoint()));
+  if (remaining.length > 0) throw new Error(`Unknown MCP arguments: ${remaining.join(" ")}`);
   await runChatGptMcpServer({ brokerSocketPath });
 }

@@ -1,0 +1,641 @@
+const path = require("node:path");
+const fs = require("node:fs");
+const os = require("node:os");
+const { randomBytes } = require("node:crypto");
+const { spawn } = require("node:child_process");
+const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
+const { redactText } = require("./logging.cjs");
+const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+
+const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
+const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
+const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
+const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
+const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
+const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
+
+function collect(stream, chunks, onLine) {
+  let buffered = "";
+  let bytes = 0;
+  stream.on("data", (chunk) => {
+    bytes += chunk.length;
+    if (bytes <= MAX_CAPTURE_BYTES) chunks.push(chunk);
+    buffered += chunk.toString("utf8");
+    for (;;) {
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) break;
+      const line = buffered.slice(0, newline).trimEnd();
+      buffered = buffered.slice(newline + 1);
+      if (line) onLine(line);
+    }
+    if (buffered.length > MAX_RUNTIME_LOG_LINE_CHARS) {
+      onLine(`${buffered.slice(0, MAX_RUNTIME_LOG_LINE_CHARS)}…[truncated]`);
+      buffered = "";
+    }
+  });
+  stream.on("end", () => {
+    const line = buffered.trim();
+    if (line) onLine(line);
+  });
+}
+
+function resolveUserPath(value) {
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.resolve(os.homedir(), value.slice(2));
+  }
+  return path.resolve(value);
+}
+
+function captureRegularFile(filePath) {
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { path: filePath, exists: false };
+    throw error;
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Setup checkpoint path is not a regular file: ${filePath}`);
+  }
+  if (stat.size > MAX_CHECKPOINT_FILE_BYTES) {
+    throw new Error(`Setup checkpoint file exceeds ${MAX_CHECKPOINT_FILE_BYTES} bytes: ${filePath}`);
+  }
+  return {
+    path: filePath,
+    exists: true,
+    data: fs.readFileSync(filePath),
+    mode: stat.mode & 0o777,
+  };
+}
+
+function restoreRegularFile(snapshot, platform = process.platform) {
+  if (!snapshot.exists) {
+    fs.rmSync(snapshot.path, { force: true });
+    return;
+  }
+  writePrivateFileAtomic(snapshot.path, snapshot.data);
+  if (platform !== "win32") fs.chmodSync(snapshot.path, snapshot.mode);
+}
+
+function regularFileChanged(snapshot, platform = process.platform) {
+  let stat;
+  try {
+    stat = fs.lstatSync(snapshot.path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return snapshot.exists;
+    throw error;
+  }
+  if (!snapshot.exists || !stat.isFile()) return true;
+  if (platform !== "win32" && (stat.mode & 0o777) !== snapshot.mode) return true;
+  if (stat.size > MAX_CHECKPOINT_FILE_BYTES) return true;
+  return !fs.readFileSync(snapshot.path).equals(snapshot.data);
+}
+
+class RuntimeHost {
+  constructor({
+    app,
+    logger,
+    sourceRoot,
+    installedRuntimeRoot,
+    runtimeRootProvider,
+    browserDescriptorPath,
+    codexHome,
+    launchAgentsDir,
+    platform = process.platform,
+    publishOperation,
+    supervisor,
+  }) {
+    this.app = app;
+    this.logger = logger;
+    this.sourceRoot = sourceRoot;
+    this.installedRuntimeRoot = installedRuntimeRoot;
+    this.runtimeRootProvider = runtimeRootProvider;
+    this.browserDescriptorPath = browserDescriptorPath;
+    this.platform = platform;
+    this.codexHome = codexHome
+      ? resolveUserPath(codexHome)
+      : process.env.CODEX_HOME?.trim()
+        ? resolveUserPath(process.env.CODEX_HOME.trim())
+        : path.join(os.homedir(), ".codex");
+    this.launchAgentsDir = launchAgentsDir
+      ? resolveUserPath(launchAgentsDir)
+      : path.join(os.homedir(), "Library", "LaunchAgents");
+    this.publishOperation = publishOperation;
+    this.supervisor = supervisor;
+    this.active = null;
+    this.activeChild = null;
+    this.lifecycleOperation = null;
+    this.cleanupEphemeralSecrets();
+  }
+
+  currentOperation() {
+    const stuckChild = this.activeChild
+      && this.activeChild.exitCode === null
+      && this.activeChild.signalCode === null;
+    return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
+  }
+
+  cleanupEphemeralSecrets() {
+    const secretsDir = path.join(this.app.getPath("userData"), "secrets");
+    try {
+      for (const entry of fs.readdirSync(secretsDir, { withFileTypes: true })) {
+        if (/^runtime-key-(?:\d+|[a-f0-9]{32})\.tmp$/.test(entry.name)) {
+          fs.rmSync(path.join(secretsDir, entry.name), { force: true });
+        }
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        this.logger.warn("runtime.secret_cleanup_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  command(args) {
+    if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
+    return runtimeInvocation({
+      app: this.app,
+      sourceRoot: this.sourceRoot,
+      installedRuntimeRoot: this.installedRuntimeRoot,
+      args,
+    });
+  }
+
+  launcherControlEnvironment() {
+    let descriptor;
+    try {
+      descriptor = JSON.parse(fs.readFileSync(this.browserDescriptorPath, "utf8"));
+    } catch (error) {
+      throw new Error(
+        `Launcher browser ownership descriptor is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const token = descriptor?.control?.token;
+    if (descriptor?.pid !== process.pid || typeof token !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(token)) {
+      throw new Error("Launcher browser ownership descriptor does not belong to this launcher process");
+    }
+    return { CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token };
+  }
+
+  runtimeConfigSnapshot() {
+    const setupConfig = this.supervisor.readSetupConfig
+      ? this.supervisor.readSetupConfig()
+      : this.supervisor.readConfig();
+    if (!setupConfig) {
+      return {
+        configured: false,
+        owner: "none",
+        mode: "browser-only",
+        serialized: null,
+      };
+    }
+    const launcherOwned = setupConfig.browserHost === "launcher";
+    const config = launcherOwned ? this.supervisor.readConfig() : setupConfig;
+    return {
+      configured: true,
+      owner: launcherOwned ? "launcher" : "external",
+      mode: config.mode === "full" ? "full" : "browser-only",
+      serialized: JSON.stringify(config),
+      config: structuredClone(config),
+    };
+  }
+
+  captureSetupCheckpoint(snapshot) {
+    if (!snapshot.configured || !snapshot.config) return null;
+    if (typeof this.supervisor.configPath !== "string" || !path.isAbsolute(this.supervisor.configPath)) {
+      throw new Error("Launcher runtime supervisor has no absolute configuration path for setup rollback");
+    }
+    const coreHome = this.supervisor.coreHome
+      || path.dirname(this.supervisor.configPath);
+    const paths = new Set([
+      this.supervisor.configPath,
+      path.join(coreHome, "codex", "integration-journal.json"),
+      path.join(this.codexHome, "config.toml"),
+      path.join(coreHome, "secrets", "tunnel-runtime.key"),
+      path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web.yaml"),
+      path.join(coreHome, "bin", "mcp-launcher.cmd"),
+    ]);
+    if (snapshot.owner === "external" && this.platform === "darwin") {
+      paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.daemon.plist"));
+      paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.tunnel.plist"));
+    }
+    const tunnel = snapshot.config.tunnel;
+    if (tunnel && typeof tunnel === "object") {
+      if (typeof tunnel.runtimeKeyFile === "string" && tunnel.runtimeKeyFile) {
+        paths.add(tunnel.runtimeKeyFile);
+      }
+      if (typeof tunnel.profileDir === "string"
+        && tunnel.profileDir
+        && typeof tunnel.profileName === "string"
+        && tunnel.profileName) {
+        paths.add(path.join(tunnel.profileDir, `${tunnel.profileName}.yaml`));
+      }
+    }
+    return [...paths].map(captureRegularFile);
+  }
+
+  setupCheckpointChanged(checkpoint) {
+    return checkpoint ? checkpoint.some(snapshot => regularFileChanged(snapshot, this.platform)) : false;
+  }
+
+  restoreSetupCheckpoint(checkpoint) {
+    if (!checkpoint) return;
+    const failures = [];
+    for (const snapshot of [...checkpoint].reverse()) {
+      try {
+        restoreRegularFile(snapshot, this.platform);
+      } catch (error) {
+        failures.push(`${snapshot.path}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`Setup checkpoint restoration failed: ${failures.join("; ")}`);
+    }
+  }
+
+  async restorePreviousRuntime(snapshot, operationName, { repairExternal = false } = {}) {
+    const current = this.runtimeConfigSnapshot();
+    if (current.owner !== snapshot.owner || current.serialized !== snapshot.serialized) {
+      throw new Error(
+        "Runtime configuration changed before the operation failed; refusing to describe the current runtime as the previous installation",
+      );
+    }
+    if (snapshot.owner === "external") {
+      if (repairExternal) {
+        if (this.platform !== "darwin") {
+          throw new Error("Terminal-managed runtime repair is supported only on macOS");
+        }
+        await this.run(operationName, ["service", "install"], {
+          embedded: true,
+          message: "Restoring the previous terminal-managed daemon",
+          successMessage: "Previous terminal-managed daemon restored",
+          timeoutMs: 75_000,
+        });
+        if (snapshot.mode === "full") {
+          await this.run(operationName, ["tunnel", "start"], {
+            embedded: true,
+            message: "Restoring the previous terminal-managed tunnel",
+            successMessage: "Previous terminal-managed tunnel restored",
+            timeoutMs: 75_000,
+          });
+        }
+      }
+      await this.run(operationName, ["doctor", "--json"], {
+        message: "Verifying the previous terminal-managed runtime",
+        successMessage: "Previous terminal-managed runtime is still healthy",
+        timeoutMs: 75_000,
+      });
+      return;
+    }
+    const runtime = await this.supervisor.startIfConfigured();
+    const expected = snapshot.configured ? "ready" : "not-configured";
+    if (runtime.status !== expected) {
+      throw new Error(
+        `Previous runtime recovery returned ${runtime.status}; expected ${expected}${runtime.detail ? `: ${runtime.detail}` : ""}`,
+      );
+    }
+  }
+
+  async rollbackFirstSetup(name) {
+    const config = this.supervisor.readConfig();
+    if (!config) {
+      this.supervisor.clearState();
+      return false;
+    }
+    await this.run(name, ["uninstall", "--yes", "--keep-data", "--launcher-control"], {
+      embedded: true,
+      env: this.launcherControlEnvironment(),
+      message: "Rolling back incomplete first-time setup",
+      successMessage: "Incomplete first-time setup was rolled back",
+      timeoutMs: UNINSTALL_TIMEOUT_MS,
+    });
+    fs.rmSync(this.supervisor.configPath, { force: true });
+    this.supervisor.clearState();
+    return true;
+  }
+
+  async run(name, args, options = {}) {
+    if (this.active) throw new Error(`Another launcher operation is active: ${this.active}`);
+    if (this.activeChild
+      && this.activeChild.exitCode === null
+      && this.activeChild.signalCode === null) {
+      throw new Error("A previous launcher operation process is still running");
+    }
+    this.activeChild = null;
+    if (this.lifecycleOperation && this.lifecycleOperation !== name) {
+      throw new Error(`Another launcher operation is active: ${this.lifecycleOperation}`);
+    }
+    this.active = name;
+    this.publishOperation?.({ name, status: "running", message: options.message || name });
+    this.logger.info("runtime.operation_started", { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
+    try {
+      const invocation = options.embedded
+        ? embeddedRuntimeInvocation({ app: this.app, sourceRoot: this.sourceRoot, args })
+        : this.command(args);
+      const result = await new Promise((resolve, reject) => {
+        const child = spawn(invocation.executable, invocation.args, {
+          cwd: invocation.cwd,
+          detached: DETACH_OWNED_CHILD,
+          env: {
+            ...process.env,
+            CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
+            ...(options.env || {}),
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
+        this.activeChild = child;
+        const stdout = [];
+        const stderr = [];
+        collect(child.stdout, stdout, (line) => {
+          this.logger.info("runtime.stdout", { operation: name, line });
+          this.publishOperation?.({ name, status: "running", message: redactText(line) });
+        });
+        collect(child.stderr, stderr, (line) => {
+          this.logger.warn("runtime.stderr", { operation: name, line });
+          this.publishOperation?.({ name, status: "running", message: redactText(line) });
+        });
+        let settled = false;
+        let timedOut = null;
+        let terminationTimeout = null;
+        let forceTimeout = null;
+        const clearTimers = () => {
+          if (timeout) clearTimeout(timeout);
+          if (terminationTimeout) clearTimeout(terminationTimeout);
+          if (forceTimeout) clearTimeout(forceTimeout);
+        };
+        const timeout = options.timeoutMs
+          ? setTimeout(() => {
+              if (settled) return;
+              timedOut = new Error(`${name} timed out after ${options.timeoutMs}ms`);
+              try {
+                terminateOwnedProcessTree(child);
+              } catch (error) {
+                settled = true;
+                clearTimers();
+                reject(new Error(
+                  `${timedOut.message}; child process tree termination failed: ${error instanceof Error ? error.message : String(error)}`,
+                ));
+                return;
+              }
+              terminationTimeout = setTimeout(() => {
+                if (settled) return;
+                try {
+                  terminateOwnedProcessTree(child, "SIGKILL");
+                } catch (error) {
+                  settled = true;
+                  clearTimers();
+                  reject(new Error(
+                    `${timedOut.message}; forced child process tree termination failed: ${error instanceof Error ? error.message : String(error)}`,
+                  ));
+                  return;
+                }
+                forceTimeout = setTimeout(() => {
+                  if (settled) return;
+                  settled = true;
+                  clearTimers();
+                  reject(new Error(`${timedOut.message}; the child process did not exit after forced termination`));
+                }, 2_000);
+              }, 5_000);
+            }, options.timeoutMs)
+          : null;
+        child.once("error", (error) => {
+          const childStillRunning = Number.isInteger(child.pid)
+            && child.exitCode === null
+            && child.signalCode === null;
+          if (this.activeChild === child && !childStillRunning) this.activeChild = null;
+          if (settled) return;
+          settled = true;
+          clearTimers();
+          reject(timedOut
+            ? new Error(`${timedOut.message}; termination failed: ${error.message}`)
+            : error);
+        });
+        child.once("exit", (code, signal) => {
+          if (this.activeChild === child) this.activeChild = null;
+          if (settled) return;
+          settled = true;
+          clearTimers();
+          if (timedOut) {
+            try {
+              terminateOwnedProcessTree(child, "SIGKILL");
+              reject(timedOut);
+            } catch (error) {
+              reject(new Error(
+                `${timedOut.message}; final process-group cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+              ));
+            }
+            return;
+          }
+          resolve({
+            code: code ?? 1,
+            signal,
+            stdout: Buffer.concat(stdout).toString("utf8"),
+            stderr: Buffer.concat(stderr).toString("utf8"),
+          });
+        });
+      });
+      if (result.code !== 0) {
+        const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
+        throw new Error(detail);
+      }
+      this.logger.info("runtime.operation_completed", { name });
+      this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
+      return result;
+    } catch (error) {
+      const message = redactText(error instanceof Error ? error.message : String(error));
+      this.logger.error("runtime.operation_failed", { name, message });
+      this.publishOperation?.({ name, status: "failed", message });
+      throw new Error(message);
+    } finally {
+      this.active = null;
+    }
+  }
+
+  async doctor() {
+    try {
+      const result = await this.run("doctor", ["doctor", "--json"], {
+        message: "Checking runtime",
+        timeoutMs: 75_000,
+      });
+      return JSON.parse(result.stdout);
+    } catch (error) {
+      return {
+        ok: false,
+        checks: [{ id: "runtime", status: "error", message: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+
+  mcpConnectorName() {
+    const config = this.supervisor.readConfig();
+    if (!config || config.mode !== "full") {
+      throw new Error("The native MCP runtime is not configured");
+    }
+    if (typeof config.appName !== "string" || !config.appName.trim() || config.appName.length > 80) {
+      throw new Error("The configured ChatGPT connector name is invalid");
+    }
+    return config.appName.trim();
+  }
+
+  cancelBrowserTurns() {
+    return this.run("cancel-browser-turns", ["service", "cancel-turns"], {
+      message: "Cancelling retained browser turns",
+      successMessage: "Retained browser turns cancelled",
+      timeoutMs: 15_000,
+    });
+  }
+
+  async uninstallIntegration() {
+    const name = "uninstall-integration";
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const previousRuntime = this.runtimeConfigSnapshot();
+    this.lifecycleOperation = name;
+    try {
+      if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
+      else await this.supervisor.stopForSetup();
+      return await this.run(name, ["uninstall", "--yes", "--launcher-control"], {
+        embedded: true,
+        env: this.launcherControlEnvironment(),
+        message: "Restoring the previous Codex route",
+        successMessage: "Codex Web GPT integration removed",
+        timeoutMs: UNINSTALL_TIMEOUT_MS,
+      });
+    } catch (error) {
+      let recoveryError;
+      try {
+        await this.restorePreviousRuntime(previousRuntime, name);
+      } catch (caught) {
+        recoveryError = caught;
+      }
+      if (!recoveryError) throw error;
+      const primary = error instanceof Error ? error.message : String(error);
+      const recovery = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+      throw new Error(`${primary}; restoring the launcher runtime also failed: ${recovery}`);
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
+  async setupCore() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const existing = this.runtimeConfigSnapshot();
+    const mode = existing.mode;
+    const args = [
+      "setup",
+      mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor",
+      this.browserDescriptorPath,
+      "--acknowledge-unofficial",
+      "--restart-service",
+    ];
+    const result = await this.runSetup("core-setup", args, {
+      message: "Installing ChatGPT Web models into Codex",
+      successMessage: "Codex integration installed",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    });
+    return { ...result, mode };
+  }
+
+  setupMcp({ tunnelId, runtimeKey }) {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    if (!/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) throw new Error("Tunnel ID must be tunnel_ followed by 32 lowercase hexadecimal characters");
+    if (typeof runtimeKey !== "string" || runtimeKey.trim().length < 20) throw new Error("A Tunnels Read + Use runtime key is required");
+    const secretsDir = path.join(this.app.getPath("userData"), "secrets");
+    fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(secretsDir, 0o700); } catch {}
+    const keyPath = path.join(secretsDir, `runtime-key-${randomBytes(16).toString("hex")}.tmp`);
+    fs.writeFileSync(keyPath, runtimeKey.trim(), { flag: "wx", mode: 0o600 });
+    return this.runSetup("mcp-setup", [
+      "setup",
+      "--full",
+      "--browser-host-descriptor",
+      this.browserDescriptorPath,
+      "--tunnel-id",
+      tunnelId,
+      "--runtime-key-file",
+      keyPath,
+      "--acknowledge-unofficial",
+      "--restart-service",
+    ], {
+      message: "Connecting the native Codex harness",
+      successMessage: "Local MCP tools are ready",
+      timeoutMs: MCP_SETUP_TIMEOUT_MS,
+    }).finally(() => fs.rmSync(keyPath, { force: true }));
+  }
+
+  async runSetup(name, args, options) {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const previousRuntime = this.runtimeConfigSnapshot();
+    const checkpoint = this.captureSetupCheckpoint(previousRuntime);
+    this.lifecycleOperation = name;
+    let setupCommandStarted = false;
+    try {
+      if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
+      else await this.supervisor.stopForSetup();
+      setupCommandStarted = true;
+      const result = await this.run(name, args, options);
+      const runtime = await this.supervisor.startIfConfigured();
+      if (runtime.status !== "ready") {
+        throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
+      }
+      return result;
+    } catch (error) {
+      const primary = error instanceof Error ? error.message : String(error);
+      const failures = [];
+      let rolledBack = false;
+      let checkpointChanged = false;
+      if (!previousRuntime.configured && setupCommandStarted) {
+        try {
+          rolledBack = await this.rollbackFirstSetup(name);
+        } catch (caught) {
+          failures.push(
+            `first-time setup rollback failed: ${caught instanceof Error ? caught.message : String(caught)}`,
+          );
+        }
+      }
+      if (previousRuntime.configured && checkpoint) {
+        try {
+          checkpointChanged = this.setupCheckpointChanged(checkpoint);
+        } catch (caught) {
+          checkpointChanged = true;
+          failures.push(
+            `checking the setup checkpoint failed: ${caught instanceof Error ? caught.message : String(caught)}`,
+          );
+        }
+        try {
+          this.restoreSetupCheckpoint(checkpoint);
+        } catch (caught) {
+          failures.push(caught instanceof Error ? caught.message : String(caught));
+        }
+      }
+      let recoveryError;
+      try {
+        await this.restorePreviousRuntime(previousRuntime, name, {
+          repairExternal: previousRuntime.owner === "external" && checkpointChanged,
+        });
+      } catch (caught) {
+        recoveryError = caught;
+      }
+      if (recoveryError) {
+        failures.push(
+          `restoring the previous launcher runtime failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+        );
+      }
+      const message = [
+        primary,
+        ...(rolledBack ? ["incomplete first-time setup was rolled back"] : []),
+        ...failures,
+      ].join("; ");
+      this.publishOperation?.({ name, status: "failed", message });
+      throw new Error(message);
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+}
+
+module.exports = { RuntimeHost };

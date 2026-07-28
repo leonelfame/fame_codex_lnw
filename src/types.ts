@@ -298,6 +298,10 @@ export interface CodexProviderConfig {
   chatgptWeb?: {
     /** ChatGPT custom connector attached to tool-capable temporary chats. */
     appName?: string;
+    /** Explicit browser owner. Launcher mode attaches to the embedded Electron ChatGPT surface. */
+    browserHost?: "managed-chrome" | "launcher";
+    /** Owner-only descriptor containing the launcher's loopback CDP and control endpoints. */
+    browserHostDescriptorPath?: string;
     /** Playwright storage-state file created by the explicit browser login. */
     storageStatePath?: string;
     /** System Chrome executable. The runtime never downloads a browser. */

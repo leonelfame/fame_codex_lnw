@@ -1,0 +1,1504 @@
+import { AnimatePresence, motion } from "motion/react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { copyFor, type Copy } from "./i18n";
+import { Icon, type IconName } from "./icons";
+import type {
+  BrowserState,
+  DoctorReport,
+  Language,
+  LauncherSnapshot,
+  LauncherState,
+  LogRecord,
+  OperationState,
+  Surface,
+} from "./types";
+
+const api = window.codexWebLauncher;
+const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
+const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
+
+export function App() {
+  const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
+  const [browser, setBrowser] = useState<BrowserState | null>(null);
+  const [operation, setOperation] = useState<OperationState | null>(null);
+  const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!api) return;
+    let cancelled = false;
+    void api.snapshot().then((next) => {
+      if (cancelled) return;
+      setSnapshot(next);
+      setBrowser(next.browser);
+      setLogs(next.logs);
+      setOperation(next.operation);
+      if (next.operation?.status === "failed") setError(next.operation.message);
+    }).catch((cause) => setError(messageOf(cause)));
+    const unsubscribeState = api.onStateChanged((state) => {
+      setSnapshot((current) => current
+        ? {
+            ...current,
+            state,
+            smokePassed: current.smokePassed
+              || (state.browserSmokePassed === true && state.browserSmokeVersion === current.version),
+          }
+        : current);
+    });
+    const unsubscribeBrowser = api.onBrowserState(setBrowser);
+    const unsubscribeOperation = api.onOperation((next) => {
+      setOperation(next);
+      if (next.status === "failed") setError(next.message);
+    });
+    const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
+    return () => {
+      cancelled = true;
+      unsubscribeState();
+      unsubscribeBrowser();
+      unsubscribeOperation();
+      unsubscribeLog();
+    };
+  }, []);
+
+  const updateState = useCallback((state: LauncherState) => {
+    setSnapshot((current) => current
+      ? {
+          ...current,
+          state,
+          smokePassed: current.smokePassed
+            || (state.browserSmokePassed === true && state.browserSmokeVersion === current.version),
+        }
+      : current);
+  }, []);
+
+  if (!api) return <FatalMessage message="Launcher IPC is unavailable." />;
+  if (!snapshot) return <LaunchLoading />;
+
+  const language = snapshot.state.language ?? "en";
+  const copy = copyFor(language);
+
+  return (
+    <div className="app-root" data-language={language} data-theme="dark">
+      <AnimatePresence mode="wait">
+        {!snapshot.state.onboardingComplete ? (
+          <Onboarding
+            copy={copy}
+            key="onboarding"
+            language={language}
+            setError={setError}
+            snapshot={snapshot}
+            updateState={updateState}
+          />
+        ) : (
+          <LauncherShell
+            browser={browser}
+            copy={copy}
+            key="launcher"
+            language={language}
+            logs={logs}
+            operation={operation}
+            setError={setError}
+            snapshot={snapshot}
+            updateState={updateState}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {error ? <ErrorToast copy={copy} message={error} onDismiss={() => setError(null)} /> : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function Onboarding({
+  copy,
+  language,
+  setError,
+  snapshot,
+  updateState,
+}: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [stage, setStage] = useState<"language" | "support">(snapshot.state.language ? "support" : "language");
+  const [selectedLanguage, setSelectedLanguage] = useState<Language>(language);
+  const [busy, setBusy] = useState(false);
+  const localized = copyFor(selectedLanguage);
+  const isLanguage = stage === "language";
+
+  const chooseLanguage = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setLanguage(selectedLanguage));
+      setStage("support");
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openSocial = async (target: "github" | "x") => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.openSocial(target));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const finish = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.completeOnboarding(selectedLanguage));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <motion.main
+      animate={{ opacity: 1 }}
+      className="welcome"
+      exit={{ opacity: 0 }}
+      initial={{ opacity: 0 }}
+      transition={{ duration: 0.22 }}
+    >
+      <header className="welcome-top draggable">
+        <div className="welcome-brand no-drag">
+          <BrandMark small />
+          <span>{localized.product}</span>
+        </div>
+        <span className="welcome-version no-drag">v{snapshot.version}</span>
+      </header>
+
+      <AnimatePresence mode="wait">
+        <motion.section
+          animate={{ opacity: 1, y: 0 }}
+          className="welcome-stage"
+          exit={{ opacity: 0, y: -8 }}
+          initial={{ opacity: 0, y: 8 }}
+          key={stage}
+          transition={PANEL_TRANSITION}
+        >
+          <span className="welcome-kicker">{isLanguage ? "01" : "02"}</span>
+          <h1>{isLanguage ? localized.chooseLanguage : localized.supportTitle}</h1>
+          <p>{isLanguage ? localized.chooseLanguageHint : localized.supportBody}</p>
+
+          {isLanguage ? (
+            <div className="welcome-options" role="radiogroup" aria-label={localized.chooseLanguage}>
+              <WelcomeOption
+                active={selectedLanguage === "en"}
+                detail="English"
+                label="English"
+                marker="EN"
+                onClick={() => setSelectedLanguage("en")}
+              />
+              <WelcomeOption
+                active={selectedLanguage === "zh-CN"}
+                detail="简体中文"
+                label="简体中文"
+                marker="简"
+                onClick={() => setSelectedLanguage("zh-CN")}
+              />
+            </div>
+          ) : (
+            <div className="welcome-options">
+              <WelcomeAction
+                complete={snapshot.state.githubOpened}
+                disabled={busy}
+                icon="github"
+                label={snapshot.state.githubOpened ? localized.starred : localized.star}
+                onClick={() => openSocial("github")}
+              />
+              <WelcomeAction
+                complete={snapshot.state.xOpened}
+                disabled={busy}
+                icon="x"
+                label={snapshot.state.xOpened ? localized.followed : localized.follow}
+                onClick={() => openSocial("x")}
+              />
+            </div>
+          )}
+        </motion.section>
+      </AnimatePresence>
+
+      <footer className="welcome-footer">
+        <div>
+          {!isLanguage ? (
+            <button className="text-button" onClick={() => setStage("language")} type="button">
+              {localized.previous}
+            </button>
+          ) : null}
+        </div>
+        <div className="welcome-progress" aria-label={`${isLanguage ? 1 : 2} / 2`}>
+          <span className={!isLanguage ? "is-complete" : "is-active"} />
+          <span className={!isLanguage ? "is-active" : ""} />
+        </div>
+        <PrimaryButton
+          disabled={busy || (!isLanguage && (!snapshot.state.githubOpened || !snapshot.state.xOpened))}
+          onClick={isLanguage ? chooseLanguage : finish}
+        >
+          {isLanguage ? localized.continue : localized.finishWelcome}
+        </PrimaryButton>
+      </footer>
+    </motion.main>
+  );
+}
+
+function LauncherShell({
+  browser,
+  copy,
+  language,
+  logs,
+  operation,
+  setError,
+  snapshot,
+  updateState,
+}: {
+  browser: BrowserState | null;
+  copy: Copy;
+  language: Language;
+  logs: LogRecord[];
+  operation: OperationState | null;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [surface, setSurface] = useState<Surface>(snapshot.state.coreSetupComplete ? "browser" : "setup");
+  const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
+  const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
+  const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
+  const browserSlotRef = useRef<HTMLDivElement>(null);
+  const browserVisible = browser?.visible === true;
+  const browserSurfaceActive = surface === "browser" && !(compactSidebar && sidebarOpen);
+  const needsBrowser = browser?.authenticated !== true;
+  const needsSetup = !needsBrowser && snapshot.state.coreSetupComplete !== true;
+  const mcpOptional = snapshot.state.coreSetupComplete === true && snapshot.state.mcpSetupComplete !== true;
+
+  useLayoutEffect(() => {
+    void api!.setBrowserSurfaceActive(browserSurfaceActive).catch((cause) => setError(messageOf(cause)));
+  }, [browserSurfaceActive, setError]);
+
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
+    const apply = () => {
+      setCompactSidebar(media.matches);
+      setSidebarOpen(!media.matches);
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (surface !== "browser") return;
+    const node = browserSlotRef.current;
+    if (!node) return;
+    let animationFrame = 0;
+    const measure = () => {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(() => {
+        const rect = node.getBoundingClientRect();
+        void api!.setBrowserBounds({
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        });
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    window.addEventListener("resize", measure);
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [browserVisible, compactSidebar, sidebarOpen, surface]);
+
+  const activateBrowser = useCallback(async (show = false) => {
+    setSurface("browser");
+    await api!.setBrowserSurfaceActive(true);
+    if (show) await api!.showBrowser();
+  }, []);
+
+  const toggleSidebar = () => {
+    const next = !sidebarOpen;
+    if (compactSidebar && next && surface === "browser") {
+      void api!.setBrowserSurfaceActive(false)
+        .then(() => setSidebarOpen(true))
+        .catch((cause) => setError(messageOf(cause)));
+      return;
+    }
+    setSidebarOpen(next);
+  };
+
+  const navigateSurface = (next: Surface) => {
+    setSurface(next);
+    if (compactSidebar) setSidebarOpen(false);
+  };
+
+  return (
+    <motion.main
+      animate={{ opacity: 1 }}
+      className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}`}
+      initial={{ opacity: 0 }}
+    >
+      <TitleBar
+        copy={copy}
+        sidebarOpen={sidebarOpen}
+        toggleSidebar={toggleSidebar}
+      />
+
+      {compactSidebar && sidebarOpen ? (
+        <button
+          aria-label={copy.hideSidebar}
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          type="button"
+        />
+      ) : null}
+
+      <motion.aside
+        animate={{ width: sidebarOpen ? "var(--sidebar-width)" : 0 }}
+        className="app-sidebar"
+        initial={false}
+        transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
+      >
+        <div className="sidebar-clip">
+          <div className="sidebar-content">
+            <div className="sidebar-brand-row">
+              <div className="sidebar-brand-identity">
+                <BrandMark small />
+                <strong>{copy.product}</strong>
+              </div>
+              <div className="sidebar-brand-actions">
+                <IconButton
+                  icon="github"
+                  label="GitHub"
+                  onClick={() => void api!.openExternal(snapshot.urls.github).catch((cause) => setError(messageOf(cause)))}
+                />
+                <IconButton
+                  icon="x"
+                  label="X"
+                  onClick={() => void api!.openExternal(snapshot.urls.x).catch((cause) => setError(messageOf(cause)))}
+                />
+              </div>
+            </div>
+
+            <nav className="sidebar-nav" aria-label={copy.workspace}>
+              <SidebarGroup label={copy.workspace}>
+                <SidebarItem
+                  active={surface === "browser"}
+                  badge={needsBrowser
+                    ? <ActionDot pulse tone="required" />
+                    : browser?.status === "error"
+                      ? <ActionDot tone="error" />
+                      : null}
+                  icon="browser"
+                  label={copy.browser}
+                  onClick={() => navigateSurface("browser")}
+                />
+              </SidebarGroup>
+              <SidebarGroup label={copy.configuration}>
+                <SidebarItem
+                  active={surface === "setup"}
+                  badge={needsSetup ? <ActionDot pulse tone="required" /> : null}
+                  icon="setup"
+                  label={copy.setup}
+                  onClick={() => navigateSurface("setup")}
+                />
+                <SidebarItem
+                  active={surface === "mcp"}
+                  badge={mcpOptional ? <ActionDot tone="optional" /> : null}
+                  icon="mcp"
+                  label="MCP"
+                  onClick={() => navigateSurface("mcp")}
+                />
+              </SidebarGroup>
+              <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+              </SidebarGroup>
+            </nav>
+
+            <div className="sidebar-footer">
+              <SidebarItem active={surface === "settings"} icon="settings" label={copy.settings} onClick={() => navigateSurface("settings")} />
+            </div>
+          </div>
+        </div>
+      </motion.aside>
+
+      <section className="workspace">
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            animate={{ opacity: 1 }}
+            className="surface-transition"
+            exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            key={surface}
+            transition={{ duration: 0.16 }}
+          >
+            {surface === "browser" ? (
+              <BrowserSurface
+                browser={browser}
+                browserSlotRef={browserSlotRef}
+                copy={copy}
+                setError={setError}
+              />
+            ) : null}
+            {surface === "setup" ? (
+              <SetupSurface
+                activateBrowser={activateBrowser}
+                browser={browser}
+                copy={copy}
+                operation={operation}
+                setError={setError}
+                showMcp={() => setSurface("mcp")}
+                snapshot={snapshot}
+                updateState={updateState}
+              />
+            ) : null}
+            {surface === "mcp" ? (
+              <McpSurface
+                copy={copy}
+                onDone={() => setSurface("browser")}
+                setError={setError}
+                snapshot={snapshot}
+                updateState={updateState}
+              />
+            ) : null}
+            {surface === "activity" ? <ActivitySurface copy={copy} logs={logs} setError={setError} /> : null}
+            {surface === "settings" ? (
+              <SettingsSurface
+                copy={copy}
+                language={language}
+                setError={setError}
+                snapshot={snapshot}
+                updateState={updateState}
+              />
+            ) : null}
+          </motion.div>
+        </AnimatePresence>
+      </section>
+    </motion.main>
+  );
+}
+
+function TitleBar({
+  copy,
+  sidebarOpen,
+  toggleSidebar,
+}: {
+  copy: Copy;
+  sidebarOpen: boolean;
+  toggleSidebar: () => void;
+}) {
+  return (
+    <header className="app-titlebar draggable">
+      <div className="titlebar-left no-drag">
+        <IconButton
+          icon="sidebar"
+          label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
+          onClick={toggleSidebar}
+        />
+      </div>
+    </header>
+  );
+}
+
+function SidebarGroup({ children, label }: { children: ReactNode; label: string }) {
+  return (
+    <section className="sidebar-group">
+      <h2>{label}</h2>
+      <div>{children}</div>
+    </section>
+  );
+}
+
+function SidebarItem({
+  active,
+  badge,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  badge?: ReactNode;
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-current={active ? "page" : undefined}
+      className={`sidebar-item${active ? " is-active" : ""}`}
+      onClick={onClick}
+      type="button"
+    >
+      <Icon name={icon} />
+      <span>{label}</span>
+      {badge ? <i className="sidebar-item-badge">{badge}</i> : null}
+    </button>
+  );
+}
+
+function BrowserSurface({
+  browser,
+  browserSlotRef,
+  copy,
+  setError,
+}: {
+  browser: BrowserState | null;
+  browserSlotRef: React.RefObject<HTMLDivElement | null>;
+  copy: Copy;
+  setError: (error: string | null) => void;
+}) {
+  const visible = browser?.visible === true;
+  const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const title = browserTabTitle(browser, copy);
+  const navigate = async (action: "back" | "forward" | "reload") => {
+    try {
+      await api!.navigateBrowser(action);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const toggle = async () => {
+    try {
+      if (visible) await api!.hideBrowser();
+      else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+
+  return (
+    <section className="browser-surface">
+      <div className="browser-tab-strip">
+        <div className="browser-tab is-active">
+          <BrandMark small />
+          <span title={title}>{title}</span>
+          {browser?.loading ? <i className="tab-spinner" /> : <StateDot state={browserTone(browser)} />}
+          {visible ? (
+            <button aria-label={copy.hideTab} onClick={() => void toggle()} title={copy.hideTab} type="button">
+              <Icon name="close" />
+            </button>
+          ) : null}
+        </div>
+        <div className="browser-tab-drag draggable" />
+      </div>
+      <div className="browser-toolbar">
+        <div className="browser-history">
+          <IconButton
+            disabled={navigationLocked || !browser?.canGoBack}
+            icon="back"
+            label={copy.back}
+            onClick={() => void navigate("back")}
+          />
+          <IconButton
+            disabled={navigationLocked || !browser?.canGoForward}
+            icon="forward"
+            label={copy.forward}
+            onClick={() => void navigate("forward")}
+          />
+          <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
+        </div>
+        <div className="browser-address" title={browser?.url || copy.browserAddress}>
+          <Icon name="globe" />
+          <span>{formatBrowserAddress(browser?.url, copy)}</span>
+        </div>
+        <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
+          {visible ? copy.hideBrowser : copy.openChatgpt}
+        </button>
+        {browser?.loading ? <i className="browser-loading-line" /> : null}
+      </div>
+      <div className="browser-viewport" ref={browserSlotRef}>
+        {!visible ? (
+          <div className="browser-empty">
+            <BrandMark />
+            <h1>{browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
+            <p>{browser?.authenticated ? copy.noActiveTaskBody : copy.stepAccountBody}</p>
+            <PrimaryButton onClick={() => void toggle()}>
+              {browser?.authenticated ? copy.openChatgpt : copy.signIn}
+            </PrimaryButton>
+          </div>
+        ) : (
+          <div className="browser-underlay" aria-hidden="true">
+            <span>{copy.loading}</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SetupSurface({
+  activateBrowser,
+  browser,
+  copy,
+  operation,
+  setError,
+  showMcp,
+  snapshot,
+  updateState,
+}: {
+  activateBrowser: (show?: boolean) => Promise<void>;
+  browser: BrowserState | null;
+  copy: Copy;
+  operation: OperationState | null;
+  setError: (error: string | null) => void;
+  showMcp: () => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [localBusy, setLocalBusy] = useState(false);
+  const busy = localBusy || operation?.status === "running";
+  const run = async (action: () => Promise<void>) => {
+    if (busy) return;
+    setLocalBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
+  const openLogin = () => run(async () => {
+    await activateBrowser();
+    await api!.openLogin();
+  });
+  const smoke = () => run(async () => {
+    await activateBrowser();
+    await api!.smokeTest();
+    updateState((await api!.snapshot()).state);
+  });
+  const install = () => run(async () => {
+    await api!.setupCore();
+    updateState((await api!.snapshot()).state);
+  });
+
+  return (
+    <ContentSurface
+      eyebrow={copy.required}
+      subtitle={copy.setupSubtitle}
+      title={copy.setupTitle}
+    >
+      <SectionHeading label={copy.coreSetup} />
+      <div className="setup-list">
+        <SetupRow
+          action={browser?.authenticated ? copy.signedIn : copy.signIn}
+          complete={browser?.authenticated === true}
+          description={copy.stepAccountBody}
+          disabled={busy}
+          index={1}
+          onAction={openLogin}
+          title={copy.stepAccount}
+        />
+        <SetupRow
+          action={snapshot.smokePassed ? copy.smokePassed : copy.runSmoke}
+          complete={snapshot.smokePassed}
+          description={copy.stepSmokeBody}
+          disabled={busy || !browser?.authenticated}
+          index={2}
+          onAction={smoke}
+          title={copy.stepSmoke}
+        />
+        <SetupRow
+          action={snapshot.state.coreSetupComplete ? copy.installed : copy.install}
+          complete={snapshot.state.coreSetupComplete === true}
+          description={copy.stepInstallBody}
+          disabled={busy || !snapshot.smokePassed}
+          index={3}
+          onAction={install}
+          title={copy.stepInstall}
+        />
+      </div>
+
+      {snapshot.state.codexRestartRequired ? (
+        <NoticeRow icon="spark" tone="warning">
+          {copy.restartCodex}
+        </NoticeRow>
+      ) : null}
+
+      <SectionHeading label="MCP" meta={copy.optional} spaced />
+      <button className="next-surface-row" disabled={!snapshot.state.coreSetupComplete} onClick={showMcp} type="button">
+        <Icon name="mcp" />
+        <span>
+          <strong>{copy.mcpTitle}</strong>
+          <small>{copy.mcpBody}</small>
+        </span>
+        <em>{snapshot.state.mcpSetupComplete ? copy.mcpReady : copy.configureMcp}</em>
+        <Icon name="chevron" />
+      </button>
+    </ContentSurface>
+  );
+}
+
+function McpSurface({
+  copy,
+  onDone,
+  setError,
+  snapshot,
+  updateState,
+}: {
+  copy: Copy;
+  onDone: () => void;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [step, setStep] = useState(Math.min(2, Math.max(0, snapshot.state.mcpGuideStep || 0)));
+  const [tunnelId, setTunnelId] = useState("");
+  const [runtimeKey, setRuntimeKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const [connectorOpened, setConnectorOpened] = useState(false);
+  const steps = useMemo(() => [
+    { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
+    { title: copy.mcpStepTwo, body: copy.mcpStepTwoBody },
+    { title: copy.mcpStepThree, body: copy.mcpStepThreeBody },
+  ], [copy]);
+
+  const move = async (next: number) => {
+    setStep(next);
+    updateState(await api!.setMcpStep(next));
+  };
+  const safeMove = async (next: number) => {
+    setError(null);
+    try {
+      await move(next);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const openExternal = async (url: string) => {
+    setError(null);
+    try {
+      await api!.openExternal(url);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const install = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api!.setupMcp({ tunnelId, runtimeKey });
+      setRuntimeKey("");
+      updateState((await api!.snapshot()).state);
+      await move(2);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const verify = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setDoctor(await api!.verifyMcp());
+      updateState((await api!.snapshot()).state);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ContentSurface fit subtitle={copy.mcpSubtitle} title="MCP">
+      {!snapshot.state.coreSetupComplete ? (
+        <NoticeRow icon="setup" tone="warning">{copy.stepInstallBody}</NoticeRow>
+      ) : null}
+
+      <div className="wizard-stepper" aria-label={`${step + 1} / 3`}>
+        {steps.map((item, index) => (
+          <button
+            className={`${index === step ? "is-active" : ""}${index < step ? " is-complete" : ""}`}
+            disabled={index > step}
+            key={item.title}
+            onClick={() => void safeMove(index)}
+            type="button"
+          >
+            <span>{index < step ? <Icon name="check" /> : index + 1}</span>
+            <em>{item.title}</em>
+          </button>
+        ))}
+      </div>
+
+      <div className="mcp-stage">
+        <div className="guide-media" aria-label={copy.guideVideo}>
+          <Icon name="play" />
+          <span>{copy.guideVideo}</span>
+          <small>{copy.videoComing}</small>
+        </div>
+
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.section
+            animate={{ opacity: 1, x: 0 }}
+            className="wizard-content"
+            exit={{ opacity: 0, x: -8 }}
+            initial={{ opacity: 0, x: 8 }}
+            key={step}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <header>
+              <span>0{step + 1}</span>
+              <div>
+                <h2>{steps[step]!.title}</h2>
+                <p>{steps[step]!.body}</p>
+              </div>
+            </header>
+
+            {step === 0 ? (
+              <div className="inline-actions">
+                <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.tunnels)}>
+                  {copy.openTunnels}
+                </SecondaryButton>
+                <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.keys)}>
+                  {copy.openKeys}
+                </SecondaryButton>
+              </div>
+            ) : null}
+            {step === 1 ? (
+              <div className="field-list">
+                <FieldRow label={copy.tunnelId}>
+                  <input
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    onChange={(event) => setTunnelId(event.target.value)}
+                    placeholder="tunnel_…"
+                    spellCheck={false}
+                    value={tunnelId}
+                  />
+                </FieldRow>
+                <FieldRow label={copy.runtimeKey}>
+                  <input
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    onChange={(event) => setRuntimeKey(event.target.value)}
+                    placeholder="sk-…"
+                    spellCheck={false}
+                    type="password"
+                    value={runtimeKey}
+                  />
+                </FieldRow>
+              </div>
+            ) : null}
+            {step === 2 ? (
+              <div className="connector-actions">
+                <div className="connector-name">
+                  <span>{copy.connectorName}</span>
+                  <code>Codex Native</code>
+                </div>
+                <div className="inline-actions">
+                  <SecondaryButton
+                    icon="external"
+                    onClick={() => void (async () => {
+                      setError(null);
+                      try {
+                        await api!.openExternal(snapshot.urls.connectors);
+                        setConnectorOpened(true);
+                      } catch (cause) {
+                        setError(messageOf(cause));
+                      }
+                    })()}
+                  >
+                    {copy.openConnectors}
+                  </SecondaryButton>
+                  <SecondaryButton disabled={busy || !connectorOpened} onClick={() => void verify()}>
+                    {copy.verifyRuntime}
+                  </SecondaryButton>
+                </div>
+                {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
+              </div>
+            ) : null}
+          </motion.section>
+        </AnimatePresence>
+      </div>
+
+      <div className="wizard-footer">
+        <button className="text-button" disabled={step === 0 || busy} onClick={() => void safeMove(step - 1)} type="button">
+          {copy.previous}
+        </button>
+        {step === 0 ? <PrimaryButton onClick={() => void safeMove(1)}>{copy.next}</PrimaryButton> : null}
+        {step === 1 ? (
+          <PrimaryButton disabled={busy || !tunnelId || !runtimeKey || !snapshot.state.coreSetupComplete} onClick={() => void install()}>
+            {busy ? copy.running : copy.connect}
+          </PrimaryButton>
+        ) : null}
+        {step === 2 ? (
+          <PrimaryButton disabled={!doctor?.ok} onClick={onDone}>
+            {doctor?.ok ? copy.done : copy.verifyRuntime}
+          </PrimaryButton>
+        ) : null}
+      </div>
+    </ContentSurface>
+  );
+}
+
+function ActivitySurface({
+  copy,
+  logs,
+  setError,
+}: {
+  copy: Copy;
+  logs: LogRecord[];
+  setError: (error: string | null) => void;
+}) {
+  return (
+    <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
+      <div className="section-heading activity-heading">
+        <span>{copy.recentActivity}</span>
+        <SecondaryButton
+          icon="external"
+          onClick={() => void api!.openLogs().catch((cause) => setError(messageOf(cause)))}
+        >
+          {copy.openLogFolder}
+        </SecondaryButton>
+      </div>
+      <div className="activity-table">
+        {logs.length === 0 ? (
+          <div className="surface-empty">
+            <Icon name="logs" />
+            <span>{copy.noLogs}</span>
+          </div>
+        ) : null}
+        {[...logs].reverse().map((record, index) => (
+          <div className="activity-row" key={`${record.at}-${record.event}-${index}`}>
+            <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
+            <div>
+              <strong>{humanEvent(record.event)}</strong>
+              <span>{logDetail(record.detail)}</span>
+            </div>
+            <time>{formatTime(record.at)}</time>
+          </div>
+        ))}
+      </div>
+    </ContentSurface>
+  );
+}
+
+function SettingsSurface({
+  copy,
+  language,
+  setError,
+  snapshot,
+  updateState,
+}: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [turnsCancelled, setTurnsCancelled] = useState(false);
+  const [integrationRemoved, setIntegrationRemoved] = useState(false);
+
+  const updateLanguage = async (next: Language) => {
+    try {
+      updateState(await api!.setLanguage(next));
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const runDoctor = async () => {
+    setBusy(true);
+    try {
+      setDoctor(await api!.doctor());
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancelTurns = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api!.cancelTurns();
+      setTurnsCancelled(true);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const uninstallIntegration = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api!.uninstallIntegration();
+      if (!result.cancelled) {
+        updateState(result.state);
+        setIntegrationRemoved(true);
+      }
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ContentSurface narrow title={copy.settingsTitle}>
+      <SectionHeading label={copy.general} />
+      <div className="settings-list">
+        <SettingRow body={copy.launchAtLoginBody} label={copy.launchAtLogin}>
+          <Switch
+            checked={snapshot.state.autoStart}
+            onChange={(checked) => void api!.setAutostart(checked)
+              .then((result) => updateState(result.state))
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
+          <Switch
+            checked={snapshot.state.showBrowserDuringTurns}
+            onChange={(checked) => void api!.setPreference("showBrowserDuringTurns", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
+          <select onChange={(event) => void updateLanguage(event.target.value as Language)} value={language}>
+            <option value="en">English</option>
+            <option value="zh-CN">简体中文</option>
+          </select>
+        </SettingRow>
+      </div>
+
+      <SectionHeading label={copy.diagnostics} spaced />
+      <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
+        <Icon name="activity" />
+        <span>
+          <strong>{copy.runDoctor}</strong>
+          <small>{doctor ? (doctor.ok ? copy.healthy : copy.needsAttention) : copy.status}</small>
+        </span>
+        <Icon name="chevron" />
+      </button>
+      <button className="diagnostic-row" disabled={busy} onClick={() => void cancelTurns()} type="button">
+        <Icon name="close" />
+        <span>
+          <strong>{copy.cancelTurns}</strong>
+          <small>{turnsCancelled ? copy.turnsCancelled : copy.cancelTurnsBody}</small>
+        </span>
+        <Icon name="chevron" />
+      </button>
+      <button className="diagnostic-row" disabled={busy} onClick={() => void uninstallIntegration()} type="button">
+        <Icon name="close" />
+        <span>
+          <strong>{copy.uninstallIntegration}</strong>
+          <small>{integrationRemoved ? copy.integrationRemoved : copy.uninstallIntegrationBody}</small>
+        </span>
+        <Icon name="chevron" />
+      </button>
+      {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
+
+      <div className="about-row">
+        <BrandMark small />
+        <span>
+          <strong>{copy.product}</strong>
+          <small>{platformLabel(snapshot.platform)} · v{snapshot.version}</small>
+        </span>
+      </div>
+    </ContentSurface>
+  );
+}
+
+function ContentSurface({
+  children,
+  eyebrow,
+  fit = false,
+  narrow = false,
+  subtitle,
+  title,
+}: {
+  children: ReactNode;
+  eyebrow?: string;
+  fit?: boolean;
+  narrow?: boolean;
+  subtitle?: string;
+  title: string;
+}) {
+  return (
+    <section className="content-surface">
+      <div className={`content-scroll${narrow ? " is-narrow" : ""}${fit ? " is-fit" : ""}`}>
+        <header className="surface-header">
+          {eyebrow ? <span>{eyebrow}</span> : null}
+          <h1>{title}</h1>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </header>
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function SetupRow({
+  action,
+  complete,
+  description,
+  disabled,
+  index,
+  onAction,
+  title,
+}: {
+  action: string;
+  complete: boolean;
+  description: string;
+  disabled: boolean;
+  index: number;
+  onAction: () => void;
+  title: string;
+}) {
+  return (
+    <div className={`setup-row${complete ? " is-complete" : ""}`}>
+      <span className="setup-index">{complete ? <Icon name="check" /> : index}</span>
+      <div>
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </div>
+      <SecondaryButton disabled={disabled || complete} onClick={onAction}>
+        {action}
+      </SecondaryButton>
+    </div>
+  );
+}
+
+function SectionHeading({ label, meta, spaced = false }: { label: string; meta?: string; spaced?: boolean }) {
+  return (
+    <div className={`section-heading${spaced ? " is-spaced" : ""}`}>
+      <span>{label}</span>
+      {meta ? <small>{meta}</small> : null}
+    </div>
+  );
+}
+
+function NoticeRow({
+  children,
+  icon,
+  tone,
+}: {
+  children: ReactNode;
+  icon: IconName;
+  tone: "warning" | "success";
+}) {
+  return (
+    <div className={`notice-row tone-${tone}`}>
+      <Icon name={icon} />
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function SettingRow({ body, children, label }: { body: string; children: ReactNode; label: string }) {
+  return (
+    <div className="setting-row">
+      <div>
+        <strong>{label}</strong>
+        <p>{body}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function FieldRow({ children, label }: { children: ReactNode; label: string }) {
+  return (
+    <label className="field-row">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function DoctorSummary({ copy, report }: { copy: Copy; report: DoctorReport }) {
+  return (
+    <div className={`doctor-summary${report.ok ? " is-healthy" : ""}`}>
+      <header>
+        <Icon name={report.ok ? "check" : "activity"} />
+        <strong>{report.ok ? copy.healthy : copy.needsAttention}</strong>
+      </header>
+      <div>
+        {report.checks.slice(-6).map((check) => (
+          <p key={check.id}>
+            <StateDot state={check.status === "ok" ? "ready" : check.status === "warning" ? "busy" : "error"} />
+            <span>{check.message}</span>
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WelcomeOption({
+  active,
+  detail,
+  label,
+  marker,
+  onClick,
+}: {
+  active: boolean;
+  detail: string;
+  label: string;
+  marker: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-checked={active}
+      className={`welcome-option${active ? " is-active" : ""}`}
+      onClick={onClick}
+      role="radio"
+      type="button"
+    >
+      <span>{marker}</span>
+      <strong>{label}</strong>
+      <small>{detail}</small>
+      {active ? <Icon name="check" /> : null}
+    </button>
+  );
+}
+
+function WelcomeAction({
+  complete,
+  disabled,
+  icon,
+  label,
+  onClick,
+}: {
+  complete: boolean;
+  disabled?: boolean;
+  icon: "github" | "x";
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`welcome-option is-social${complete ? " is-active" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      <span><Icon name={complete ? "check" : icon} /></span>
+      <strong>{label}</strong>
+      <Icon name="external" />
+    </button>
+  );
+}
+
+function PrimaryButton({
+  children,
+  disabled = false,
+  onClick,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className="button-primary" disabled={disabled} onClick={onClick} type="button">
+      {children}
+    </button>
+  );
+}
+
+function SecondaryButton({
+  children,
+  disabled = false,
+  icon,
+  onClick,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  icon?: IconName;
+  onClick: () => void;
+}) {
+  return (
+    <button className="button-secondary" disabled={disabled} onClick={onClick} type="button">
+      {icon ? <Icon name={icon} /> : null}
+      <span>{children}</span>
+    </button>
+  );
+}
+
+function IconButton({
+  disabled = false,
+  icon,
+  label,
+  onClick,
+}: {
+  disabled?: boolean;
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      className="icon-button"
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
+      <Icon name={icon} />
+    </button>
+  );
+}
+
+function Switch({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <button
+      aria-checked={checked}
+      className={`switch${checked ? " is-on" : ""}`}
+      onClick={() => onChange(!checked)}
+      role="switch"
+      type="button"
+    >
+      <span />
+    </button>
+  );
+}
+
+function StateDot({ state }: { state: "idle" | "ready" | "busy" | "error" }) {
+  return <i aria-hidden="true" className={`state-dot is-${state}`} />;
+}
+
+function ActionDot({ pulse = false, tone }: { pulse?: boolean; tone: "required" | "optional" | "error" }) {
+  return <i aria-hidden="true" className={`action-dot is-${tone}${pulse ? " is-pulse" : ""}`} />;
+}
+
+function BrandMark({ small = false }: { small?: boolean }) {
+  return (
+    <span className={`brand-mark${small ? " is-small" : ""}`}>
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <path
+          d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
+          fill="currentColor"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string; onDismiss: () => void }) {
+  return (
+    <motion.div
+      animate={{ opacity: 1, y: 0 }}
+      className="error-toast"
+      exit={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 8 }}
+      transition={PANEL_TRANSITION}
+    >
+      <StateDot state="error" />
+      <span>
+        <strong>{copy.error}</strong>
+        <p>{message}</p>
+      </span>
+      <button onClick={onDismiss} type="button">{copy.dismiss}</button>
+    </motion.div>
+  );
+}
+
+function LaunchLoading() {
+  return (
+    <main className="launch-loading">
+      <BrandMark />
+      <span />
+    </main>
+  );
+}
+
+function FatalMessage({ message }: { message: string }) {
+  return (
+    <main className="fatal-message">
+      <BrandMark />
+      <h1>Codex Web GPT</h1>
+      <p>{message}</p>
+    </main>
+  );
+}
+
+function browserTone(browser: BrowserState | null): "idle" | "ready" | "busy" | "error" {
+  if (!browser) return "idle";
+  if (browser.status === "error") return "error";
+  if (browser.status === "loading" || browser.status === "running" || browser.status === "testing") return "busy";
+  if (browser.authenticated) return "ready";
+  return "idle";
+}
+
+function browserTabTitle(browser: BrowserState | null, copy: Copy): string {
+  const title = browser?.title?.trim();
+  if (!title || title === "about:blank" || title.includes("codex-web-gpt-browser-host")) return copy.temporaryChat;
+  return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.temporaryChat;
+}
+
+function formatBrowserAddress(url: string | undefined, copy: Copy): string {
+  if (!url || url.startsWith("about:blank")) return copy.browserAddress;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "chatgpt.com" && parsed.searchParams.get("temporary-chat") === "true") {
+      return `chatgpt.com  /  ${copy.temporaryChat}`;
+    }
+    return `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+  } catch {
+    return copy.browserAddress;
+  }
+}
+
+function messageOf(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
+
+function platformLabel(value: string): string {
+  return value === "darwin" ? "macOS" : value === "win32" ? "Windows" : value === "linux" ? "Linux" : value;
+}
+
+function humanEvent(value: string): string {
+  return value.split(".").map((part) => part.replaceAll("_", " ")).join(" · ");
+}
+
+function logDetail(detail: Record<string, unknown>): string {
+  const entries = Object.entries(detail).filter(([, value]) => value !== undefined && value !== null);
+  if (entries.length === 0) return "";
+  return entries
+    .slice(0, 3)
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(" · ");
+}
+
+function formatTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}

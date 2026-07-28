@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
+import { isWindowsPipeEndpoint } from "../../config";
 import type { ChatGptTurnEnvironment } from "./environment";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
@@ -65,6 +66,17 @@ interface BrokerResponse {
 
 const brokers = new Map<string, TurnBroker>();
 const MAX_BROKER_LINE_CHARS = 67_108_864;
+
+export async function closeTurnBrokers(): Promise<void> {
+  const active = [...brokers.values()];
+  const results = await Promise.allSettled(active.map(broker => broker.close()));
+  const failures = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map(result => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `${failures.length} ChatGPT turn broker(s) failed to close`);
+  }
+}
 
 function opaqueId(prefix: string): string {
   return `${prefix}_${randomBytes(24).toString("base64url")}`;
@@ -180,24 +192,36 @@ export class TurnBroker {
         else rejectClose(error);
       }));
     }
-    if (existsSync(this.socketPath) && lstatSync(this.socketPath).isSocket()) unlinkSync(this.socketPath);
+    if (!isWindowsPipeEndpoint(this.socketPath)
+      && existsSync(this.socketPath)
+      && lstatSync(this.socketPath).isSocket()) unlinkSync(this.socketPath);
   }
 
   private start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
     this.startPromise = new Promise<void>((resolveStart, rejectStart) => {
-      mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
+      const windowsPipe = isWindowsPipeEndpoint(this.socketPath);
+      if (!windowsPipe) mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
       const listen = () => {
         const server = createServer(socket => this.handleSocket(socket));
         this.server = server;
         server.once("error", rejectStart);
+        server.on("error", error => {
+          console.error(
+            `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
+          );
+        });
         server.listen(this.socketPath, () => {
           server.off("error", rejectStart);
-          chmodSync(this.socketPath, 0o600);
+          if (!windowsPipe) chmodSync(this.socketPath, 0o600);
           resolveStart();
         });
       };
 
+      if (windowsPipe) {
+        listen();
+        return;
+      }
       if (!existsSync(this.socketPath)) {
         listen();
         return;
@@ -206,14 +230,48 @@ export class TurnBroker {
         rejectStart(new Error(`ChatGPT web broker path exists and is not a socket: ${this.socketPath}`));
         return;
       }
+      const socketStat = lstatSync(this.socketPath);
+      const getuid = process.getuid;
+      if (typeof getuid === "function" && socketStat.uid !== getuid()) {
+        rejectStart(new Error(`ChatGPT web broker socket is not owned by the current user: ${this.socketPath}`));
+        return;
+      }
+      if ((socketStat.mode & 0o077) !== 0) {
+        rejectStart(new Error(`ChatGPT web broker socket has unsafe permissions: ${this.socketPath}`));
+        return;
+      }
       const probe = createConnection(this.socketPath);
-      probe.once("connect", () => {
+      let probeSettled = false;
+      const finishProbe = (action: () => void) => {
+        if (probeSettled) return;
+        probeSettled = true;
         probe.destroy();
-        rejectStart(new Error(`ChatGPT web broker socket is already owned by another process: ${this.socketPath}`));
+        action();
+      };
+      probe.setTimeout(2_000, () => finishProbe(() => {
+        rejectStart(new Error(`Timed out while checking existing ChatGPT web broker socket: ${this.socketPath}`));
+      }));
+      probe.once("connect", () => {
+        finishProbe(() => {
+          rejectStart(new Error(`ChatGPT web broker socket is already owned by another process: ${this.socketPath}`));
+        });
       });
-      probe.once("error", () => {
-        unlinkSync(this.socketPath);
-        listen();
+      probe.once("error", error => {
+        finishProbe(() => {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ECONNREFUSED" && code !== "ENOENT") {
+            rejectStart(new Error(
+              `Could not verify existing ChatGPT web broker socket ${this.socketPath}: ${error.message}`,
+            ));
+            return;
+          }
+          try {
+            if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
+            listen();
+          } catch (cleanupError) {
+            rejectStart(errorOf(cleanupError));
+          }
+        });
       });
     });
     return this.startPromise;

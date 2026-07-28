@@ -2,9 +2,9 @@
 
 ## Trust boundaries
 
-The user trusts the local Codex app, this loopback daemon, the configured Chrome profile, the
-selected ChatGPT workspace, OpenAI's tunnel service, and the exact MCP connector they created.
-Repository contents, tool output, websites, and prompt text are untrusted data.
+The user trusts the local Codex app, this loopback daemon, the launcher's private Electron browser
+profile, the selected ChatGPT workspace, OpenAI's tunnel service, and the exact MCP connector they
+created. Repository contents, tool output, websites, and prompt text are untrusted data.
 
 ## Full-mode capability flow
 
@@ -32,9 +32,10 @@ default.
 
 ### Browser session theft
 
-`storage-state.json` can authorize ChatGPT access. It is stored with user-only permissions. Never
-sync, upload, attach, or commit the application home. On suspected exposure, sign out/revoke the
-ChatGPT session and run `login` again.
+The launcher's persistent Electron partition can authorize ChatGPT access. It remains in the
+current OS user's private application-data directory and is never copied into a daemon prompt or
+runtime descriptor. Never sync, upload, attach, or commit it. On suspected exposure, sign out or
+revoke the ChatGPT session from the launcher.
 
 ### Tunnel credential theft
 
@@ -50,12 +51,12 @@ preserving the native provider/task identity. Another process under the same OS 
 port. Run on a trusted single-user account and treat local code execution as inside the trust
 boundary.
 
-The lifecycle endpoints are separate from the Responses surface. `/admin/drain` and
-`/admin/resume` require a random bearer token stored in the user-only application config. Service
-management uses them to reject new work and atomically prove that both the HTTP request and the
-long-lived browser/tool loop are idle before stopping a process. The token does not turn loopback
-into a hostile-local-process security boundary; it prevents accidental or unauthenticated lifecycle
-control through ordinary requests.
+The lifecycle endpoints are separate from the Responses surface. `/admin/drain`, `/admin/resume`,
+`/admin/cancel-browser-turns`, and `/admin/shutdown` require a random bearer token stored in the
+user-only application config. The launcher uses them to reject new work, prove that both the HTTP
+request and long-lived browser/tool loop are idle, flush response state, and stop a process. The
+token does not turn loopback into a hostile-local-process security boundary; it prevents accidental
+or unauthenticated lifecycle control through ordinary requests.
 
 ### Browser/UI drift
 
@@ -76,11 +77,11 @@ response; the bridge does not fabricate or install a Codex history checkpoint.
 - Responses and health listeners bind to `127.0.0.1` only.
 - Full mode uses OpenAI's outbound HTTPS Secure MCP Tunnel; it opens no public listener or inbound
   firewall rule.
-- Chrome connects to ChatGPT and user-authorized attachment URLs only through its normal browser
-  networking.
+- The embedded browser connects to ChatGPT and user-authorized attachment URLs through normal
+  browser networking.
 
 ## Non-goals
 
-- Defending against a compromised local OS user or compromised Codex/Chrome binary.
+- Defending against a compromised local OS user or compromised Codex/Electron binary.
 - Bypassing ChatGPT plan, workspace, usage, action-control, or model restrictions.
 - Making consumer browser automation equivalent to a supported OpenAI API contract.

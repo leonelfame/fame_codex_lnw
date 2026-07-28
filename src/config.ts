@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -7,6 +7,7 @@ import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
+export type BrowserHostMode = "managed-chrome" | "launcher";
 
 export interface TunnelConfig {
   binaryPath: string;
@@ -18,13 +19,15 @@ export interface TunnelConfig {
 }
 
 export interface AppConfig {
-  version: 2;
+  version: 3;
   releaseVersion: string;
   mode: RuntimeMode;
   host: "127.0.0.1";
   port: number;
   contextWindow: number;
   appName: string;
+  browserHost: BrowserHostMode;
+  browserHostDescriptorPath?: string;
   chromeExecutablePath: string;
   storageStatePath: string;
   brokerSocketPath: string;
@@ -39,7 +42,7 @@ export interface AppConfig {
 
 export function expandUserPath(value: string): string {
   if (value === "~") return homedir();
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  if (value.startsWith("~/") || value.startsWith("~\\")) return join(homedir(), value.slice(2));
   return value;
 }
 
@@ -52,6 +55,38 @@ export function getConfigPath(): string {
   return join(getConfigDir(), "config.json");
 }
 
+export function isWindowsPipeEndpoint(value: string): boolean {
+  return /^\\\\\.\\pipe\\[A-Za-z0-9._-]+$/.test(value);
+}
+
+export function defaultBrokerEndpoint(home = getConfigDir(), platform = process.platform): string {
+  if (platform !== "win32") return join(home, "runtime", "turn-broker.sock");
+  const identity = createHash("sha256").update(resolve(home).toLowerCase()).digest("hex").slice(0, 20);
+  return `\\\\.\\pipe\\codex-chatgpt-web-${identity}`;
+}
+
+export function resolveBrokerEndpoint(value: string): string {
+  const expanded = expandUserPath(value);
+  return isWindowsPipeEndpoint(expanded) ? expanded : resolve(expanded);
+}
+
+const atomicWaitCell = new Int32Array(new SharedArrayBuffer(4));
+
+function renameAtomicFile(source: string, destination: string): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const transientWindowsError = process.platform === "win32"
+        && (code === "EBUSY" || code === "EPERM" || code === "EACCES");
+      if (!transientWindowsError || attempt >= 2) throw error;
+      Atomics.wait(atomicWaitCell, 0, 0, 25 * (attempt + 1));
+    }
+  }
+}
+
 export function atomicWriteFile(path: string, data: string | Uint8Array): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -61,7 +96,7 @@ export function atomicWriteFile(path: string, data: string | Uint8Array): void {
   try {
     writeFileSync(fd, data);
     closeSync(fd);
-    renameSync(temp, path);
+    renameAtomicFile(temp, path);
   } catch (error) {
     try { closeSync(fd); } catch {}
     rmSync(temp, { force: true });
@@ -73,16 +108,17 @@ export function atomicWriteFile(path: string, data: string | Uint8Array): void {
 export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
   const home = getConfigDir();
   return {
-    version: 2,
+    version: 3,
     releaseVersion: VERSION,
     mode,
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
     appName: "Codex Native",
+    browserHost: "managed-chrome",
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
-    brokerSocketPath: join(home, "runtime", "turn-broker.sock"),
+    brokerSocketPath: defaultBrokerEndpoint(home),
     headed: true,
     proAvailable: false,
     autoApproveToolCalls: false,
@@ -111,8 +147,9 @@ export function currentRuntimeCommand(): string[] {
 }
 
 function inside(path: string, root: string): boolean {
-  const normalizedPath = resolve(path);
-  const normalizedRoot = resolve(root);
+  const normalize = (value: string) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
+  const normalizedPath = normalize(path);
+  const normalizedRoot = normalize(root);
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep}`);
 }
 
@@ -154,25 +191,76 @@ export function loadConfigForSetup(): AppConfig {
     raw.version = 2;
     raw.mode = "browser-only";
   }
+  if (raw.version === 2) {
+    raw.version = 3;
+    raw.browserHost = "managed-chrome";
+  }
   return parseConfig(raw, path);
 }
 
 function parseConfig(value: unknown, path: string): AppConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid configuration object in ${path}`);
   const parsed = value as Partial<AppConfig>;
-  if (parsed.version !== 2) throw new Error(`Unsupported configuration version in ${path}; rerun setup to migrate it`);
+  if (parsed.version !== 3) throw new Error(`Unsupported configuration version in ${path}; rerun setup to migrate it`);
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
   if (parsed.mode !== "browser-only" && parsed.mode !== "full") throw new Error(`Invalid runtime mode in ${path}`);
   if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
+  if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {
+    throw new Error(`Invalid browserHost in ${path}`);
+  }
   if (!Number.isInteger(parsed.port) || parsed.port! < 1 || parsed.port! > 65_535) throw new Error(`Invalid port in ${path}`);
+  if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
+    throw new Error(`Invalid contextWindow in ${path}`);
+  }
+  if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
+  if (typeof parsed.autoApproveToolCalls !== "boolean") {
+    throw new Error(`Invalid autoApproveToolCalls in ${path}`);
+  }
   const requiredStrings: Array<keyof AppConfig> = [
     "appName", "chromeExecutablePath", "storageStatePath", "brokerSocketPath", "controlToken",
   ];
   for (const key of requiredStrings) {
     if (typeof parsed[key] !== "string" || !(parsed[key] as string).trim()) throw new Error(`Missing ${key} in ${path}`);
   }
+  if (parsed.appName!.length > 80) throw new Error(`appName is too long in ${path}`);
+  if (parsed.browserHost === "launcher"
+    && (typeof parsed.browserHostDescriptorPath !== "string" || !parsed.browserHostDescriptorPath.trim())) {
+    throw new Error(`Launcher browser host requires browserHostDescriptorPath in ${path}`);
+  }
+  if (parsed.browserHost === "launcher"
+    && !isAbsolute(expandUserPath(parsed.browserHostDescriptorPath!))) {
+    throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
+  }
+  const brokerEndpoint = expandUserPath(parsed.brokerSocketPath!);
+  if (process.platform === "win32") {
+    if (!isWindowsPipeEndpoint(brokerEndpoint)) {
+      throw new Error(`Windows brokerSocketPath must be a named pipe in ${path}`);
+    }
+  } else if (!isAbsolute(brokerEndpoint) || isWindowsPipeEndpoint(brokerEndpoint)) {
+    throw new Error(`brokerSocketPath must be an absolute Unix socket path in ${path}`);
+  }
   if (!/^[A-Za-z0-9_-]{40,}$/.test(parsed.controlToken!)) throw new Error(`Invalid controlToken in ${path}`);
-  if (parsed.mode === "full" && !parsed.tunnel) throw new Error("Full mode requires tunnel configuration");
+  if (parsed.mode === "full") {
+    if (!parsed.tunnel || typeof parsed.tunnel !== "object") throw new Error("Full mode requires tunnel configuration");
+    for (const key of ["binaryPath", "tunnelId", "runtimeKeyFile", "profileDir", "profileName", "alias"] as const) {
+      if (typeof parsed.tunnel[key] !== "string" || !parsed.tunnel[key].trim()) {
+        throw new Error(`Missing tunnel.${key} in ${path}`);
+      }
+    }
+    if (!/^tunnel_[a-f0-9]{32}$/.test(parsed.tunnel.tunnelId)) {
+      throw new Error(`Invalid tunnel.tunnelId in ${path}`);
+    }
+    for (const key of ["profileName", "alias"] as const) {
+      if (!/^[A-Za-z0-9._-]+$/.test(parsed.tunnel[key])) {
+        throw new Error(`Invalid tunnel.${key} in ${path}`);
+      }
+    }
+    for (const key of ["binaryPath", "runtimeKeyFile", "profileDir"] as const) {
+      if (!isAbsolute(expandUserPath(parsed.tunnel[key]))) {
+        throw new Error(`tunnel.${key} must be absolute in ${path}`);
+      }
+    }
+  }
   if (!Array.isArray(parsed.runtimeCommand) || parsed.runtimeCommand.length === 0
     || parsed.runtimeCommand.some(part => typeof part !== "string" || !part.trim())) {
     throw new Error(`Invalid runtimeCommand in ${path}`);
@@ -204,6 +292,8 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     noReasoningModels: [],
     chatgptWeb: {
       appName: config.appName,
+      browserHost: config.browserHost,
+      browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,

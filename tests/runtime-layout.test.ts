@@ -1,8 +1,18 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertDurableRuntimeCommand, defaultConfig, loadConfig, loadConfigForSetup } from "../src/config";
+import {
+  assertDurableRuntimeCommand,
+  defaultBrokerEndpoint,
+  defaultConfig,
+  expandUserPath,
+  isWindowsPipeEndpoint,
+  loadConfig,
+  loadConfigForSetup,
+  providerConfig,
+  resolveBrokerEndpoint,
+} from "../src/config";
 import { removeLegacyRuntimeArtifacts } from "../src/service";
 
 const roots: string[] = [];
@@ -17,7 +27,21 @@ test("managed runtime commands reject every ephemeral path component", () => {
   expect(() => assertDurableRuntimeCommand([process.execPath])).not.toThrow();
 });
 
-test("setup explicitly migrates v1 pro-only config to v2 browser-only", () => {
+test("Windows uses a stable native named pipe for the outer Codex tool broker", () => {
+  const first = defaultBrokerEndpoint("C:\\Users\\alice\\.codex-chatgpt-web", "win32");
+  const second = defaultBrokerEndpoint("C:\\Users\\alice\\.codex-chatgpt-web", "win32");
+  expect(first).toBe(second);
+  expect(isWindowsPipeEndpoint(first)).toBe(true);
+  expect(resolveBrokerEndpoint(first)).toBe(first);
+  expect(defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux")).toEndWith(join("runtime", "turn-broker.sock"));
+});
+
+test("user-home expansion accepts native Unix and Windows separators", () => {
+  expect(expandUserPath("~/runtime")).toBe(join(homedir(), "runtime"));
+  expect(expandUserPath("~\\runtime")).toBe(join(homedir(), "runtime"));
+});
+
+test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", () => {
   const root = join(tmpdir(), `codex-chatgpt-web-config-migration-${process.pid}-${Date.now()}`);
   roots.push(root);
   process.env.CODEX_CHATGPT_WEB_HOME = root;
@@ -32,7 +56,7 @@ test("setup explicitly migrates v1 pro-only config to v2 browser-only", () => {
     appName: "Codex Native",
     chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     storageStatePath: join(root, "browser", "storage-state.json"),
-    brokerSocketPath: join(root, "runtime", "turn-broker.sock"),
+    brokerSocketPath: defaultBrokerEndpoint(root),
     headed: true,
     proAvailable: true,
     autoApproveToolCalls: false,
@@ -41,7 +65,7 @@ test("setup explicitly migrates v1 pro-only config to v2 browser-only", () => {
   })}\n`);
 
   expect(() => loadConfig()).toThrow("rerun setup to migrate");
-  expect(loadConfigForSetup()).toMatchObject({ version: 2, mode: "browser-only" });
+  expect(loadConfigForSetup()).toMatchObject({ version: 3, mode: "browser-only", browserHost: "managed-chrome" });
 });
 
 test("legacy temp-path wrapper and vendor are removed only after runtime ownership changes", () => {
@@ -63,4 +87,14 @@ test("legacy temp-path wrapper and vendor are removed only after runtime ownersh
   removeLegacyRuntimeArtifacts(config);
   expect(existsSync(wrapper)).toBe(false);
   expect(existsSync(join(root, "vendor"))).toBe(false);
+});
+
+test("launcher browser ownership is explicit in provider configuration", () => {
+  const config = defaultConfig("browser-only");
+  config.browserHost = "launcher";
+  config.browserHostDescriptorPath = "/Users/example/.codex-chatgpt-web/runtime/launcher-browser.json";
+  expect(providerConfig(config).chatgptWeb).toMatchObject({
+    browserHost: "launcher",
+    browserHostDescriptorPath: config.browserHostDescriptorPath,
+  });
 });
