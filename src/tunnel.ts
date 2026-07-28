@@ -180,6 +180,16 @@ function windowsBatchQuoted(value: string): string {
   return `"${value.replaceAll("%", "%%")}"`;
 }
 
+function tunnelCommandQuoted(value: string): string {
+  if (/[\r\n]/.test(value)) throw new Error("Tunnel MCP command values must not contain newlines");
+  // tunnel-client parses mcp.command with backslash escapes on every platform.
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+export function windowsTunnelMcpCommand(launcher: string): string {
+  return `cmd.exe /d /s /c call ${tunnelCommandQuoted(launcher)}`;
+}
+
 export function buildWindowsMcpLauncher(config: AppConfig): string {
   const command = [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath];
   return [
@@ -196,7 +206,7 @@ export function mcpCommand(config: AppConfig, platform = process.platform): stri
   if (platform === "win32") {
     const launcher = join(getConfigDir(), "bin", "mcp-launcher.cmd");
     atomicWriteFile(launcher, buildWindowsMcpLauncher(config));
-    return `cmd.exe /d /s /c call ${windowsBatchQuoted(launcher)}`;
+    return windowsTunnelMcpCommand(launcher);
   }
   return [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath].map(shellQuote).join(" ");
 }

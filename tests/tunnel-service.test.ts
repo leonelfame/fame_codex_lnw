@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
-import { buildWindowsMcpLauncher, createTunnelConfig, mcpCommand } from "../src/tunnel";
+import { buildWindowsMcpLauncher, createTunnelConfig, mcpCommand, windowsTunnelMcpCommand } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
 import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
@@ -102,7 +102,11 @@ describe("tunnel launchd ownership", () => {
 
     const command = mcpCommand(config, "win32");
     expect(command).toStartWith("cmd.exe /d /s /c call ");
-    expect(command).toContain("mcp-launcher.cmd");
-    expect(existsSync(join(root, "bin", "mcp-launcher.cmd"))).toBe(true);
+    const launcherPath = join(root, "bin", "mcp-launcher.cmd");
+    expect(existsSync(launcherPath)).toBe(true);
+
+    expect(windowsTunnelMcpCommand(String.raw`C:\Users\Administrator\.codex-chatgpt-web\bin\mcp-launcher.cmd`)).toBe(
+      String.raw`cmd.exe /d /s /c call "C:\\Users\\Administrator\\.codex-chatgpt-web\\bin\\mcp-launcher.cmd"`,
+    );
   });
 });
