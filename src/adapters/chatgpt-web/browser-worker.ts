@@ -14,6 +14,7 @@ import {
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
+  CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_TEMPORARY_CHAT_URL,
 } from "../../chatgpt-session";
@@ -450,9 +451,7 @@ export class ChatGptBrowserWorker {
     }
     const currentLabel = (await currentEffort.innerText()).replace(/\s+/g, " ").trim();
     await currentEffort.click();
-    const effortMenu = page.locator(":popover-open").filter({
-      has: page.locator(CHATGPT_EFFORT_ITEM_SELECTOR),
-    }).last();
+    const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
     try {

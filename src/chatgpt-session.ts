@@ -7,11 +7,8 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = 'button[aria-haspopup="menu"][data-tone="neutral"]';
-export const CHATGPT_EFFORT_ITEM_SELECTOR = [
-  '[role="menuitem"]:not([aria-haspopup="menu"])',
-  '[role="menuitemradio"]:not([aria-haspopup="menu"])',
-  '[role="option"]:not([aria-haspopup="menu"])',
-].join(", ");
+export const CHATGPT_EFFORT_MENU_SELECTOR = '[data-testid="composer-intelligence-picker-content"][role="group"]';
+export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
 
 async function anyVisible(locator: Locator): Promise<boolean> {
@@ -46,9 +43,7 @@ export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   await effortButton.waitFor({ state: "visible", timeout: 30_000 });
   await effortButton.click();
   try {
-    const menu = page.locator(":popover-open").filter({
-      has: page.locator(CHATGPT_EFFORT_ITEM_SELECTOR),
-    }).last();
+    const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     await efforts.first().waitFor({ state: "visible", timeout: 20_000 });
     return await efforts.count() >= 5;

@@ -629,15 +629,12 @@ class BrowserHost {
           const rect = element.getBoundingClientRect();
           return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
-        const popovers = Array.from(document.querySelectorAll(':popover-open')).filter(visible);
-        const candidates = popovers.map((popover) => {
-          const items = Array.from(popover.querySelectorAll(
-            '[role="menuitem"]:not([aria-haspopup="menu"]),'
-            + ' [role="menuitemradio"]:not([aria-haspopup="menu"]),'
-            + ' [role="option"]:not([aria-haspopup="menu"])'
-          )).filter(visible);
-          return { popover, items };
-        }).filter(({ items }) => items.length > 0);
+        const candidates = Array.from(document.querySelectorAll(
+          '[data-testid="composer-intelligence-picker-content"][role="group"]'
+        )).filter(visible).map((menu) => ({
+          menu,
+          items: Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible),
+        }));
         const candidate = candidates.at(-1);
         const target = candidate?.items[targetIndex];
         if (!candidate || !target) {
