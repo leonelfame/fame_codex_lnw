@@ -146,18 +146,16 @@ test("embedded ChatGPT is constrained to the owned horizontal viewport", () => {
 
 test("smoke effort selection uses trusted input and localized labels only for confirmation", async () => {
   const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
+  const cdpSource = require("node:fs").readFileSync(require.resolve("../electron/cdp-input.cjs"), "utf8");
   assert.match(source, /\[data-testid="composer-intelligence-picker-content"\]\[role="group"\]/);
   assert.match(source, /\[role="menuitemradio"\]/);
-  assert.match(source, /Input\.dispatchMouseEvent/);
+  assert.match(cdpSource, /Input\.dispatchMouseEvent/);
   assert.doesNotMatch(source, /:popover-open/);
   assert.doesNotMatch(source, /data-radix-collection-item/);
 
   let controlReads = 0;
   let menuReads = 0;
-  let attached = false;
-  let attachCount = 0;
-  let detachCount = 0;
-  const protocolCommands = [];
+  const clicks = [];
   const fixture = {
     clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
     pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
@@ -165,21 +163,11 @@ test("smoke effort selection uses trusted input and localized labels only for co
     readEffortMenu: BrowserHost.prototype.readEffortMenu,
     waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
+    cdpPort: 17842,
+    dispatchTrustedClick: async (input) => clicks.push(input),
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
-        debugger: {
-          isAttached: () => attached,
-          attach: () => {
-            attached = true;
-            attachCount += 1;
-          },
-          detach: () => {
-            attached = false;
-            detachCount += 1;
-          },
-          sendCommand: async (method, params) => protocolCommands.push({ method, params }),
-        },
         executeJavaScript: async (source) => {
           if (source.includes("effort-control-read")) {
             controlReads += 1;
@@ -226,24 +214,16 @@ test("smoke effort selection uses trusted input and localized labels only for co
   assert.deepEqual(result, { effort: "High", changed: true });
   assert.equal(controlReads, 4);
   assert.equal(menuReads, 3);
-  assert.equal(attachCount, 2);
-  assert.equal(detachCount, 2);
-  assert.deepEqual(protocolCommands, [
+  assert.deepEqual(clicks, [
     {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mousePressed", x: 120, y: 80, button: "left", clickCount: 1 },
+      endpoint: "http://127.0.0.1:17842",
+      pageUrl: "https://chatgpt.com/?temporary-chat=true",
+      point: { x: 120, y: 80 },
     },
     {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mouseReleased", x: 120, y: 80, button: "left", clickCount: 1 },
-    },
-    {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mousePressed", x: 160, y: 140, button: "left", clickCount: 1 },
-    },
-    {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mouseReleased", x: 160, y: 140, button: "left", clickCount: 1 },
+      endpoint: "http://127.0.0.1:17842",
+      pageUrl: "https://chatgpt.com/?temporary-chat=true",
+      point: { x: 160, y: 140 },
     },
   ]);
 });

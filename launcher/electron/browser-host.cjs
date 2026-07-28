@@ -3,6 +3,7 @@ const path = require("node:path");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
+const { dispatchTrustedClick } = require("./cdp-input.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -86,6 +87,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
+    this.dispatchTrustedClick = dispatchTrustedClick;
     this.visible = false;
     this.surfaceActive = true;
     this.activeTraceId = null;
@@ -550,32 +552,16 @@ class BrowserHost {
 
   async clickBrowserPoint(point) {
     const contents = this.view.webContents;
-    const x = Math.round(point.x);
-    const y = Math.round(point.y);
-    const protocol = contents.debugger;
-    const attachedHere = !protocol.isAttached();
     try {
-      if (attachedHere) protocol.attach("1.3");
-      await protocol.sendCommand("Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        x,
-        y,
-        button: "left",
-        clickCount: 1,
-      });
-      await protocol.sendCommand("Input.dispatchMouseEvent", {
-        type: "mouseReleased",
-        x,
-        y,
-        button: "left",
-        clickCount: 1,
+      await this.dispatchTrustedClick({
+        endpoint: `http://127.0.0.1:${this.cdpPort}`,
+        pageUrl: contents.getURL(),
+        point,
       });
     } catch (error) {
       throw new Error(
         `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-    } finally {
-      if (attachedHere && protocol.isAttached()) protocol.detach();
     }
   }
 
