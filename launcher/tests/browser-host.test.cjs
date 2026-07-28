@@ -40,6 +40,30 @@ test("browser surface visibility requires both requested and active state", () =
   assert.equal(browserViewVisible(true, true, true), true);
 });
 
+test("browser surface reactivation preserves its last measured bounds", () => {
+  const visibility = [];
+  const fixture = {
+    surfaceActive: true,
+    boundsReady: true,
+    syncViewVisibility() {
+      visibility.push({ active: this.surfaceActive, boundsReady: this.boundsReady });
+    },
+    setState() {},
+    snapshot() {
+      return { surfaceActive: this.surfaceActive, boundsReady: this.boundsReady };
+    },
+  };
+
+  BrowserHost.prototype.setSurfaceActive.call(fixture, false);
+  BrowserHost.prototype.setSurfaceActive.call(fixture, true);
+
+  assert.deepEqual(visibility, [
+    { active: false, boundsReady: true },
+    { active: true, boundsReady: true },
+  ]);
+  assert.equal(fixture.boundsReady, true);
+});
+
 test("browser bounds are clipped to the launcher content area", () => {
   assert.deepEqual(
     constrainBrowserBounds({ x: 260, y: 78, width: 1000, height: 900 }, { width: 1200, height: 800 }),

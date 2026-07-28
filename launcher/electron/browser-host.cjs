@@ -199,7 +199,7 @@ class BrowserHost {
   setBounds(bounds) {
     const [width, height] = this.window.getContentSize();
     this.bounds = constrainBrowserBounds(normalizeBounds(bounds), { width, height });
-    this.boundsReady = this.surfaceActive;
+    this.boundsReady = true;
     this.view.setBounds(this.bounds);
     this.authView?.setBounds(this.bounds);
     this.syncViewVisibility();
@@ -324,7 +324,6 @@ class BrowserHost {
 
   setSurfaceActive(active) {
     this.surfaceActive = active === true;
-    if (!this.surfaceActive) this.boundsReady = false;
     this.syncViewVisibility();
     this.setState({ surfaceActive: this.surfaceActive });
     return this.snapshot();
