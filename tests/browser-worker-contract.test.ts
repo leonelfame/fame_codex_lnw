@@ -16,6 +16,7 @@ test("effort selection uses structural menu indices instead of localized labels"
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
   expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
+  expect(workerSource).toContain('timeout: 70_000');
   expect(sessionSource).toContain('[data-testid="composer-intelligence-picker-content"][role="group"]');
   expect(sessionSource).toContain('[role="menuitemradio"]');
   expect(sessionSource).not.toContain(":popover-open");

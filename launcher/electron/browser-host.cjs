@@ -699,7 +699,7 @@ class BrowserHost {
 
   async selectHighEffort({
     readyTimeoutMs = 70_000,
-    optionTimeoutMs = 20_000,
+    optionTimeoutMs = 70_000,
     confirmTimeoutMs = 40_000,
     pollMs = 200,
   } = {}) {
@@ -808,7 +808,7 @@ class BrowserHost {
       let menu = await this.readEffortMenu(0);
       if (!menu.target) {
         await this.clickBrowserPoint(control.point);
-        menu = await this.waitForEffortMenu(0, 20_000, 200);
+        menu = await this.waitForEffortMenu(0, 70_000, 200);
       }
       proAvailable = menu.count >= 5;
       this.pressBrowserKey("Escape");

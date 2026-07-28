@@ -455,7 +455,7 @@ export class ChatGptBrowserWorker {
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
     try {
-      await effortChoice.waitFor({ state: "visible", timeout: 20_000 });
+      await effortChoice.waitFor({ state: "visible", timeout: 70_000 });
     } catch {
       throw new Error(
         `ChatGPT effort item index ${mode.uiEffortIndex} is unavailable`

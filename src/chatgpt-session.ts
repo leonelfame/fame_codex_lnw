@@ -45,7 +45,7 @@ export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   if (!await menu.isVisible().catch(() => false)) await effortButton.click();
   try {
     const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    await efforts.first().waitFor({ state: "visible", timeout: 20_000 });
+    await efforts.first().waitFor({ state: "visible", timeout: 70_000 });
     return await efforts.count() >= 5;
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
