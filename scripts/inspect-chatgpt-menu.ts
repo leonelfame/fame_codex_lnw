@@ -113,7 +113,7 @@ const inspectExpression = `(() => {
   };
 })()`;
 
-const exerciseExpression = `(async () => {
+const controlStateExpression = `(() => {
   const visible = (candidate) => {
     const style = getComputedStyle(candidate);
     const rect = candidate.getBoundingClientRect();
@@ -122,92 +122,154 @@ const exerciseExpression = `(async () => {
       && rect.width > 0
       && rect.height > 0;
   };
-  const sleep = (milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
   const effortControl = Array.from(document.querySelectorAll('button[aria-haspopup="menu"][data-tone="neutral"]'))
     .filter(visible)
     .at(-1);
-  if (!effortControl) return { ok: false, stage: 'control', error: 'effort control not found' };
+  if (!effortControl) return { control: null, menu: null };
+  const controlRect = effortControl.getBoundingClientRect();
   const menuSelector = '[data-testid="composer-intelligence-picker-content"][role="group"]';
-  const readMenu = () => {
-    const menu = Array.from(document.querySelectorAll(menuSelector)).filter(visible).at(-1);
-    const items = menu
-      ? Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible)
-      : [];
-    return { menu, items };
-  };
-  const waitFor = async (predicate, timeoutMs) => {
-    const deadline = performance.now() + timeoutMs;
-    while (performance.now() < deadline) {
-      const value = predicate();
-      if (value) return value;
-      await sleep(50);
-    }
-    return null;
-  };
-
-  if (readMenu().menu) {
-    effortControl.click();
-    if (!await waitFor(() => !readMenu().menu, 5_000)) {
-      return { ok: false, stage: 'close', error: 'menu did not close after semantic control click' };
-    }
-  }
-
-  const openedAt = performance.now();
-  effortControl.click();
-  const opened = await waitFor(() => {
-    const state = readMenu();
-    return state.items.length >= 5 ? state : null;
-  }, 5_000);
-  if (!opened) {
-    const state = readMenu();
-    return { ok: false, stage: 'open', itemCount: state.items.length };
-  }
-
-  const target = opened.items[2];
-  const targetLabel = (target.innerText || target.textContent || '').replace(/\\s+/g, ' ').trim();
-  target.click();
-  const confirmed = await waitFor(() => {
-    const label = (effortControl.innerText || effortControl.textContent || '').replace(/\\s+/g, ' ').trim();
-    return label === targetLabel ? label : null;
-  }, 5_000);
+  const menu = Array.from(document.querySelectorAll(menuSelector)).filter(visible).at(-1);
+  const items = menu
+    ? Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible)
+    : [];
+  const target = items[2];
+  const targetRect = target?.getBoundingClientRect();
   return {
-    ok: Boolean(confirmed),
-    stage: confirmed ? 'confirmed' : 'confirm',
-    itemCount: opened.items.length,
-    openLatencyMs: Math.round(performance.now() - openedAt),
-    targetIndex: 2,
-    targetLabel,
-    confirmedLabel: confirmed,
+    control: {
+      label: normalize(effortControl.innerText || effortControl.textContent),
+      point: { x: controlRect.x + controlRect.width / 2, y: controlRect.y + controlRect.height / 2 },
+    },
+    menu: menu ? {
+      itemCount: items.length,
+      target: target && targetRect ? {
+        label: normalize(target.innerText || target.textContent),
+        point: { x: targetRect.x + targetRect.width / 2, y: targetRect.y + targetRect.height / 2 },
+      } : null,
+    } : null,
   };
 })()`;
 
-const expression = process.argv.includes("--exercise") ? exerciseExpression : inspectExpression;
+type ControlState = {
+  control: { label: string; point: { x: number; y: number } } | null;
+  menu: {
+    itemCount: number;
+    target: { label: string; point: { x: number; y: number } } | null;
+  } | null;
+};
 
-const popovers = await new Promise<unknown>((resolveResult, rejectResult) => {
+const result = await new Promise<unknown>((resolveResult, rejectResult) => {
   const socket = new WebSocket(target.webSocketDebuggerUrl!);
+  let nextId = 0;
+  const pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+  }>();
   const timeout = setTimeout(() => {
     socket.close();
-    rejectResult(new Error("CDP Runtime.evaluate timed out"));
+    rejectResult(new Error("CDP connection timed out"));
   }, 10_000);
+  const send = (method: string, params: Record<string, unknown> = {}) => new Promise<unknown>((resolve, reject) => {
+    const id = ++nextId;
+    pending.set(id, { resolve, reject });
+    socket.send(JSON.stringify({ id, method, params }));
+  });
+  const evaluate = async <T>(expression: string): Promise<T> => {
+    const response = await send("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    }) as { exceptionDetails?: unknown; result?: { value?: T } };
+    if (response.exceptionDetails) throw new Error("CDP Runtime.evaluate raised an exception");
+    return response.result?.value as T;
+  };
+  const click = async (point: { x: number; y: number }) => {
+    await send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      clickCount: 1,
+    });
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      clickCount: 1,
+    });
+  };
+  const waitFor = async <T>(read: () => Promise<T>, accept: (value: T) => boolean, timeoutMs: number): Promise<T> => {
+    const deadline = Date.now() + timeoutMs;
+    let value = await read();
+    while (!accept(value) && Date.now() < deadline) {
+      await Bun.sleep(50);
+      value = await read();
+    }
+    return value;
+  };
   socket.addEventListener("open", () => {
-    socket.send(JSON.stringify({
-      id: 1,
-      method: "Runtime.evaluate",
-      params: { expression, returnByValue: true, awaitPromise: true },
-    }));
+    void (async () => {
+      if (!process.argv.includes("--exercise")) return await evaluate(inspectExpression);
+
+      let state = await evaluate<ControlState>(controlStateExpression);
+      if (!state.control) throw new Error("ChatGPT effort control not found");
+      if (state.menu) {
+        await click(state.control.point);
+        state = await waitFor(
+          () => evaluate<ControlState>(controlStateExpression),
+          candidate => candidate.menu === null,
+          5_000,
+        );
+        if (state.menu) throw new Error("CDP click did not close the effort menu");
+      }
+
+      const openedAt = Date.now();
+      if (!state.control) throw new Error("ChatGPT effort control disappeared");
+      await click(state.control.point);
+      state = await waitFor(
+        () => evaluate<ControlState>(controlStateExpression),
+        candidate => (candidate.menu?.itemCount ?? 0) >= 5 && candidate.menu?.target !== null,
+        5_000,
+      );
+      if (!state.menu?.target) {
+        return { ok: false, stage: "open", itemCount: state.menu?.itemCount ?? 0 };
+      }
+
+      const targetLabel = state.menu.target.label;
+      const itemCount = state.menu.itemCount;
+      await click(state.menu.target.point);
+      state = await waitFor(
+        () => evaluate<ControlState>(controlStateExpression),
+        candidate => candidate.control?.label === targetLabel,
+        5_000,
+      );
+      return {
+        ok: state.control?.label === targetLabel,
+        stage: state.control?.label === targetLabel ? "confirmed" : "confirm",
+        itemCount,
+        openLatencyMs: Date.now() - openedAt,
+        targetIndex: 2,
+        targetLabel,
+        confirmedLabel: state.control?.label ?? null,
+      };
+    })().then(resolveResult, rejectResult).finally(() => {
+      clearTimeout(timeout);
+      socket.close();
+    });
   });
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(String(event.data)) as {
       id?: number;
       error?: { message?: string };
-      result?: { exceptionDetails?: unknown; result?: { value?: unknown } };
+      result?: unknown;
     };
-    if (message.id !== 1) return;
-    clearTimeout(timeout);
-    socket.close();
-    if (message.error?.message) return rejectResult(new Error(message.error.message));
-    if (message.result?.exceptionDetails) return rejectResult(new Error("CDP Runtime.evaluate raised an exception"));
-    resolveResult(message.result?.result?.value);
+    if (!message.id) return;
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id);
+    if (message.error?.message) request.reject(new Error(message.error.message));
+    else request.resolve(message.result);
   });
   socket.addEventListener("error", () => {
     clearTimeout(timeout);
@@ -215,4 +277,4 @@ const popovers = await new Promise<unknown>((resolveResult, rejectResult) => {
   });
 });
 
-console.log(JSON.stringify(popovers, null, 2));
+console.log(JSON.stringify(result, null, 2));
