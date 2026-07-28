@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
@@ -128,15 +128,53 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
 }
 
 export function currentRuntimeCommand(): string[] {
-  const bunExecutable = process.env.CODEX_CHATGPT_WEB_BUN?.trim()
-    || process.env.CODEX_WEB_GPT_BUN?.trim()
-    || (typeof Bun !== "undefined" ? Bun.which("bun") : undefined);
+  const executableName = basename(process.execPath).toLowerCase();
+  const bunExecutable = executableName === "bun" || executableName === "bun.exe"
+    ? installedBunExecutable()
+    : undefined;
   return runtimeCommandForProcess({
     launcher: process.env.CODEX_CHATGPT_WEB_LAUNCHER,
     executable: process.execPath,
     entry: typeof Bun !== "undefined" ? Bun.main : process.argv[1],
     bunExecutable,
   });
+}
+
+export function installedBunExecutable({
+  platform = process.platform,
+  pathValue = process.env.PATH || process.env.Path || "",
+  candidates = [],
+}: {
+  platform?: NodeJS.Platform;
+  pathValue?: string;
+  candidates?: Array<string | null | undefined>;
+} = {}): string {
+  const executableName = platform === "win32" ? "bun.exe" : "bun";
+  const pathDelimiter = platform === "win32" ? ";" : delimiter;
+  const pathCandidates = pathValue
+    .split(pathDelimiter)
+    .map(part => part.trim().replace(/^"(.*)"$/, "$1"))
+    .filter(Boolean)
+    .map(part => join(part, executableName));
+  const discovered = [
+    process.env.CODEX_CHATGPT_WEB_BUN,
+    process.env.CODEX_WEB_GPT_BUN,
+    ...candidates,
+    ...pathCandidates,
+    typeof Bun !== "undefined" ? Bun.which("bun") : undefined,
+    process.execPath,
+  ];
+  for (const candidate of discovered) {
+    if (!candidate?.trim()) continue;
+    const executable = resolve(candidate.trim());
+    try {
+      assertDurableRuntimeCommand([executable]);
+      return executable;
+    } catch {
+      // Candidate discovery is exhaustive; the final error remains explicit.
+    }
+  }
+  throw new Error("A durable installed Bun executable was not found outside temporary directories");
 }
 
 export function runtimeCommandForProcess({

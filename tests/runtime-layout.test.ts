@@ -8,6 +8,7 @@ import {
   defaultConfig,
   expandUserPath,
   isWindowsPipeEndpoint,
+  installedBunExecutable,
   loadConfig,
   loadConfigForSetup,
   providerConfig,
@@ -39,6 +40,19 @@ test("Windows Bun shims resolve to the installed Bun executable before service s
     executable: ephemeralBun,
     entry: import.meta.path,
   })).toThrow("ephemeral path");
+});
+
+test("installed Bun discovery ignores a temporary self-extract executable", () => {
+  const root = join(tmpdir(), `codex-chatgpt-web-bun-discovery-${process.pid}-${Date.now()}`);
+  const ephemeralBun = join(root, "bun-node-test", "bun.exe");
+  roots.push(root);
+  mkdirSync(join(root, "bun-node-test"), { recursive: true });
+  writeFileSync(ephemeralBun, "");
+  expect(installedBunExecutable({
+    platform: "win32",
+    pathValue: "",
+    candidates: [ephemeralBun, process.execPath],
+  })).toBe(process.execPath);
 });
 
 test("Windows uses a stable native named pipe for the outer Codex tool broker", () => {

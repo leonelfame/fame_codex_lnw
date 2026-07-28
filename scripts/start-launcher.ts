@@ -1,10 +1,9 @@
 import { resolve } from "node:path";
+import { installedBunExecutable } from "../src/config";
 
 const root = resolve(import.meta.dir, "..");
 const launcher = resolve(root, "launcher");
-const bunExecutable = Bun.which("bun") ?? (() => {
-  throw new Error("The installed Bun executable could not be resolved");
-})();
+const bunExecutable = installedBunExecutable();
 
 function run(args: string[], cwd: string): void {
   const result = Bun.spawnSync([bunExecutable, ...args], {
