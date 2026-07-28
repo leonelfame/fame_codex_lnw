@@ -846,8 +846,9 @@ class BrowserHost {
   }
 
   async runSessionInspection(detectPro = false) {
-    const startedIdle = this.view.webContents.getURL() === IDLE_BROWSER_URL;
-    if (startedIdle) await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    const initialUrl = this.view.webContents.getURL();
+    const startedIdle = initialUrl === IDLE_BROWSER_URL;
+    if (!isTemporaryChatUrl(initialUrl)) await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
     const state = await this.probeAuthentication();
     if (!state.authenticated) {
       throw new Error("The embedded ChatGPT session is not authenticated");

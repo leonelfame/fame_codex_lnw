@@ -48,6 +48,32 @@ test("smoke preserves an already-hydrated Temporary Chat page", () => {
   assert.equal(isTemporaryChatUrl("not a url"), false);
 });
 
+test("session inspection navigates an authenticated ordinary chat surface to Temporary Chat", async () => {
+  let currentUrl = "https://chatgpt.com/";
+  const navigations = [];
+  const fixture = {
+    view: {
+      webContents: {
+        getURL: () => currentUrl,
+        loadURL: async (url) => {
+          navigations.push(url);
+          currentUrl = url;
+        },
+      },
+    },
+    probeAuthentication: async () => ({ authenticated: true }),
+  };
+
+  const inspected = await BrowserHost.prototype.runSessionInspection.call(fixture, false);
+
+  assert.deepEqual(navigations, ["https://chatgpt.com/?temporary-chat=true"]);
+  assert.deepEqual(inspected, {
+    authenticated: true,
+    temporary: true,
+    url: "https://chatgpt.com/?temporary-chat=true",
+  });
+});
+
 test("browser surface reactivation preserves its last measured bounds", () => {
   const visibility = [];
   const fixture = {
