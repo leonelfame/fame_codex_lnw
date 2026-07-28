@@ -25,27 +25,92 @@ const expression = `(() => {
       && rect.width > 0
       && rect.height > 0;
   };
-  return Array.from(document.querySelectorAll(':popover-open')).map((root, popoverIndex) => ({
-    popoverIndex,
-    root: {
-      tag: root.tagName.toLowerCase(),
-      attributes: Object.fromEntries(Array.from(root.attributes).map(attribute => [attribute.name, attribute.value])),
+  const attributes = (candidate) => Object.fromEntries(
+    Array.from(candidate.attributes)
+      .filter(attribute => (
+        attribute.name === 'class'
+        || attribute.name === 'role'
+        || attribute.name === 'tabindex'
+        || attribute.name === 'popover'
+        || attribute.name.startsWith('aria-')
+        || attribute.name.startsWith('data-')
+      ))
+      .map(attribute => [attribute.name, attribute.value])
+  );
+  const describe = (candidate) => ({
+    tag: candidate.tagName.toLowerCase(),
+    attributes: attributes(candidate),
+  });
+  const effortControl = Array.from(document.querySelectorAll('button[aria-haspopup="menu"][data-tone="neutral"]'))
+    .filter(visible)
+    .at(-1);
+  if (!effortControl) return { error: 'effort control not found' };
+  const controlRect = effortControl.getBoundingClientRect();
+  const region = {
+    left: Math.max(0, controlRect.left - 280),
+    right: Math.min(innerWidth, controlRect.right + 80),
+    top: Math.max(0, controlRect.top - 520),
+    bottom: Math.min(innerHeight, controlRect.bottom + 80),
+  };
+  const candidates = Array.from(document.querySelectorAll('*'))
+    .filter((candidate) => {
+      if (!visible(candidate)) return false;
+      const rect = candidate.getBoundingClientRect();
+      if (
+        rect.right < region.left
+        || rect.left > region.right
+        || rect.bottom < region.top
+        || rect.top > region.bottom
+      ) return false;
+      const text = (candidate.innerText || candidate.textContent || '').replace(/\\s+/g, ' ').trim();
+      const attrs = attributes(candidate);
+      return (
+        (candidate.children.length === 0 && text.length > 0 && text.length <= 120)
+        || candidate.tagName === 'BUTTON'
+        || Object.keys(attrs).some(name => (
+          name === 'role'
+          || name === 'tabindex'
+          || name === 'popover'
+          || name === 'data-testid'
+          || name === 'data-radix-collection-item'
+          || name === 'aria-haspopup'
+        ))
+      );
+    })
+    .slice(0, 120)
+    .map((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      const ancestors = [];
+      let parent = candidate.parentElement;
+      for (let depth = 0; parent && depth < 4; depth += 1, parent = parent.parentElement) {
+        ancestors.push(describe(parent));
+      }
+      return {
+        ...describe(candidate),
+        text: (candidate.innerText || candidate.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+        rect: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        },
+        ancestors,
+      };
+    });
+  return {
+    viewport: { width: innerWidth, height: innerHeight },
+    effortControl: {
+      ...describe(effortControl),
+      rect: {
+        x: Math.round(controlRect.x),
+        y: Math.round(controlRect.y),
+        width: Math.round(controlRect.width),
+        height: Math.round(controlRect.height),
+      },
     },
-    descendants: Array.from(root.querySelectorAll('*'))
-      .filter(visible)
-      .map((candidate, index) => ({
-        index,
-        tag: candidate.tagName.toLowerCase(),
-        attributes: Object.fromEntries(
-          Array.from(candidate.attributes)
-            .filter(attribute => !['href', 'src', 'value'].includes(attribute.name))
-            .map(attribute => [attribute.name, attribute.value])
-        ),
-        text: candidate.children.length === 0
-          ? (candidate.innerText || candidate.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120)
-          : '',
-      })),
-  }));
+    openPopoverCount: document.querySelectorAll(':popover-open').length,
+    candidates,
+  };
 })()`;
 
 const popovers = await new Promise<unknown>((resolveResult, rejectResult) => {
