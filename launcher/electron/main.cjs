@@ -76,6 +76,8 @@ let exitCommitted = false;
 let smokePassedThisSession = false;
 let cdpPort = 0;
 let lastOperation = null;
+let catalogVerificationTimer = null;
+let catalogVerificationInFlight = false;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -99,6 +101,49 @@ function send(channel, value) {
 function publishOperation(operation) {
   lastOperation = operation;
   send("launcher:operation", operation);
+}
+
+function stopCatalogVerificationMonitor() {
+  if (catalogVerificationTimer) clearInterval(catalogVerificationTimer);
+  catalogVerificationTimer = null;
+}
+
+function startCatalogVerificationMonitor({ logger, stateStore }) {
+  stopCatalogVerificationMonitor();
+  const check = async () => {
+    const current = stateStore.read();
+    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
+      stopCatalogVerificationMonitor();
+      return;
+    }
+    if (catalogVerificationInFlight || !runtimeSupervisor) return;
+    catalogVerificationInFlight = true;
+    try {
+      const config = runtimeSupervisor.readConfig();
+      const health = await runtimeSupervisor.proxyHealthPayload(config);
+      if (!Number.isInteger(health?.successful_model_catalog_requests)
+        || health.successful_model_catalog_requests < 1) return;
+      const state = stateStore.update({
+        codexCatalogVerified: true,
+        codexRestartRequired: false,
+      });
+      logger.info("codex.model_catalog_verified", {
+        requests: health.successful_model_catalog_requests,
+        at: health.last_successful_model_catalog_request_at,
+      });
+      send("launcher:state-changed", state);
+      stopCatalogVerificationMonitor();
+    } catch (error) {
+      logger.debug("codex.model_catalog_verification_pending", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      catalogVerificationInFlight = false;
+    }
+  };
+  catalogVerificationTimer = setInterval(() => { void check(); }, 2_000);
+  catalogVerificationTimer.unref?.();
+  void check();
 }
 
 function trayImage() {
@@ -365,12 +410,14 @@ function registerIpc({ logger, stateStore }) {
     }
     const state = stateStore.update({
       coreSetupComplete: false,
+      codexCatalogVerified: false,
       mcpSetupComplete: false,
       mcpRuntimeInstalled: false,
       mcpGuideStep: 0,
       codexRestartRequired: true,
     });
     send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
     return { cancelled: false, state };
   });
   handle("launcher:setup-core", async () => {
@@ -382,6 +429,7 @@ function registerIpc({ logger, stateStore }) {
     const result = await runtimeHost.setupCore();
     stateStore.update({
       coreSetupComplete: true,
+      codexCatalogVerified: false,
       codexRestartRequired: true,
       ...(result.mode === "browser-only" ? {
         mcpSetupComplete: false,
@@ -394,6 +442,7 @@ function registerIpc({ logger, stateStore }) {
         message: error instanceof Error ? error.message : String(error),
       });
     });
+    startCatalogVerificationMonitor({ logger, stateStore });
     return { ok: true, stdout: result.stdout, restartRequired: true };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
@@ -451,6 +500,7 @@ async function requestQuit() {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
     await runtimeSupervisor?.shutdown();
+    stopCatalogVerificationMonitor();
     quitting = true;
     browserHost?.destroy();
     await browserControl?.close();
@@ -496,6 +546,14 @@ async function start() {
   };
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const persistedState = stateStore.read();
+  if (persistedState.coreSetupComplete === true && persistedState.codexCatalogVerified === undefined) {
+    stateStore.update({
+      coreSetupComplete: false,
+      codexCatalogVerified: false,
+      codexRestartRequired: false,
+    });
+  }
   const autostart = getAutostart(app);
   if (stateStore.read().onboardingComplete && autostart.supported && stateStore.read().autoStart !== autostart.enabled) {
     setAutostart(app, stateStore.read().autoStart);
@@ -577,7 +635,6 @@ async function start() {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
       const patch = {
-        coreSetupComplete: true,
         mcpRuntimeInstalled: config.mode === "full",
         ...(config.mode === "browser-only" ? {
           mcpSetupComplete: false,
@@ -588,6 +645,7 @@ async function start() {
         const state = stateStore.update(patch);
         send("launcher:state-changed", state);
       }
+      startCatalogVerificationMonitor({ logger, stateStore });
       return;
     }
     if (runtime.status === "not-configured") {
@@ -595,6 +653,7 @@ async function start() {
       if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
         const state = stateStore.update({
           coreSetupComplete: false,
+          codexCatalogVerified: false,
           mcpRuntimeInstalled: false,
           mcpSetupComplete: false,
           mcpGuideStep: 0,
@@ -603,7 +662,7 @@ async function start() {
       }
       return;
     }
-    const state = stateStore.update({ coreSetupComplete: false });
+    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       publishOperation({
@@ -619,7 +678,7 @@ async function start() {
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("runtime.startup_failed", { message });
-    const state = stateStore.update({ coreSetupComplete: false });
+    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
     publishOperation({ name: "runtime-start", status: "failed", message });
   });

@@ -213,6 +213,7 @@ class RuntimeHost {
       this.supervisor.configPath,
       path.join(coreHome, "codex", "integration-journal.json"),
       path.join(this.codexHome, "config.toml"),
+      path.join(this.codexHome, "models_cache.json"),
       path.join(coreHome, "secrets", "tunnel-runtime.key"),
       path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web.yaml"),
       path.join(coreHome, "bin", "mcp-launcher.cmd"),

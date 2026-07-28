@@ -14,6 +14,7 @@ export interface LauncherState {
   browserSmokePassed?: boolean;
   browserSmokeVersion?: string | null;
   coreSetupComplete?: boolean;
+  codexCatalogVerified?: boolean;
   mcpSetupComplete?: boolean;
   mcpRuntimeInstalled?: boolean;
   codexRestartRequired?: boolean;

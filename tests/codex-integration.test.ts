@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   getCodexHome,
   getCodexJournalPath,
+  getCodexModelsCachePath,
   installCodexIntegration,
   preflightCodexIntegration,
   readCodexModelContextOverride,
@@ -67,6 +68,21 @@ describe("reversible native Codex route integration", () => {
     expect(uninstallCodexIntegration()).toEqual({ changed: true });
     expect(readFileSync(configPath, "utf8")).toBe(original);
     expect(uninstallCodexIntegration()).toEqual({ changed: false });
+  });
+
+  test("invalidates Codex's provider-agnostic model cache on install and uninstall", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const cachePath = getCodexModelsCachePath();
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    writeFileSync(cachePath, '{"models":["native-only"]}\n');
+
+    installCodexIntegration(defaultConfig("browser-only"));
+    expect(() => readFileSync(cachePath, "utf8")).toThrow();
+
+    writeFileSync(cachePath, '{"models":["native-and-web"]}\n');
+    uninstallCodexIntegration();
+    expect(() => readFileSync(cachePath, "utf8")).toThrow();
   });
 
   test("requires explicit replacement and restores every prior route assignment", () => {

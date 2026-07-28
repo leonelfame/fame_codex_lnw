@@ -102,6 +102,37 @@ test("a drained runtime rejects new model-catalog work before shutdown", async (
   }
 });
 
+test("health proves that Codex received a successful augmented model catalog", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config, {
+    fetchUpstream: async () => Response.json({
+      models: [{
+        slug: "gpt-5.6-sol",
+        display_name: "5.6 Sol",
+        supported_reasoning_levels: [],
+      }],
+    }),
+  });
+  const endpoint = `http://127.0.0.1:${server.port}`;
+  try {
+    expect(await (await fetch(`${endpoint}/healthz`)).json()).toMatchObject({
+      successful_model_catalog_requests: 0,
+      last_successful_model_catalog_request_at: null,
+    });
+
+    const models = await fetch(`${endpoint}/v1/models`, {
+      headers: { authorization: "Bearer test-codex-session" },
+    });
+    expect(models.status).toBe(200);
+
+    const health = await (await fetch(`${endpoint}/healthz`)).json() as Record<string, unknown>;
+    expect(health.successful_model_catalog_requests).toBe(1);
+    expect(typeof health.last_successful_model_catalog_request_at).toBe("string");
+  } finally {
+    await server.stop(true);
+  }
+});
+
 test("authenticated shutdown requires a verified idle drain", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const server = startServer(config);

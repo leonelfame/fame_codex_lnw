@@ -272,10 +272,15 @@ export async function compactRequest(req: Request, _config: AppConfig): Promise<
   );
 }
 
-export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
+export function startServer(
+  config: AppConfig,
+  dependencies: { fetchUpstream?: NativeFetch } = {},
+): ReturnType<typeof Bun.serve> {
   const startedAt = Date.now();
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
+  let successfulModelCatalogRequests = 0;
+  let lastSuccessfulModelCatalogRequestAt: string | null = null;
   const httpTurns = new HttpTurnCounter();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
@@ -303,6 +308,8 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
           accepting_turns: !draining,
+          successful_model_catalog_requests: successfulModelCatalogRequests,
+          last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           ...activity(),
         });
       }
@@ -340,7 +347,19 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
             "codex-chatgpt-web is draining for a requested service operation",
           );
         }
-        return httpTurns.track(() => modelsRequest(req, config, undefined, readCodexModelContextOverride));
+        return httpTurns.track(async () => {
+          const response = await modelsRequest(
+            req,
+            config,
+            dependencies.fetchUpstream,
+            readCodexModelContextOverride,
+          );
+          if (response.ok) {
+            successfulModelCatalogRequests += 1;
+            lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
+          }
+          return response;
+        });
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {

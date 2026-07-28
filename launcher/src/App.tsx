@@ -283,7 +283,9 @@ function LauncherShell({
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
-  const [surface, setSurface] = useState<Surface>(snapshot.state.coreSetupComplete ? "browser" : "setup");
+  const [surface, setSurface] = useState<Surface>(
+    snapshot.state.coreSetupComplete && snapshot.state.codexCatalogVerified ? "browser" : "setup",
+  );
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
@@ -291,8 +293,9 @@ function LauncherShell({
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser" && !(compactSidebar && sidebarOpen);
   const needsBrowser = browser?.authenticated !== true;
-  const needsSetup = !needsBrowser && snapshot.state.coreSetupComplete !== true;
-  const mcpOptional = snapshot.state.coreSetupComplete === true && snapshot.state.mcpSetupComplete !== true;
+  const needsSetup = !needsBrowser
+    && (snapshot.state.coreSetupComplete !== true || snapshot.state.codexCatalogVerified !== true);
+  const mcpOptional = snapshot.state.codexCatalogVerified === true && snapshot.state.mcpSetupComplete !== true;
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -734,10 +737,16 @@ function SetupSurface({
           title={copy.stepSmoke}
         />
         <SetupRow
-          action={snapshot.state.coreSetupComplete ? copy.installed : copy.install}
-          complete={snapshot.state.coreSetupComplete === true}
+          action={snapshot.state.codexCatalogVerified
+            ? copy.installed
+            : snapshot.state.coreSetupComplete
+              ? copy.awaitingCodex
+              : copy.install}
+          complete={snapshot.state.codexCatalogVerified === true}
           description={copy.stepInstallBody}
-          disabled={busy || !snapshot.smokePassed}
+          disabled={busy
+            || !snapshot.smokePassed
+            || (snapshot.state.coreSetupComplete === true && snapshot.state.codexCatalogVerified !== true)}
           index={3}
           onAction={install}
           title={copy.stepInstall}
@@ -751,7 +760,7 @@ function SetupSurface({
       ) : null}
 
       <SectionHeading label="MCP" meta={copy.optional} spaced />
-      <button className="next-surface-row" disabled={!snapshot.state.coreSetupComplete} onClick={showMcp} type="button">
+      <button className="next-surface-row" disabled={!snapshot.state.codexCatalogVerified} onClick={showMcp} type="button">
         <Icon name="mcp" />
         <span>
           <strong>{copy.mcpTitle}</strong>
@@ -838,7 +847,7 @@ function McpSurface({
 
   return (
     <ContentSurface fit subtitle={copy.mcpSubtitle} title="MCP">
-      {!snapshot.state.coreSetupComplete ? (
+      {!snapshot.state.codexCatalogVerified ? (
         <NoticeRow icon="setup" tone="warning">{copy.stepInstallBody}</NoticeRow>
       ) : null}
 
@@ -954,7 +963,7 @@ function McpSurface({
         </button>
         {step === 0 ? <PrimaryButton onClick={() => void safeMove(1)}>{copy.next}</PrimaryButton> : null}
         {step === 1 ? (
-          <PrimaryButton disabled={busy || !tunnelId || !runtimeKey || !snapshot.state.coreSetupComplete} onClick={() => void install()}>
+          <PrimaryButton disabled={busy || !tunnelId || !runtimeKey || !snapshot.state.codexCatalogVerified} onClick={() => void install()}>
             {busy ? copy.running : copy.connect}
           </PrimaryButton>
         ) : null}

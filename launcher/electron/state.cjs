@@ -51,6 +51,7 @@ function readState(filePath) {
     }
     for (const key of [
       "coreSetupComplete",
+      "codexCatalogVerified",
       "mcpSetupComplete",
       "mcpRuntimeInstalled",
       "codexRestartRequired",

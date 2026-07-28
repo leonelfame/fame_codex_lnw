@@ -73,6 +73,10 @@ export function getCodexConfigPath(): string {
   return join(getCodexHome(), "config.toml");
 }
 
+export function getCodexModelsCachePath(): string {
+  return join(getCodexHome(), "models_cache.json");
+}
+
 export function getCodexJournalPath(): string {
   return join(getConfigDir(), "codex", "integration-journal.json");
 }
@@ -102,10 +106,13 @@ function restoreFileSnapshot(snapshot: FileSnapshot): void {
 
 function writeFilesWithCompensation(
   writes: Array<{ path: string; data: string | Uint8Array }>,
+  removals: string[] = [],
 ): void {
-  const snapshots = writes.map(write => snapshotFile(write.path));
+  const paths = [...new Set([...writes.map(write => write.path), ...removals])];
+  const snapshots = paths.map(snapshotFile);
   try {
     for (const write of writes) atomicWriteFile(write.path, write.data);
+    for (const removal of removals) rmSync(removal, { force: true });
   } catch (error) {
     const rollbackFailures: string[] = [];
     for (const snapshot of [...snapshots].reverse()) {
@@ -425,7 +432,7 @@ export function installCodexIntegration(
     writeFilesWithCompensation([
       { path: configPath, data: renderLines(lines, textFormat(currentText)) },
       { path: getCodexJournalPath(), data: `${JSON.stringify(updated, null, 2)}\n` },
-    ]);
+    ], [getCodexModelsCachePath()]);
     return updated;
   }
 
@@ -447,7 +454,7 @@ export function installCodexIntegration(
   writeFilesWithCompensation([
     { path: configPath, data: patched.text },
     { path: getCodexJournalPath(), data: `${JSON.stringify(journal, null, 2)}\n` },
-  ]);
+  ], [getCodexModelsCachePath()]);
   if (existing?.version === 2 && existsSync(existing.catalogPath)) rmSync(existing.catalogPath);
   return journal;
 }
@@ -468,13 +475,15 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   }
   const configSnapshot = snapshotFile(journal.configPath);
   const catalogSnapshot = journal.version === 2 ? snapshotFile(journal.catalogPath) : undefined;
+  const modelsCacheSnapshot = snapshotFile(getCodexModelsCachePath());
   try {
     atomicWriteFile(journal.configPath, restored);
     if (catalogSnapshot?.exists) rmSync(catalogSnapshot.path);
+    rmSync(modelsCacheSnapshot.path, { force: true });
     rmSync(getCodexJournalPath(), { force: true });
   } catch (error) {
     const rollbackFailures: string[] = [];
-    for (const snapshot of [catalogSnapshot, configSnapshot]) {
+    for (const snapshot of [modelsCacheSnapshot, catalogSnapshot, configSnapshot]) {
       if (!snapshot) continue;
       try {
         restoreFileSnapshot(snapshot);

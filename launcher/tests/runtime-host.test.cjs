@@ -82,8 +82,10 @@ test("failed first-time setup removes its route before restoring the unconfigure
   const journalPath = path.join(coreHome, "codex", "integration-journal.json");
   const configPath = path.join(root, "config.json");
   const codexConfigPath = path.join(codexHome, "config.toml");
+  const codexModelsCachePath = path.join(codexHome, "models_cache.json");
   fs.mkdirSync(codexHome, { recursive: true });
   fs.writeFileSync(codexConfigPath, "original codex config\n");
+  fs.writeFileSync(codexModelsCachePath, "original codex models cache\n");
   let cleared = 0;
   let stops = 0;
   const calls = [];
@@ -113,6 +115,7 @@ test("failed first-time setup removes its route before restoring the unconfigure
     fs.writeFileSync(configPath, `${JSON.stringify({ mode: "browser-only", browserHost: "launcher" })}\n`);
     fs.writeFileSync(journalPath, "partial integration journal\n");
     fs.writeFileSync(codexConfigPath, "partially changed codex config\n");
+    fs.rmSync(codexModelsCachePath);
     throw new Error("synthetic setup failure");
   };
   try {
@@ -124,6 +127,7 @@ test("failed first-time setup removes its route before restoring the unconfigure
     assert.equal(fs.existsSync(configPath), false);
     assert.equal(fs.existsSync(journalPath), false);
     assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "original codex config\n");
+    assert.equal(fs.readFileSync(codexModelsCachePath, "utf8"), "original codex models cache\n");
     assert.equal(stops, 2);
     assert.equal(cleared, 1);
   } finally {
@@ -210,6 +214,7 @@ test("failed launcher update restores every mutable setup file before restarting
   const profilePath = path.join(profileDir, "custom.yaml");
   const windowsLauncherPath = path.join(coreHome, "bin", "mcp-launcher.cmd");
   const codexConfigPath = path.join(codexHome, "config.toml");
+  const codexModelsCachePath = path.join(codexHome, "models_cache.json");
   const oldConfig = {
     mode: "full",
     browserHost: "launcher",
@@ -220,7 +225,7 @@ test("failed launcher update restores every mutable setup file before restarting
       profileName: "custom",
     },
   };
-  for (const file of [configPath, journalPath, keyPath, profilePath, windowsLauncherPath, codexConfigPath]) {
+  for (const file of [configPath, journalPath, keyPath, profilePath, windowsLauncherPath, codexConfigPath, codexModelsCachePath]) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
   }
   fs.writeFileSync(configPath, `${JSON.stringify(oldConfig)}\n`, { mode: 0o600 });
@@ -229,6 +234,7 @@ test("failed launcher update restores every mutable setup file before restarting
   fs.writeFileSync(profilePath, "old profile\n", { mode: 0o600 });
   fs.writeFileSync(windowsLauncherPath, "old launcher\n", { mode: 0o600 });
   fs.writeFileSync(codexConfigPath, "old codex config\n", { mode: 0o600 });
+  fs.writeFileSync(codexModelsCachePath, "old codex models cache\n", { mode: 0o600 });
 
   let startAttempts = 0;
   const readConfig = () => JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -261,6 +267,7 @@ test("failed launcher update restores every mutable setup file before restarting
     fs.writeFileSync(profilePath, "new profile\n");
     fs.writeFileSync(windowsLauncherPath, "new launcher\n");
     fs.writeFileSync(codexConfigPath, "new codex config\n");
+    fs.rmSync(codexModelsCachePath);
     return { code: 0, stdout: "", stderr: "" };
   };
 
@@ -276,6 +283,7 @@ test("failed launcher update restores every mutable setup file before restarting
     assert.equal(fs.readFileSync(profilePath, "utf8"), "old profile\n");
     assert.equal(fs.readFileSync(windowsLauncherPath, "utf8"), "old launcher\n");
     assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "old codex config\n");
+    assert.equal(fs.readFileSync(codexModelsCachePath, "utf8"), "old codex models cache\n");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
