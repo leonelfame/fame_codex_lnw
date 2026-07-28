@@ -107,8 +107,35 @@ describe("native /models augmentation", () => {
     expect(models[1]!.context_window).toBe(300_000);
   });
 
-  test("fails closed when the official native template is absent", () => {
-    expect(() => augmentNativeModelCatalog({ models: [{ slug: "other" }] }, defaultConfig("full")))
-      .toThrow("missing gpt-5.6-sol");
+  test("uses the first compatible official model when the preferred native template is account-gated", () => {
+    const native = source();
+    const models = native.models as Array<Record<string, unknown>>;
+    models.splice(1, 1);
+    Object.assign(models[1]!, {
+      visibility: "list",
+      supported_in_api: true,
+      tool_mode: "code_mode_only",
+      supported_reasoning_levels: [{ effort: "high", description: "High" }],
+      shell_type: "shell_command",
+    });
+
+    const result = augmentNativeModelCatalog(native, defaultConfig("full"));
+    const web = (result.models as Array<Record<string, unknown>>)
+      .filter(model => String(model.slug).startsWith("chatgpt-web/"));
+    expect(web.length).toBe(4);
+    expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
+    expect(web.every(model => model.tool_mode === "code_mode_only")).toBe(true);
+  });
+
+  test("fails closed when no official model satisfies the harness contract", () => {
+    expect(() => augmentNativeModelCatalog({
+      models: [{
+        slug: "other",
+        visibility: "list",
+        supported_in_api: true,
+        supported_reasoning_levels: [],
+        tool_mode: null,
+      }],
+    }, defaultConfig("full"))).toThrow("no list-visible, API-supported, tool-capable model");
   });
 });

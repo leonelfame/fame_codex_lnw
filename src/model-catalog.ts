@@ -32,14 +32,38 @@ function reasoningLevel(template: JsonObject, effort: string, description: strin
   return { ...(source ? structuredClone(source) : {}), effort, description };
 }
 
+function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const model = value as JsonObject;
+  const modelSlug = slug(model);
+  if (!modelSlug || modelSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) return false;
+  if (model.visibility !== "list" || model.supported_in_api !== true) return false;
+  if (!Array.isArray(model.supported_reasoning_levels)) return false;
+  return !requireTools || (typeof model.tool_mode === "string" && model.tool_mode.length > 0);
+}
+
+function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject {
+  const requireTools = config.mode === "full";
+  const candidates = models.filter(model => nativeTemplateCandidate(model, requireTools)) as JsonObject[];
+  const preferred = candidates.find(model => slug(model) === NATIVE_TEMPLATE_MODEL);
+  const template = preferred ?? candidates[0];
+  if (template) return template;
+  throw new Error(
+    requireTools
+      ? "Native Codex models response has no list-visible, API-supported, tool-capable model with reasoning metadata"
+      : "Native Codex models response has no list-visible, API-supported model with reasoning metadata",
+  );
+}
+
 export function buildChatGptWebModel(
   templateValue: unknown,
   route: ChatGptWebModelRoute,
   config: AppConfig,
 ): JsonObject {
-  const template = object(templateValue, `native ${NATIVE_TEMPLATE_MODEL} model`);
-  if (slug(template) !== NATIVE_TEMPLATE_MODEL) {
-    throw new Error(`ChatGPT Web model template must be ${NATIVE_TEMPLATE_MODEL}`);
+  const template = object(templateValue, "native Codex model template");
+  const templateSlug = slug(template);
+  if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
+    throw new Error("ChatGPT Web model template must be a native Codex model");
   }
   const model: JsonObject = {
     ...structuredClone(template),
@@ -78,13 +102,10 @@ export function augmentNativeModelCatalog(
   if (!Array.isArray(catalog.models)) {
     throw new Error("Native Codex models response is missing a models array");
   }
-  const template = catalog.models.find(model => slug(model) === NATIVE_TEMPLATE_MODEL);
-  if (!template) {
-    throw new Error(`Native Codex models response is missing ${NATIVE_TEMPLATE_MODEL}`);
-  }
   const nativeModels = structuredClone(
     catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)),
   );
+  const template = selectNativeTemplate(nativeModels, config);
   if (contextOverride) {
     const selected = nativeModels.find(model => slug(model) === contextOverride.model);
     if (selected) {
