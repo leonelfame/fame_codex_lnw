@@ -10,12 +10,16 @@ function createDebugger(responses = []) {
   let attached = false;
   return {
     commands,
+    detached: () => !attached,
     client: {
       attach(version) {
         assert.equal(version, "1.3");
         attached = true;
       },
       isAttached: () => attached,
+      detach() {
+        attached = false;
+      },
       async sendCommand(method, params) {
         commands.push({ method, params });
         return responses.shift() ?? {};
@@ -25,7 +29,7 @@ function createDebugger(responses = []) {
 }
 
 test("trusted clicks are dispatched through the owned Electron WebContents target", async () => {
-  const { client, commands } = createDebugger();
+  const { client, commands, detached } = createDebugger();
   await dispatchTrustedClick({
     debuggerClient: client,
     point: { x: 123.5, y: 456.25 },
@@ -52,10 +56,11 @@ test("trusted clicks are dispatched through the owned Electron WebContents targe
       },
     },
   ]);
+  assert.equal(detached(), true);
 });
 
 test("page evaluation reads from the owned Electron WebContents target", async () => {
-  const { client, commands } = createDebugger([{
+  const { client, commands, detached } = createDebugger([{
     result: {
       type: "object",
       value: { open: true, count: 5 },
@@ -74,6 +79,20 @@ test("page evaluation reads from the owned Electron WebContents target", async (
       awaitPromise: true,
     },
   }]);
+  assert.equal(detached(), true);
+});
+
+test("pre-attached WebContents debugger ownership is preserved", async () => {
+  const { client, detached } = createDebugger([{
+    result: { type: "number", value: 5 },
+  }]);
+  client.attach("1.3");
+  const result = await evaluatePage({
+    debuggerClient: client,
+    expression: "2 + 3",
+  });
+  assert.equal(result, 5);
+  assert.equal(detached(), false);
 });
 
 test("WebContents CDP commands fail closed without an owned debugger", async () => {

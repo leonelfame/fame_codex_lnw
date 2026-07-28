@@ -1,9 +1,14 @@
-async function sendWebContentsCommand(debuggerClient, method, params = {}) {
+async function withWebContentsDebugger(debuggerClient, action) {
   if (!debuggerClient || typeof debuggerClient.sendCommand !== "function") {
     throw new Error("Electron WebContents debugger is unavailable");
   }
-  if (!debuggerClient.isAttached()) debuggerClient.attach("1.3");
-  return await debuggerClient.sendCommand(method, params);
+  const ownedAttachment = !debuggerClient.isAttached();
+  if (ownedAttachment) debuggerClient.attach("1.3");
+  try {
+    return await action((method, params = {}) => debuggerClient.sendCommand(method, params));
+  } finally {
+    if (ownedAttachment && debuggerClient.isAttached()) debuggerClient.detach();
+  }
 }
 
 async function dispatchTrustedClick({ debuggerClient, point }) {
@@ -16,13 +21,15 @@ async function dispatchTrustedClick({ debuggerClient, point }) {
     button: "left",
     clickCount: 1,
   };
-  await sendWebContentsCommand(debuggerClient, "Input.dispatchMouseEvent", {
-    ...base,
-    type: "mousePressed",
-  });
-  await sendWebContentsCommand(debuggerClient, "Input.dispatchMouseEvent", {
-    ...base,
-    type: "mouseReleased",
+  await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
+    await sendCommand("Input.dispatchMouseEvent", {
+      ...base,
+      type: "mousePressed",
+    });
+    await sendCommand("Input.dispatchMouseEvent", {
+      ...base,
+      type: "mouseReleased",
+    });
   });
 }
 
@@ -30,22 +37,24 @@ async function evaluatePage({ debuggerClient, expression }) {
   if (typeof expression !== "string" || !expression.trim()) {
     throw new Error("CDP evaluation expression is required");
   }
-  const response = await sendWebContentsCommand(debuggerClient, "Runtime.evaluate", {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
+  return await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
+    const response = await sendCommand("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (response?.exceptionDetails) {
+      const detail = response.exceptionDetails.exception?.description
+        || response.exceptionDetails.text
+        || "unknown page exception";
+      throw new Error(`CDP page evaluation failed: ${detail}`);
+    }
+    return response?.result?.value;
   });
-  if (response?.exceptionDetails) {
-    const detail = response.exceptionDetails.exception?.description
-      || response.exceptionDetails.text
-      || "unknown page exception";
-    throw new Error(`CDP page evaluation failed: ${detail}`);
-  }
-  return response?.result?.value;
 }
 
 module.exports = {
   dispatchTrustedClick,
   evaluatePage,
-  sendWebContentsCommand,
+  withWebContentsDebugger,
 };
