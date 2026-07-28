@@ -77,16 +77,26 @@ test("launcher-controlled CLI operations use the live descriptor token", () => {
 
 test("failed first-time setup removes its route before restoring the unconfigured state", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-first-setup-rollback-"));
+  const coreHome = path.join(root, "core");
+  const codexHome = path.join(root, "codex");
+  const journalPath = path.join(coreHome, "codex", "integration-journal.json");
   const configPath = path.join(root, "config.json");
-  let configured = false;
+  const codexConfigPath = path.join(codexHome, "config.toml");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.writeFileSync(codexConfigPath, "original codex config\n");
   let cleared = 0;
+  let stops = 0;
   const calls = [];
   const supervisor = {
+    coreHome,
     configPath,
-    readConfig: () => configured ? { mode: "browser-only" } : null,
-    readSetupConfig: () => configured ? { mode: "browser-only", browserHost: "launcher" } : null,
-    stopForSetup: async () => ({ status: "stopped" }),
-    startIfConfigured: async () => ({ status: configured ? "ready" : "not-configured" }),
+    readConfig: () => fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : null,
+    readSetupConfig: () => fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : null,
+    stopForSetup: async () => {
+      stops += 1;
+      return { status: "stopped" };
+    },
+    startIfConfigured: async () => ({ status: fs.existsSync(configPath) ? "ready" : "not-configured" }),
     clearState: () => { cleared += 1; },
   };
   const host = new RuntimeHost({
@@ -94,26 +104,27 @@ test("failed first-time setup removes its route before restoring the unconfigure
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome,
     supervisor,
   });
-  host.launcherControlEnvironment = () => ({});
   host.run = async (_name, args) => {
     calls.push(args);
-    if (args[0] === "setup") {
-      configured = true;
-      fs.writeFileSync(configPath, "{}\n");
-      throw new Error("synthetic setup failure");
-    }
-    configured = false;
-    return { code: 0, stdout: "", stderr: "" };
+    fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+    fs.writeFileSync(configPath, `${JSON.stringify({ mode: "browser-only", browserHost: "launcher" })}\n`);
+    fs.writeFileSync(journalPath, "partial integration journal\n");
+    fs.writeFileSync(codexConfigPath, "partially changed codex config\n");
+    throw new Error("synthetic setup failure");
   };
   try {
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--browser-only"], {}),
       /synthetic setup failure; incomplete first-time setup was rolled back/,
     );
-    assert.deepEqual(calls.map((args) => args[0]), ["setup", "uninstall"]);
+    assert.deepEqual(calls.map((args) => args[0]), ["setup"]);
     assert.equal(fs.existsSync(configPath), false);
+    assert.equal(fs.existsSync(journalPath), false);
+    assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "original codex config\n");
+    assert.equal(stops, 2);
     assert.equal(cleared, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

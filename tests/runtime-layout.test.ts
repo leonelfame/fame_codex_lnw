@@ -12,6 +12,7 @@ import {
   loadConfigForSetup,
   providerConfig,
   resolveBrokerEndpoint,
+  runtimeCommandForProcess,
 } from "../src/config";
 import { removeLegacyRuntimeArtifacts } from "../src/service";
 
@@ -25,6 +26,19 @@ test("managed runtime commands reject every ephemeral path component", () => {
   expect(() => assertDurableRuntimeCommand(["/private/tmp/codex-chatgpt-web"])).toThrow("ephemeral path");
   expect(() => assertDurableRuntimeCommand([process.execPath, "/tmp/build/app/cli.js"])).toThrow("ephemeral path");
   expect(() => assertDurableRuntimeCommand([process.execPath])).not.toThrow();
+});
+
+test("Windows Bun shims resolve to the installed Bun executable before service setup", () => {
+  const ephemeralBun = join(tmpdir(), "bun-node-test", "bun");
+  expect(runtimeCommandForProcess({
+    executable: ephemeralBun,
+    bunExecutable: process.execPath,
+    entry: import.meta.path,
+  })).toEqual([process.execPath, import.meta.path]);
+  expect(() => runtimeCommandForProcess({
+    executable: ephemeralBun,
+    entry: import.meta.path,
+  })).toThrow("ephemeral path");
 });
 
 test("Windows uses a stable native named pipe for the outer Codex tool broker", () => {

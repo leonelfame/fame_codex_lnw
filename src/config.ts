@@ -128,22 +128,47 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
 }
 
 export function currentRuntimeCommand(): string[] {
-  const launcher = process.env.CODEX_CHATGPT_WEB_LAUNCHER?.trim();
+  const bunExecutable = process.env.CODEX_CHATGPT_WEB_BUN?.trim()
+    || process.env.CODEX_WEB_GPT_BUN?.trim()
+    || (typeof Bun !== "undefined" ? Bun.which("bun") : undefined);
+  return runtimeCommandForProcess({
+    launcher: process.env.CODEX_CHATGPT_WEB_LAUNCHER,
+    executable: process.execPath,
+    entry: typeof Bun !== "undefined" ? Bun.main : process.argv[1],
+    bunExecutable,
+  });
+}
+
+export function runtimeCommandForProcess({
+  launcher,
+  executable,
+  entry,
+  bunExecutable,
+}: {
+  launcher?: string;
+  executable: string;
+  entry?: string;
+  bunExecutable?: string | null;
+}): string[] {
+  launcher = launcher?.trim();
   if (launcher) {
     const command = [resolve(launcher)];
     assertDurableRuntimeCommand(command);
     return command;
   }
-  const executable = resolve(process.execPath);
+  executable = resolve(executable);
   const executableName = basename(executable).toLowerCase();
   if (executableName === "bun" || executableName === "bun.exe") {
-    const entry = typeof Bun !== "undefined" ? Bun.main : process.argv[1];
     if (!entry || entry.endsWith("/[eval]") || entry === "[eval]") {
       throw new Error("Cannot install a service from an evaluated Bun script");
     }
-    return [executable, resolve(entry)];
+    const command = [resolve(bunExecutable?.trim() || executable), resolve(entry)];
+    assertDurableRuntimeCommand(command);
+    return command;
   }
-  return [executable];
+  const command = [executable];
+  assertDurableRuntimeCommand(command);
+  return command;
 }
 
 function inside(path: string, root: string): boolean {

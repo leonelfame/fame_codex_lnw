@@ -204,7 +204,6 @@ class RuntimeHost {
   }
 
   captureSetupCheckpoint(snapshot) {
-    if (!snapshot.configured || !snapshot.config) return null;
     if (typeof this.supervisor.configPath !== "string" || !path.isAbsolute(this.supervisor.configPath)) {
       throw new Error("Launcher runtime supervisor has no absolute configuration path for setup rollback");
     }
@@ -222,7 +221,7 @@ class RuntimeHost {
       paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.daemon.plist"));
       paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.tunnel.plist"));
     }
-    const tunnel = snapshot.config.tunnel;
+    const tunnel = snapshot.config?.tunnel;
     if (tunnel && typeof tunnel === "object") {
       if (typeof tunnel.runtimeKeyFile === "string" && tunnel.runtimeKeyFile) {
         paths.add(tunnel.runtimeKeyFile);
@@ -299,22 +298,29 @@ class RuntimeHost {
     }
   }
 
-  async rollbackFirstSetup(name) {
-    const config = this.supervisor.readConfig();
-    if (!config) {
-      this.supervisor.clearState();
-      return false;
+  async rollbackFirstSetup(checkpoint) {
+    const changed = this.setupCheckpointChanged(checkpoint);
+    let stopError;
+    try {
+      await this.supervisor.stopForSetup();
+    } catch (error) {
+      stopError = error;
     }
-    await this.run(name, ["uninstall", "--yes", "--keep-data", "--launcher-control"], {
-      embedded: true,
-      env: this.launcherControlEnvironment(),
-      message: "Rolling back incomplete first-time setup",
-      successMessage: "Incomplete first-time setup was rolled back",
-      timeoutMs: UNINSTALL_TIMEOUT_MS,
-    });
-    fs.rmSync(this.supervisor.configPath, { force: true });
+    let restoreError;
+    try {
+      this.restoreSetupCheckpoint(checkpoint);
+    } catch (error) {
+      restoreError = error;
+    }
     this.supervisor.clearState();
-    return true;
+    if (stopError || restoreError) {
+      const failures = [
+        stopError ? `stopping the incomplete runtime failed: ${stopError instanceof Error ? stopError.message : String(stopError)}` : null,
+        restoreError ? (restoreError instanceof Error ? restoreError.message : String(restoreError)) : null,
+      ].filter(Boolean);
+      throw new Error(failures.join("; "));
+    }
+    return changed;
   }
 
   async run(name, args, options = {}) {
@@ -590,7 +596,7 @@ class RuntimeHost {
       let checkpointChanged = false;
       if (!previousRuntime.configured && setupCommandStarted) {
         try {
-          rolledBack = await this.rollbackFirstSetup(name);
+          rolledBack = await this.rollbackFirstSetup(checkpoint);
         } catch (caught) {
           failures.push(
             `first-time setup rollback failed: ${caught instanceof Error ? caught.message : String(caught)}`,
