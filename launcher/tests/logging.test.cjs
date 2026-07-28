@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createLogger, sanitize } = require("../electron/logging.cjs");
+const { createLogger, registerLoggedIpc, sanitize } = require("../electron/logging.cjs");
 
 test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", () => {
   assert.deepEqual(sanitize({
@@ -15,6 +15,30 @@ test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", ()
     authorization: "[redacted]",
     nested: { controlToken: "[redacted]" },
   });
+});
+
+test("failed launcher IPC calls are written to runtime activity", async () => {
+  let registered;
+  const errors = [];
+  const ipcMain = {
+    handle(channel, handler) {
+      registered = { channel, handler };
+    },
+  };
+  registerLoggedIpc(
+    ipcMain,
+    { error: (event, detail) => errors.push({ event, detail }) },
+    "launcher:test",
+    async () => {
+      throw new Error("visible failure");
+    },
+  );
+
+  await assert.rejects(registered.handler({}, 1), /visible failure/);
+  assert.deepEqual(errors, [{
+    event: "launcher.ipc_failed",
+    detail: { channel: "launcher:test", message: "visible failure" },
+  }]);
 });
 
 test("launcher activity restores valid records from the previous process", () => {

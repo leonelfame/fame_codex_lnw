@@ -18,7 +18,7 @@ const {
 const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
-const { createLogger } = require("./logging.cjs");
+const { createLogger, registerLoggedIpc } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
@@ -279,7 +279,8 @@ function smokePassedForCurrentVersion(state) {
 }
 
 function registerIpc({ logger, stateStore }) {
-  ipcMain.handle("launcher:snapshot", async () => ({
+  const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  handle("launcher:snapshot", async () => ({
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
     logs: logger.recent(),
@@ -291,15 +292,15 @@ function registerIpc({ logger, stateStore }) {
     operation: lastOperation,
   }));
 
-  ipcMain.handle("launcher:set-language", (_event, language) => stateStore.update({ language: validateLanguage(language) }));
-  ipcMain.handle("launcher:open-social", async (_event, target) => {
+  handle("launcher:set-language", (_event, language) => stateStore.update({ language: validateLanguage(language) }));
+  handle("launcher:open-social", async (_event, target) => {
     const url = target === "github" ? GITHUB_URL : target === "x" ? X_URL : null;
     if (!url) throw new Error("Unknown social target");
     await openWebUrl(url);
     const patch = target === "github" ? { githubOpened: true } : { xOpened: true };
     return stateStore.update(patch);
   });
-  ipcMain.handle("launcher:complete-onboarding", (_event, language) => {
+  handle("launcher:complete-onboarding", (_event, language) => {
     const current = stateStore.read();
     if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
@@ -308,28 +309,28 @@ function registerIpc({ logger, stateStore }) {
     return next;
   });
 
-  ipcMain.handle("launcher:open-external", async (_event, url) => {
+  handle("launcher:open-external", async (_event, url) => {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);
     return true;
   });
 
-  ipcMain.handle("launcher:browser-bounds", (_event, bounds) => {
+  handle("launcher:browser-bounds", (_event, bounds) => {
     browserHost?.setBounds(validateBounds(bounds));
     return true;
   });
-  ipcMain.handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
-  ipcMain.handle("launcher:browser-show", () => browserHost.reveal());
-  ipcMain.handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
-  ipcMain.handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
-  ipcMain.handle("launcher:browser-login", () => browserHost.openLogin());
-  ipcMain.handle("launcher:browser-smoke", async () => {
+  handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
+  handle("launcher:browser-show", () => browserHost.reveal());
+  handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
+  handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
+  handle("launcher:browser-login", () => browserHost.openLogin());
+  handle("launcher:browser-smoke", async () => {
     const result = await browserHost.smokeTest();
     stateStore.update({ browserSmokePassed: true, browserSmokeVersion: app.getVersion() });
     smokePassedThisSession = true;
     return result;
   });
-  ipcMain.handle("launcher:mcp-verify", async () => {
+  handle("launcher:mcp-verify", async () => {
     await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
     const report = await runtimeHost.doctor();
     if (!report.ok) throw new Error("The connector is visible, but the local MCP runtime is not healthy");
@@ -337,9 +338,9 @@ function registerIpc({ logger, stateStore }) {
     return report;
   });
 
-  ipcMain.handle("launcher:doctor", () => runtimeHost.doctor());
-  ipcMain.handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
-  ipcMain.handle("launcher:uninstall-integration", async () => {
+  handle("launcher:doctor", () => runtimeHost.doctor());
+  handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
+  handle("launcher:uninstall-integration", async () => {
     const language = stateStore.read().language;
     const chinese = language === "zh-CN";
     const confirmation = await dialog.showMessageBox(mainWindow, {
@@ -372,7 +373,7 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:state-changed", state);
     return { cancelled: false, state };
   });
-  ipcMain.handle("launcher:setup-core", async () => {
+  handle("launcher:setup-core", async () => {
     const browser = await browserHost.probeAuthentication();
     if (!browser.authenticated) throw new Error("Sign in to ChatGPT before installing the Codex integration");
     if (!(smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()))) {
@@ -395,7 +396,7 @@ function registerIpc({ logger, stateStore }) {
     });
     return { ok: true, stdout: result.stdout, restartRequired: true };
   });
-  ipcMain.handle("launcher:setup-mcp", async (_event, input) => {
+  handle("launcher:setup-mcp", async (_event, input) => {
     await browserHost.reveal();
     const result = await runtimeHost.setupMcp({
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
@@ -404,12 +405,12 @@ function registerIpc({ logger, stateStore }) {
     stateStore.update({ mcpRuntimeInstalled: true, mcpGuideStep: 2, codexRestartRequired: true });
     return { ok: true, stdout: result.stdout };
   });
-  ipcMain.handle("launcher:set-mcp-step", (_event, step) => {
+  handle("launcher:set-mcp-step", (_event, step) => {
     if (!Number.isInteger(step) || step < 0 || step > 2) throw new Error("Invalid MCP guide step");
     return stateStore.update({ mcpGuideStep: step });
   });
 
-  ipcMain.handle("launcher:autostart", (_event, enabled) => {
+  handle("launcher:autostart", (_event, enabled) => {
     const desired = enabled === true;
     const autostart = setAutostart(app, desired);
     return {
@@ -417,18 +418,18 @@ function registerIpc({ logger, stateStore }) {
       ...autostart,
     };
   });
-  ipcMain.handle("launcher:set-preference", (_event, key, value) => {
+  handle("launcher:set-preference", (_event, key, value) => {
     if (key !== "showBrowserDuringTurns") throw new Error("Unknown preference");
     return stateStore.update({ [key]: value === true });
   });
-  ipcMain.handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
-  ipcMain.handle("launcher:logs", (_event, limit) => logger.recent(limit));
-  ipcMain.handle("launcher:open-logs", async () => {
+  handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
+  handle("launcher:logs", (_event, limit) => logger.recent(limit));
+  handle("launcher:open-logs", async () => {
     const error = await shell.openPath(path.dirname(logger.filePath));
     if (error) throw new Error(`Could not open the launcher log directory: ${error}`);
     return logger.filePath;
   });
-  ipcMain.handle("launcher:window-state", (event) => {
+  handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     return windowStateSnapshot(window);
   });

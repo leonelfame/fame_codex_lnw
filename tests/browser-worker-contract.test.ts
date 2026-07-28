@@ -1,6 +1,14 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, chatGptEffortLabelsMatch, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
+
+test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("composer.fill(prompt)");
+  expect(workerSource).toContain("page.keyboard.insertText(` ${prompt}`)");
+  expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
+});
 
 test("effort selection is idempotent across rendered whitespace", () => {
   expect(chatGptEffortLabelsMatch("High", "High")).toBe(true);

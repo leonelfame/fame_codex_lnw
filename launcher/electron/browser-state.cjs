@@ -1,5 +1,18 @@
-function browserViewVisible(requestedVisible, surfaceActive) {
-  return requestedVisible === true && surfaceActive === true;
+function browserViewVisible(requestedVisible, surfaceActive, boundsReady = true) {
+  return requestedVisible === true && surfaceActive === true && boundsReady === true;
+}
+
+function constrainBrowserBounds(bounds, contentSize) {
+  const contentWidth = Math.max(1, Math.round(contentSize?.width || 0));
+  const contentHeight = Math.max(1, Math.round(contentSize?.height || 0));
+  const x = Math.min(contentWidth - 1, Math.max(0, Math.round(bounds.x)));
+  const y = Math.min(contentHeight - 1, Math.max(0, Math.round(bounds.y)));
+  return {
+    x,
+    y,
+    width: Math.min(contentWidth - x, Math.max(1, Math.round(bounds.width))),
+    height: Math.min(contentHeight - y, Math.max(1, Math.round(bounds.height))),
+  };
 }
 
 function readBrowserNavigationState(contents, fallback) {
@@ -30,6 +43,7 @@ function navigateBrowser(contents, action) {
 
 module.exports = {
   browserViewVisible,
+  constrainBrowserBounds,
   navigateBrowser,
   readBrowserNavigationState,
 };

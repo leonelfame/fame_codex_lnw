@@ -5,6 +5,7 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const {
   browserViewVisible,
+  constrainBrowserBounds,
   navigateBrowser,
   readBrowserNavigationState,
 } = require("./browser-state.cjs");
@@ -15,6 +16,14 @@ const IDLE_BROWSER_URL = "about:blank#codex-web-gpt-browser-host";
 const SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const SMOKE_EXPECTED = "CODEX WEB GPT READY";
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
+const CHATGPT_PARTITION = "persist:codex-web-gpt-chatgpt";
+const COMPOSER_SELECTOR = [
+  '[data-testid="prompt-textarea"]',
+  "#prompt-textarea",
+  '[contenteditable="true"][data-lexical-editor="true"]',
+  '[contenteditable="true"][role="textbox"]',
+  "textarea",
+].join(", ");
 const CHATGPT_VIEWPORT_CSS = `
   html,
   body {
@@ -52,6 +61,22 @@ function normalizeBounds(bounds) {
   };
 }
 
+function allowedAuthUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && (
+    parsed.hostname === "chatgpt.com"
+    || parsed.hostname.endsWith(".openai.com")
+    || parsed.hostname === "accounts.google.com"
+    || parsed.hostname === "login.microsoftonline.com"
+    || parsed.hostname.endsWith(".apple.com")
+  );
+}
+
 class BrowserHost {
   constructor({ window, descriptorPath, cdpPort, control, helper, logger, publishState }) {
     this.window = window;
@@ -66,8 +91,11 @@ class BrowserHost {
     this.activeTraceId = null;
     this.activeHelperPid = null;
     this.manualOperation = null;
+    this.loginOperation = null;
     this.viewportCssKey = null;
-    this.bounds = { x: 0, y: 52, width: 900, height: 620 };
+    this.authView = null;
+    this.boundsReady = false;
+    this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     this.state = {
       status: "idle",
       message: "No active task",
@@ -82,7 +110,7 @@ class BrowserHost {
     };
     this.view = new WebContentsView({
       webPreferences: {
-        partition: "persist:codex-web-gpt-chatgpt",
+        partition: CHATGPT_PARTITION,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -104,30 +132,14 @@ class BrowserHost {
   bindWebContents() {
     const contents = this.view.webContents;
     contents.setWindowOpenHandler(({ url }) => {
-      let parsed;
-      try { parsed = new URL(url); } catch { return { action: "deny" }; }
-      const allowedAuthHost = parsed.protocol === "https:" && (parsed.hostname === "chatgpt.com"
-        || parsed.hostname.endsWith(".openai.com")
-        || parsed.hostname === "accounts.google.com"
-        || parsed.hostname === "login.microsoftonline.com"
-        || parsed.hostname.endsWith(".apple.com"));
-      if (allowedAuthHost) {
+      if (allowedAuthUrl(url)) {
         return {
           action: "allow",
-          overrideBrowserWindowOptions: {
-            parent: this.window,
-            width: 520,
-            height: 720,
-            autoHideMenuBar: true,
-            webPreferences: {
-              partition: "persist:codex-web-gpt-chatgpt",
-              contextIsolation: true,
-              nodeIntegration: false,
-              sandbox: true,
-            },
-          },
+          createWindow: (options) => this.createAuthView(options),
         };
       }
+      let parsed;
+      try { parsed = new URL(url); } catch { return { action: "deny" }; }
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
         void shell.openExternal(parsed.toString());
       } else {
@@ -166,7 +178,7 @@ class BrowserHost {
   }
 
   snapshot() {
-    const contents = this.view?.webContents;
+    const contents = this.activeView()?.webContents;
     return readBrowserNavigationState(contents, {
       ...this.state,
       visible: this.visible,
@@ -185,9 +197,97 @@ class BrowserHost {
   }
 
   setBounds(bounds) {
-    this.bounds = normalizeBounds(bounds);
+    const [width, height] = this.window.getContentSize();
+    this.bounds = constrainBrowserBounds(normalizeBounds(bounds), { width, height });
+    this.boundsReady = this.surfaceActive;
     this.view.setBounds(this.bounds);
+    this.authView?.setBounds(this.bounds);
+    this.syncViewVisibility();
     void this.view.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
+    if (this.authView && !this.authView.webContents.isDestroyed()) {
+      void this.authView.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
+    }
+  }
+
+  activeView() {
+    return this.authView || this.view;
+  }
+
+  syncViewVisibility() {
+    const visible = browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
+    this.view.setVisible(visible && !this.authView);
+    this.authView?.setVisible(visible);
+  }
+
+  createAuthView(options = {}) {
+    this.closeAuthView(this.authView, true);
+    const authView = new WebContentsView({
+      webPreferences: {
+        ...(options.webPreferences || {}),
+        partition: CHATGPT_PARTITION,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    this.authView = authView;
+    this.window.contentView.addChildView(authView);
+    authView.setBounds(this.bounds);
+    authView.setVisible(false);
+    const contents = authView.webContents;
+    contents.on("did-start-loading", () => this.setState({ loading: true }));
+    contents.on("did-stop-loading", () => this.setState({ loading: false }));
+    contents.on("did-finish-load", () => {
+      this.setState({ url: contents.getURL(), loading: false });
+      void this.probeAuthentication();
+    });
+    contents.on("page-title-updated", (_event, title) => {
+      this.setState({ title: typeof title === "string" && title.trim() ? title.trim() : "ChatGPT" });
+    });
+    contents.on("close", () => this.closeAuthView(authView, true));
+    contents.on("destroyed", () => this.closeAuthView(authView, false));
+    contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
+      if (!mainFrame || errorCode === -3) return;
+      this.logger.error("browser.auth_navigation_failed", { errorCode, errorDescription, url });
+      this.setState({ status: "error", message: errorDescription, url });
+    });
+    contents.on("render-process-gone", (_event, details) => {
+      this.logger.error("browser.auth_renderer_gone", { reason: details.reason, exitCode: details.exitCode });
+      this.closeAuthView(authView, false);
+    });
+    contents.setWindowOpenHandler(({ url }) => {
+      if (allowedAuthUrl(url)) {
+        void contents.loadURL(url);
+      } else {
+        let parsed;
+        try { parsed = new URL(url); } catch { return { action: "deny" }; }
+        if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+          void shell.openExternal(parsed.toString());
+        }
+      }
+      return { action: "deny" };
+    });
+    this.syncViewVisibility();
+    this.logger.info("browser.auth_surface_opened");
+    return contents;
+  }
+
+  closeAuthView(authView, closeContents) {
+    if (!authView || this.authView !== authView) return;
+    this.authView = null;
+    try { this.window.contentView.removeChildView(authView); } catch {}
+    if (closeContents && !authView.webContents.isDestroyed()) {
+      authView.webContents.close();
+    }
+    this.syncViewVisibility();
+    this.logger.info("browser.auth_surface_closed");
+    if (this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
+      void this.view.webContents.loadURL(TEMPORARY_CHAT_URL).catch((error) => {
+        this.logger.error("browser.auth_refresh_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
   }
 
   async applyViewportCss() {
@@ -202,9 +302,9 @@ class BrowserHost {
 
   show() {
     this.visible = true;
-    this.view.setVisible(browserViewVisible(this.visible, this.surfaceActive));
+    this.syncViewVisibility();
     this.setState({ visible: true });
-    if (this.surfaceActive) this.view.webContents.focus();
+    if (this.surfaceActive && this.boundsReady) this.activeView().webContents.focus();
   }
 
   async reveal() {
@@ -218,13 +318,14 @@ class BrowserHost {
 
   hide() {
     this.visible = false;
-    this.view.setVisible(false);
+    this.syncViewVisibility();
     this.setState({ visible: false });
   }
 
   setSurfaceActive(active) {
     this.surfaceActive = active === true;
-    this.view.setVisible(browserViewVisible(this.visible, this.surfaceActive));
+    if (!this.surfaceActive) this.boundsReady = false;
+    this.syncViewVisibility();
     this.setState({ surfaceActive: this.surfaceActive });
     return this.snapshot();
   }
@@ -236,7 +337,7 @@ class BrowserHost {
     if (this.manualOperation) {
       throw new Error(`Browser navigation is locked during ${this.manualOperation}`);
     }
-    const contents = this.view.webContents;
+    const contents = this.activeView().webContents;
     navigateBrowser(contents, action);
     return this.snapshot();
   }
@@ -305,8 +406,16 @@ class BrowserHost {
     });
   }
 
-  async openLogin() {
-    return await this.withManualOperation("ChatGPT login", async () => {
+  openLogin() {
+    if (this.state.authenticated) {
+      this.show();
+      return Promise.resolve(this.snapshot());
+    }
+    if (this.loginOperation) {
+      this.show();
+      return this.loginOperation;
+    }
+    const operation = this.withManualOperation("ChatGPT login", async () => {
       this.show();
       this.logger.info("browser.login_opened");
       const current = this.view.webContents.getURL();
@@ -316,6 +425,11 @@ class BrowserHost {
       await this.probeAuthentication();
       return await this.waitForAuthenticated();
     });
+    const tracked = operation.finally(() => {
+      if (this.loginOperation === tracked) this.loginOperation = null;
+    });
+    this.loginOperation = tracked;
+    return tracked;
   }
 
   async probeAuthentication() {
@@ -333,19 +447,28 @@ class BrowserHost {
       this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
       return this.snapshot();
     }
-    const result = await this.view.webContents.executeJavaScript(`(() => {
-      const composer = ${visibleElementScript('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"], textarea')};
+    const probe = (contents) => contents.executeJavaScript(`(() => {
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
       const login = Array.from(document.querySelectorAll('button, a')).some((element) => /^(log in|sign in)$/i.test((element.textContent || '').trim()));
       return { composer: Boolean(composer), login };
     })()`, true).catch(() => ({ composer: false, login: false }));
+    let result = await probe(this.view.webContents);
+    if (!result.composer && this.authView && !this.authView.webContents.isDestroyed()) {
+      const authResult = await probe(this.authView.webContents);
+      if (authResult.composer) {
+        result = authResult;
+        this.closeAuthView(this.authView, true);
+      }
+    }
     if (result.composer) {
+      const wasAuthenticated = this.state.authenticated;
       const availability = this.activeTraceId
         ? { status: "running", message: "ChatGPT is working" }
         : this.manualOperation
           ? {}
           : { status: "ready", message: "ChatGPT is ready" };
       this.setState({ ...availability, authenticated: true, url });
-      this.logger.info("browser.authenticated", { url });
+      if (!wasAuthenticated) this.logger.info("browser.authenticated", { url });
     } else {
       this.setState({ status: result.login ? "signed-out" : "loading", message: result.login ? "Sign in to ChatGPT" : "Waiting for ChatGPT", authenticated: false, url });
     }
@@ -377,7 +500,7 @@ class BrowserHost {
     this.logger.info("smoke.effort_selected", effortResult);
     const beforeCount = await this.assistantTurnCount();
     const focused = await this.view.webContents.executeJavaScript(`(() => {
-      const composer = ${visibleElementScript('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"], textarea')};
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
       if (!composer) return false;
       composer.focus();
       if ('value' in composer) composer.value = '';
@@ -464,7 +587,7 @@ class BrowserHost {
     await this.waitForAuthenticated(60_000);
     await this.selectHighEffort();
     const composerReady = await this.view.webContents.executeJavaScript(`(() => {
-      const composer = ${visibleElementScript('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"], textarea')};
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
       if (!composer) return false;
       composer.focus();
       if ('value' in composer) composer.value = '';
@@ -486,7 +609,7 @@ class BrowserHost {
       if (found) {
         await this.view.webContents.executeJavaScript(`(() => {
           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-          const composer = ${visibleElementScript('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"], textarea')};
+          const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
           if (composer) {
             if ('value' in composer) composer.value = '';
             else composer.textContent = '';
@@ -583,8 +706,15 @@ class BrowserHost {
       const current = JSON.parse(fs.readFileSync(this.descriptorPath, "utf8"));
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });
     } catch {}
+    this.closeAuthView(this.authView, true);
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
 }
 
-module.exports = { BrowserHost, CHATGPT_VIEWPORT_CSS, IDLE_BROWSER_URL, TEMPORARY_CHAT_URL };
+module.exports = {
+  allowedAuthUrl,
+  BrowserHost,
+  CHATGPT_VIEWPORT_CSS,
+  IDLE_BROWSER_URL,
+  TEMPORARY_CHAT_URL,
+};

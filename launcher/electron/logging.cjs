@@ -97,4 +97,18 @@ function createLogger({ filePath, publish }) {
   };
 }
 
-module.exports = { createLogger, readRecent, redactText, sanitize };
+function registerLoggedIpc(ipcMain, logger, channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return await handler(event, ...args);
+    } catch (error) {
+      logger.error("launcher.ipc_failed", {
+        channel,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  });
+}
+
+module.exports = { createLogger, readRecent, redactText, registerLoggedIpc, sanitize };

@@ -2,10 +2,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   browserViewVisible,
+  constrainBrowserBounds,
   navigateBrowser,
   readBrowserNavigationState,
 } = require("../electron/browser-state.cjs");
-const { BrowserHost, CHATGPT_VIEWPORT_CSS } = require("../electron/browser-host.cjs");
+const {
+  allowedAuthUrl,
+  BrowserHost,
+  CHATGPT_VIEWPORT_CSS,
+} = require("../electron/browser-host.cjs");
 
 function createContents() {
   const calls = [];
@@ -28,10 +33,57 @@ function createContents() {
 }
 
 test("browser surface visibility requires both requested and active state", () => {
-  assert.equal(browserViewVisible(false, false), false);
-  assert.equal(browserViewVisible(true, false), false);
-  assert.equal(browserViewVisible(false, true), false);
-  assert.equal(browserViewVisible(true, true), true);
+  assert.equal(browserViewVisible(false, false, false), false);
+  assert.equal(browserViewVisible(true, false, true), false);
+  assert.equal(browserViewVisible(false, true, true), false);
+  assert.equal(browserViewVisible(true, true, false), false);
+  assert.equal(browserViewVisible(true, true, true), true);
+});
+
+test("browser bounds are clipped to the launcher content area", () => {
+  assert.deepEqual(
+    constrainBrowserBounds({ x: 260, y: 78, width: 1000, height: 900 }, { width: 1200, height: 800 }),
+    { x: 260, y: 78, width: 940, height: 722 },
+  );
+  assert.deepEqual(
+    constrainBrowserBounds({ x: -20, y: -10, width: 0, height: 0 }, { width: 1200, height: 800 }),
+    { x: 0, y: 0, width: 1, height: 1 },
+  );
+});
+
+test("authentication windows stay in the owned browser surface", () => {
+  assert.equal(allowedAuthUrl("https://accounts.google.com/o/oauth2/v2/auth"), true);
+  assert.equal(allowedAuthUrl("https://chatgpt.com/auth/login"), true);
+  assert.equal(allowedAuthUrl("https://example.com/login"), false);
+  const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
+  assert.match(source, /createWindow:\s*\(options\)\s*=>\s*this\.createAuthView\(options\)/);
+  assert.doesNotMatch(source, /overrideBrowserWindowOptions/);
+});
+
+test("concurrent login requests share one authentication operation", async () => {
+  let resolveLogin;
+  let waits = 0;
+  const fixture = {
+    state: { authenticated: false },
+    loginOperation: null,
+    show() {},
+    snapshot() { return { authenticated: false }; },
+    logger: { info() {} },
+    view: { webContents: { getURL: () => "https://chatgpt.com/", loadURL: async () => {} } },
+    probeAuthentication: async () => {},
+    waitForAuthenticated: async () => {
+      waits += 1;
+      return await new Promise((resolve) => { resolveLogin = resolve; });
+    },
+    withManualOperation: async (_name, action) => await action(),
+  };
+  const first = BrowserHost.prototype.openLogin.call(fixture);
+  const second = BrowserHost.prototype.openLogin.call(fixture);
+  assert.equal(first, second);
+  await Promise.resolve();
+  assert.equal(waits, 1);
+  resolveLogin({ authenticated: true });
+  assert.deepEqual(await first, { authenticated: true });
 });
 
 test("browser chrome navigation delegates to WebContents navigation history", () => {
