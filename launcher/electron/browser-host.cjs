@@ -118,6 +118,7 @@ class BrowserHost {
         backgroundThrottling: true,
       },
     });
+    this.view.webContents.session.setUserAgent(this.view.webContents.getUserAgent(), "en-US,en");
     window.contentView.addChildView(this.view);
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);

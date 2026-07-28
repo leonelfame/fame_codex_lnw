@@ -287,16 +287,47 @@ function LauncherShell({
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
-  const browserSlotRef = useRef<HTMLDivElement>(null);
-  const browserVisible = browser?.visible === true;
+  const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
+  const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser" && !(compactSidebar && sidebarOpen);
   const needsBrowser = browser?.authenticated !== true;
   const needsSetup = !needsBrowser && snapshot.state.coreSetupComplete !== true;
   const mcpOptional = snapshot.state.coreSetupComplete === true && snapshot.state.mcpSetupComplete !== true;
 
   useLayoutEffect(() => {
-    void api!.setBrowserSurfaceActive(browserSurfaceActive).catch((cause) => setError(messageOf(cause)));
-  }, [browserSurfaceActive, setError]);
+    let cancelled = false;
+    let animationFrame = 0;
+    let observer: ResizeObserver | null = null;
+
+    const measure = () => {
+      if (!browserSlot) return;
+      cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(() => {
+        const rect = browserSlot.getBoundingClientRect();
+        void api!.setBrowserBounds({
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        }).catch((cause) => setError(messageOf(cause)));
+      });
+    };
+
+    void api!.setBrowserSurfaceActive(browserSurfaceActive).then(() => {
+      if (cancelled || !browserSurfaceActive || !browserSlot) return;
+      measure();
+      observer = new ResizeObserver(measure);
+      observer.observe(browserSlot);
+      window.addEventListener("resize", measure);
+    }).catch((cause) => setError(messageOf(cause)));
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(animationFrame);
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [browserSlot, browserSurfaceActive, setError]);
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
@@ -308,34 +339,6 @@ function LauncherShell({
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, []);
-
-  useLayoutEffect(() => {
-    if (surface !== "browser") return;
-    const node = browserSlotRef.current;
-    if (!node) return;
-    let animationFrame = 0;
-    const measure = () => {
-      cancelAnimationFrame(animationFrame);
-      animationFrame = requestAnimationFrame(() => {
-        const rect = node.getBoundingClientRect();
-        void api!.setBrowserBounds({
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-        });
-      });
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    window.addEventListener("resize", measure);
-    return () => {
-      cancelAnimationFrame(animationFrame);
-      observer.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  }, [browserVisible, compactSidebar, sidebarOpen, surface]);
 
   const activateBrowser = useCallback(async (show = false) => {
     setSurface("browser");
@@ -570,7 +573,7 @@ function BrowserSurface({
   setError,
 }: {
   browser: BrowserState | null;
-  browserSlotRef: React.RefObject<HTMLDivElement | null>;
+  browserSlotRef: (node: HTMLDivElement | null) => void;
   copy: Copy;
   setError: (error: string | null) => void;
 }) {
@@ -673,7 +676,10 @@ function SetupSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
-  const busy = localBusy || operation?.status === "running";
+  const busy = localBusy
+    || operation?.status === "running"
+    || browser?.status === "testing"
+    || browser?.status === "running";
   const run = async (action: () => Promise<void>) => {
     if (busy) return;
     setLocalBusy(true);
