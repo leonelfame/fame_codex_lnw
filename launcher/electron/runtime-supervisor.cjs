@@ -512,8 +512,7 @@ class RuntimeSupervisor {
     if (!config) {
       const ownershipState = this.readState();
       if (ownershipState && (
-        (ownershipState.ownerPid !== process.pid && processRunning(ownershipState.ownerPid))
-        || processRunning(ownershipState.daemonPid)
+        processRunning(ownershipState.daemonPid)
         || processRunning(ownershipState.tunnelPid)
       )) {
         const detail = "Runtime configuration is missing while launcher ownership processes are still alive";
@@ -1101,8 +1100,7 @@ class RuntimeSupervisor {
         if (!config) {
           const ownershipState = this.readState();
           if (ownershipState && (
-            (ownershipState.ownerPid !== process.pid && processRunning(ownershipState.ownerPid))
-            || processRunning(ownershipState.daemonPid)
+            processRunning(ownershipState.daemonPid)
             || processRunning(ownershipState.tunnelPid)
           )) {
             throw new Error("runtime configuration is missing while launcher ownership processes are still alive");

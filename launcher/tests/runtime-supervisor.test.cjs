@@ -388,6 +388,9 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
 
 test("launcher clears an empty stale ownership marker when Windows reuses its PID", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-reused-owner-pid-"));
+  const pidOccupant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
     logger: { info() {}, warn() {}, error() {} },
@@ -398,7 +401,7 @@ test("launcher clears an empty stale ownership marker when Windows reuses its PI
   fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
   fs.writeFileSync(supervisor.statePath, `${JSON.stringify({
     version: 1,
-    ownerPid: process.pid,
+    ownerPid: pidOccupant.pid,
     daemonPid: null,
     tunnelPid: null,
     status: "failed",
@@ -408,6 +411,7 @@ test("launcher clears an empty stale ownership marker when Windows reuses its PI
     assert.deepEqual(await supervisor.startConfigured(), { status: "not-configured" });
     assert.equal(fs.existsSync(supervisor.statePath), false);
   } finally {
+    pidOccupant.kill("SIGTERM");
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
