@@ -178,7 +178,7 @@ test("embedded ChatGPT is constrained to the owned horizontal viewport", () => {
   assert.match(CHATGPT_VIEWPORT_CSS, /overscroll-behavior-x:\s*none !important/);
 });
 
-test("smoke effort selection uses trusted input and localized labels only for confirmation", async () => {
+test("smoke effort selection uses trusted input and semantic checked state", async () => {
   const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
   const cdpSource = require("node:fs").readFileSync(require.resolve("../electron/cdp-input.cjs"), "utf8");
   assert.match(source, /\[data-testid="composer-intelligence-picker-content"\]\[role="group"\]/);
@@ -191,6 +191,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
   let controlReads = 0;
   let menuReads = 0;
   const clicks = [];
+  const inputEvents = [];
   const fixture = {
     clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
     pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
@@ -212,7 +213,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
         }
         return {
           found: true,
-          label: controlReads < 4 ? "Средний" : "Высокий",
+          label: "Instant",
           point: { x: 120, y: 80 },
           composer: true,
           readyState: "complete",
@@ -221,13 +222,18 @@ test("smoke effort selection uses trusted input and localized labels only for co
       }
       if (expression.includes("effort-menu-read")) {
         menuReads += 1;
-        return menuReads <= 2
-          ? { open: false, count: 0, target: null }
-          : {
-              open: true,
-              count: 5,
-              target: { label: "Высокий", point: { x: 160, y: 140 } },
-            };
+        if ([1, 2, 4].includes(menuReads)) {
+          return { open: false, count: 0, target: null };
+        }
+        return {
+          open: true,
+          count: 5,
+          target: {
+            label: "Instant 5.5",
+            checked: menuReads >= 5 ? "true" : "false",
+            point: { x: 160, y: 140 },
+          },
+        };
       }
       throw new Error("Unexpected browser script");
     },
@@ -236,6 +242,7 @@ test("smoke effort selection uses trusted input and localized labels only for co
       webContents: {
         debugger: {},
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        sendInputEvent: (event) => inputEvents.push(event),
       },
     },
   };
@@ -248,8 +255,8 @@ test("smoke effort selection uses trusted input and localized labels only for co
   });
 
   assert.deepEqual(result, { effort: "High", changed: true });
-  assert.equal(controlReads, 4);
-  assert.equal(menuReads, 3);
+  assert.equal(controlReads, 3);
+  assert.equal(menuReads, 5);
   assert.deepEqual(clicks, [
     {
       debuggerClient: {},
@@ -259,10 +266,18 @@ test("smoke effort selection uses trusted input and localized labels only for co
       debuggerClient: {},
       point: { x: 160, y: 140 },
     },
+    {
+      debuggerClient: {},
+      point: { x: 120, y: 80 },
+    },
+  ]);
+  assert.deepEqual(inputEvents, [
+    { type: "keyDown", keyCode: "Escape" },
+    { type: "keyUp", keyCode: "Escape" },
   ]);
 });
 
-test("smoke effort selection is idempotent without understanding the localized label", async () => {
+test("smoke effort selection is idempotent without comparing localized labels", async () => {
   const inputEvents = [];
   const fixture = {
     clickBrowserPoint: BrowserHost.prototype.clickBrowserPoint,
@@ -270,7 +285,7 @@ test("smoke effort selection is idempotent without understanding the localized l
     readEffortMenu: async () => ({
       open: true,
       count: 5,
-      target: { label: "高", point: { x: 140, y: 130 } },
+      target: { label: "Instant 5.5", checked: "true", point: { x: 140, y: 130 } },
     }),
     waitForEffortControl: async () => ({
       found: true,
@@ -280,7 +295,7 @@ test("smoke effort selection is idempotent without understanding the localized l
     waitForEffortMenu: async () => ({
       open: true,
       count: 5,
-      target: { label: "高", point: { x: 140, y: 130 } },
+      target: { label: "Instant 5.5", checked: "true", point: { x: 140, y: 130 } },
     }),
     view: {
       webContents: {

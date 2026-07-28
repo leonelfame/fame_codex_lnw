@@ -449,7 +449,6 @@ export class ChatGptBrowserWorker {
     } catch {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
-    const currentLabel = (await currentEffort.innerText()).replace(/\s+/g, " ").trim();
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     if (!await effortMenu.isVisible().catch(() => false)) await currentEffort.click();
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
@@ -462,27 +461,40 @@ export class ChatGptBrowserWorker {
         + `; available item count: ${await effortChoices.count().catch(() => 0)}`,
       );
     }
-    const targetLabel = (await effortChoice.innerText()).replace(/\s+/g, " ").trim();
-    if (currentLabel === targetLabel) {
+    const selected = await effortChoice.getAttribute("aria-checked");
+    if (selected !== "true" && selected !== "false") {
+      throw new Error(`ChatGPT effort item index ${mode.uiEffortIndex} has no semantic checked state`);
+    }
+    if (selected === "true") {
       await page.keyboard.press("Escape");
       return mode;
     }
     await effortChoice.click();
-    try {
-      const deadline = Date.now() + 40_000;
-      while (Date.now() < deadline) {
-        const visibleLabel = (await currentEffort.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-        if (visibleLabel === targetLabel) return mode;
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+
+    const deadline = Date.now() + 40_000;
+    let confirmed: string | null = null;
+    while (Date.now() < deadline) {
+      if (!await effortMenu.isVisible().catch(() => false)) {
+        await currentEffort.click();
+        await effortChoice.waitFor({
+          state: "visible",
+          timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),
+        });
       }
-      throw new Error("effort control did not render the selected label");
-    } catch {
-      const visible = (await currentEffort.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-      throw new Error(
-        `ChatGPT did not confirm effort item index ${mode.uiEffortIndex}`
-        + (visible ? `; visible effort control: ${visible}` : ""),
-      );
+      confirmed = await effortChoice.getAttribute("aria-checked");
+      if (confirmed === "true") {
+        await page.keyboard.press("Escape");
+        return mode;
+      }
+      if (confirmed !== "false") {
+        throw new Error(`ChatGPT effort item index ${mode.uiEffortIndex} lost its semantic checked state`);
+      }
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     }
+    throw new Error(
+      `ChatGPT did not confirm effort item index ${mode.uiEffortIndex}`
+      + ` (aria-checked=${JSON.stringify(confirmed)})`,
+    );
   }
 
   private async attachedPromptText(page: Page): Promise<string> {

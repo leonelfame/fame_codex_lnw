@@ -21,6 +21,8 @@ test("effort selection uses structural menu indices instead of localized labels"
   expect(sessionSource).toContain('[role="menuitemradio"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
+  expect(workerSource).toContain('getAttribute("aria-checked")');
+  expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
 });

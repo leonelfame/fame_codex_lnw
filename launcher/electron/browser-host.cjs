@@ -713,6 +713,7 @@ class BrowserHost {
           count: candidate.items.length,
           target: {
             label: normalize(target.innerText || target.textContent),
+            checked: target.getAttribute('aria-checked'),
             point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
           },
         };
@@ -746,24 +747,42 @@ class BrowserHost {
       await this.clickBrowserPoint(control.point);
       menu = await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs);
     }
-    if (control.label === menu.target.label) {
+    if (menu.target.checked !== "true" && menu.target.checked !== "false") {
+      throw new Error(`ChatGPT effort item index ${targetIndex} has no semantic checked state`);
+    }
+    if (menu.target.checked === "true") {
       this.pressBrowserKey("Escape");
       return { effort: "High", changed: false };
     }
     await this.clickBrowserPoint(menu.target.point);
 
     const deadline = Date.now() + confirmTimeoutMs;
-    let confirmed;
+    let confirmed = menu;
     do {
-      confirmed = await this.readEffortControl();
-      if (confirmed.found && confirmed.label === menu.target.label) {
+      confirmed = await this.readEffortMenu(targetIndex);
+      if (!confirmed.target) {
+        const current = await this.readEffortControl();
+        if (current.found) {
+          await this.clickBrowserPoint(current.point);
+          confirmed = await this.waitForEffortMenu(
+            targetIndex,
+            Math.max(1, Math.min(5_000, deadline - Date.now())),
+            pollMs,
+          );
+        }
+      }
+      if (confirmed.target?.checked === "true") {
+        this.pressBrowserKey("Escape");
         return { effort: "High", changed: true };
+      }
+      if (confirmed.target && confirmed.target.checked !== "false") {
+        throw new Error(`ChatGPT effort item index ${targetIndex} lost its semantic checked state`);
       }
       await sleep(pollMs);
     } while (Date.now() < deadline);
     throw new Error(
       `ChatGPT did not confirm effort item index ${targetIndex}`
-      + ` (current=${JSON.stringify(confirmed?.label || null)})`,
+      + ` (aria-checked=${JSON.stringify(confirmed?.target?.checked ?? null)})`,
     );
   }
 
