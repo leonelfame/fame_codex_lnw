@@ -86,7 +86,7 @@ export function App() {
   const copy = copyFor(language);
 
   return (
-    <div className="app-root" data-language={language} data-theme="dark">
+    <div className="app-root" data-language={language} data-platform={snapshot.platform} data-theme="dark">
       <AnimatePresence mode="wait">
         {!snapshot.state.onboardingComplete ? (
           <Onboarding
@@ -1088,10 +1088,7 @@ function SettingsSurface({
           />
         </SettingRow>
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
-          <select onChange={(event) => void updateLanguage(event.target.value as Language)} value={language}>
-            <option value="en">English</option>
-            <option value="zh-CN">简体中文</option>
-          </select>
+          <LanguageMenu language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
       </div>
 
@@ -1303,14 +1300,14 @@ function WelcomeAction({
 }) {
   return (
     <button
-      className={`welcome-option is-social${complete ? " is-active" : ""}`}
+      className={`welcome-option is-social${complete ? " is-complete" : ""}`}
       disabled={disabled}
       onClick={onClick}
       type="button"
     >
-      <span><Icon name={complete ? "check" : icon} /></span>
+      <span><Icon name={icon} /></span>
       <strong>{label}</strong>
-      <Icon name="external" />
+      <Icon name={complete ? "check" : "external"} />
     </button>
   );
 }
@@ -1386,6 +1383,63 @@ function Switch({ checked, onChange }: { checked: boolean; onChange: (checked: b
     >
       <span />
     </button>
+  );
+}
+
+function LanguageMenu({ language, onChange }: { language: Language; onChange: (language: Language) => void }) {
+  const [open, setOpen] = useState(false);
+  const options: Array<{ label: string; value: Language }> = [
+    { label: "English", value: "en" },
+    { label: "简体中文", value: "zh-CN" },
+  ];
+  const selected = options.find((option) => option.value === language) ?? options[0];
+
+  return (
+    <div
+      className={`language-menu${open ? " is-open" : ""}`}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setOpen(false);
+      }}
+    >
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className="language-menu-trigger"
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <span>{selected.label}</span>
+        <Icon name="chevron" />
+      </button>
+      {open ? (
+        <>
+          <button
+            aria-label="Close language menu"
+            className="language-menu-scrim"
+            onClick={() => setOpen(false)}
+            type="button"
+          />
+          <div aria-label="Language" className="language-menu-panel" role="listbox">
+            {options.map((option) => (
+              <button
+                aria-selected={option.value === language}
+                className={option.value === language ? "is-selected" : ""}
+                key={option.value}
+                onClick={() => {
+                  setOpen(false);
+                  if (option.value !== language) onChange(option.value);
+                }}
+                role="option"
+                type="button"
+              >
+                <span>{option.label}</span>
+                {option.value === language ? <Icon name="check" /> : null}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
   );
 }
 

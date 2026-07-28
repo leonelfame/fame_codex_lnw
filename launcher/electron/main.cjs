@@ -52,6 +52,7 @@ const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
+const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
 app.setName("Codex Web GPT");
 if (process.platform === "win32") app.setAppUserModelId("dev.codexwebgpt.launcher");
@@ -101,9 +102,12 @@ function publishOperation(operation) {
 }
 
 function trayImage() {
+  if (process.platform !== "darwin") {
+    return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
+  }
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
-  if (process.platform === "darwin") image.setTemplateImage(true);
+  image.setTemplateImage(true);
   return image;
 }
 
@@ -179,6 +183,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
     title: "Codex Web GPT",
+    icon: APP_ICON_PATH,
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
     titleBarStyle: isMac ? "hiddenInset" : "hidden",

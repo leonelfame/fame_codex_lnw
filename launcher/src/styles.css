@@ -14,8 +14,7 @@ body,
 
 body,
 button,
-input,
-select {
+input {
   font-family: var(--font-ui);
 }
 
@@ -29,8 +28,7 @@ body {
 }
 
 button,
-input,
-select {
+input {
   color: inherit;
   font: inherit;
   -webkit-app-region: no-drag;
@@ -41,14 +39,12 @@ button {
 }
 
 button,
-input,
-select {
+input {
   outline: none;
 }
 
 button:focus-visible,
-input:focus-visible,
-select:focus-visible {
+input:focus-visible {
   box-shadow: 0 0 0 1px var(--color-border-focus);
 }
 
@@ -93,6 +89,16 @@ code {
 *::-webkit-scrollbar-thumb:hover {
   background: rgb(255 255 255 / 26%);
   background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .draggable {
@@ -147,6 +153,16 @@ code {
   width: 32px;
   height: 32px;
   border-radius: 8px;
+}
+
+.app-root:not([data-platform="darwin"]) .titlebar-left {
+  left: 8px;
+}
+
+.app-root:not([data-platform="darwin"]) .titlebar-left .icon-button {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-round);
 }
 
 .icon-button {
@@ -735,7 +751,31 @@ code {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 4px 0 48px;
-  scrollbar-gutter: stable;
+  scrollbar-color: transparent transparent;
+  scrollbar-gutter: auto;
+}
+
+.content-scroll:hover {
+  scrollbar-color: rgb(255 255 255 / 16%) transparent;
+}
+
+.content-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.content-scroll::-webkit-scrollbar-thumb {
+  border-width: 2px;
+  background: transparent;
+}
+
+.content-scroll:hover::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 16%);
+  background-clip: padding-box;
+}
+
+.content-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: rgb(255 255 255 / 28%);
+  background-clip: padding-box;
 }
 
 .content-scroll.is-narrow {
@@ -1350,15 +1390,118 @@ code {
   padding: 12px 0;
 }
 
-.setting-row select {
-  min-width: 126px;
+.language-menu {
+  position: relative;
+  z-index: 1;
+}
+
+.language-menu.is-open {
+  z-index: 220;
+}
+
+.language-menu-trigger {
+  display: flex;
+  min-width: 132px;
   height: 30px;
-  padding: 0 28px 0 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 8px 0 10px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-background-control);
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
+  transition:
+    border-color var(--duration-micro) ease,
+    background var(--duration-micro) ease,
+    color var(--duration-micro) ease;
+}
+
+.language-menu-trigger:hover,
+.language-menu.is-open .language-menu-trigger {
+  border-color: var(--color-border-heavy);
+  background: var(--color-background-control-hover);
+  color: var(--color-text-primary);
+}
+
+.language-menu-trigger svg {
+  width: 13px;
+  height: 13px;
+  color: var(--color-icon-tertiary);
+  transform: rotate(90deg);
+  transition: transform var(--duration-micro) var(--ease-enter);
+}
+
+.language-menu.is-open .language-menu-trigger svg {
+  transform: rotate(-90deg);
+}
+
+.language-menu-scrim {
+  position: fixed;
+  z-index: 0;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.language-menu-panel {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 168px;
+  padding: 5px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+  color: var(--color-text-primary);
+  box-shadow:
+    0 18px 48px rgb(0 0 0 / 42%),
+    inset 0 1px 0 rgb(255 255 255 / 4%);
+  animation: languageMenuEnter var(--duration-micro) var(--ease-enter) both;
+}
+
+.language-menu-panel button {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.language-menu-panel button:hover,
+.language-menu-panel button:focus-visible,
+.language-menu-panel button.is-selected {
+  background: var(--color-background-control-hover);
+  color: var(--color-text-primary);
+}
+
+.language-menu-panel button svg {
+  width: 13px;
+  height: 13px;
+  color: var(--color-icon-secondary);
+}
+
+@keyframes languageMenuEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .switch {
@@ -1513,6 +1656,10 @@ code {
   padding: 0 20px 0 96px;
 }
 
+.app-root:not([data-platform="darwin"]) .welcome-top {
+  padding-left: 20px;
+}
+
 .welcome-brand {
   display: flex;
   align-items: center;
@@ -1630,6 +1777,19 @@ code {
 
 .welcome-option.is-social {
   grid-template-columns: 34px minmax(0, 1fr) 16px;
+}
+
+.welcome-option.is-social.is-complete {
+  color: var(--color-text-primary);
+}
+
+.welcome-option.is-social.is-complete > span:first-child {
+  border-color: var(--color-border-heavy);
+  color: var(--color-icon-secondary);
+}
+
+.welcome-option.is-social.is-complete > svg {
+  color: var(--color-icon-secondary);
 }
 
 .welcome-footer {

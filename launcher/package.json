@@ -46,6 +46,7 @@
     "files": [
       "dist/**",
       "electron/**",
+      "assets/icon.png",
       "package.json"
     ],
     "extraResources": [
@@ -62,7 +63,7 @@
       "target": ["dmg", "zip"]
     },
     "win": {
-      "icon": "assets/icon.png",
+      "icon": "assets/icon.ico",
       "target": ["nsis"]
     },
     "linux": {
