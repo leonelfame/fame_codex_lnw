@@ -15,7 +15,9 @@ test("effort selection uses structural menu indices instead of localized labels"
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
-  expect(sessionSource).toContain('[data-radix-collection-item]:not([aria-haspopup="menu"])');
+  expect(sessionSource).toContain('[role="menuitem"]:not([aria-haspopup="menu"])');
+  expect(sessionSource).toContain('[role="menuitemradio"]:not([aria-haspopup="menu"])');
+  expect(sessionSource).not.toContain("data-radix-collection-item");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
 });

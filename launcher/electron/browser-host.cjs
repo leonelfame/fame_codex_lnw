@@ -632,7 +632,9 @@ class BrowserHost {
         const popovers = Array.from(document.querySelectorAll(':popover-open')).filter(visible);
         const candidates = popovers.map((popover) => {
           const items = Array.from(popover.querySelectorAll(
-            '[data-radix-collection-item]:not([aria-haspopup="menu"])'
+            '[role="menuitem"]:not([aria-haspopup="menu"]),'
+            + ' [role="menuitemradio"]:not([aria-haspopup="menu"]),'
+            + ' [role="option"]:not([aria-haspopup="menu"])'
           )).filter(visible);
           return { popover, items };
         }).filter(({ items }) => items.length > 0);

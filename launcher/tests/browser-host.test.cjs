@@ -121,6 +121,11 @@ test("embedded ChatGPT is constrained to the owned horizontal viewport", () => {
 });
 
 test("smoke effort selection uses trusted input and localized labels only for confirmation", async () => {
+  const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
+  assert.match(source, /\[role="menuitem"\]:not\(\[aria-haspopup="menu"\]\)/);
+  assert.match(source, /\[role="menuitemradio"\]:not\(\[aria-haspopup="menu"\]\)/);
+  assert.doesNotMatch(source, /data-radix-collection-item/);
+
   let controlReads = 0;
   let menuReads = 0;
   const inputEvents = [];

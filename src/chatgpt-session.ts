@@ -7,7 +7,11 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = 'button[aria-haspopup="menu"][data-tone="neutral"]';
-export const CHATGPT_EFFORT_ITEM_SELECTOR = '[data-radix-collection-item]:not([aria-haspopup="menu"])';
+export const CHATGPT_EFFORT_ITEM_SELECTOR = [
+  '[role="menuitem"]:not([aria-haspopup="menu"])',
+  '[role="menuitemradio"]:not([aria-haspopup="menu"])',
+  '[role="option"]:not([aria-haspopup="menu"])',
+].join(", ");
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
 
 async function anyVisible(locator: Locator): Promise<boolean> {
