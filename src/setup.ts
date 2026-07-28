@@ -226,11 +226,11 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
 async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
   let bootstrapError: unknown;
   try {
+    // `runtimes connect` writes the profile and returns success only after its temporary managed
+    // runtime is running, healthy, and ready. The launcher owns the durable runtime separately.
+    // On Windows the connect child can exit with its synchronous setup process, so polling that
+    // temporary PID again here reports a false stopped state after a successful bootstrap.
     connectTunnel(config);
-    const status = await waitForTunnelReady(config);
-    if (!status.ok) {
-      throw new Error(`Temporary tunnel bootstrap did not become healthy and ready: ${status.detail}`);
-    }
   } catch (error) {
     bootstrapError = error;
   }

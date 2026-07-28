@@ -36,13 +36,33 @@ describe("tunnel status boundary", () => {
   test("surfaces and redacts an immediate managed-runtime launch failure", () => {
     const detail = tunnelConnectLaunchError(JSON.stringify({
       running: false,
+      healthy: false,
+      ready: false,
       exit_code: 1,
       launch_diagnostics: {
         log_tail: "403 for tunnel_0123456789abcdef0123456789abcdef using sk-secretsecretsecret",
       },
     }));
 
-    expect(detail).toBe("exit_code=1; runtime_log=403 for [tunnel-id] using [redacted-key]");
+    expect(detail).toBe(
+      "running=false; healthy=false; ready=false; exit_code=1; runtime_log=403 for [tunnel-id] using [redacted-key]",
+    );
+  });
+
+  test("requires connect to prove running, healthy, and ready before accepting its profile", () => {
+    expect(tunnelConnectLaunchError(JSON.stringify({
+      running: true,
+      healthy: true,
+      ready: true,
+    }))).toBeUndefined();
+
+    expect(tunnelConnectLaunchError(JSON.stringify({
+      running: true,
+      healthy: true,
+      ready: false,
+    }))).toContain("running=true; healthy=true; ready=false");
+
+    expect(tunnelConnectLaunchError("not json")).toBe("tunnel-client returned non-JSON connect output");
   });
 
   test("includes the managed runtime log tail in stopped status diagnostics", () => {

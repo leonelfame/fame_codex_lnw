@@ -273,9 +273,12 @@ export function tunnelConnectLaunchError(output: string): string | undefined {
   try {
     parsed = JSON.parse(output) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return "tunnel-client returned non-JSON connect output";
   }
-  if (parsed.running !== false) return undefined;
+  const running = parsed.running === true;
+  const healthy = parsed.healthy === true;
+  const ready = parsed.ready === true;
+  if (running && healthy && ready) return undefined;
   const diagnostics = nestedRecord(parsed, "launch_diagnostics");
   const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code
     : typeof diagnostics?.exit_code === "number" ? diagnostics.exit_code
@@ -285,10 +288,13 @@ export function tunnelConnectLaunchError(output: string): string | undefined {
     : undefined;
   const logTail = runtimeLogTail(parsed);
   return safeTunnelDetail([
+    `running=${running}`,
+    `healthy=${healthy}`,
+    `ready=${ready}`,
     ...(exitCode !== undefined ? [`exit_code=${exitCode}`] : []),
     ...(remoteError ? [`remote_error=${remoteError}`] : []),
     ...(logTail ? [`runtime_log=${logTail}`] : []),
-    ...(!remoteError && !logTail ? ["runtime exited before becoming healthy"] : []),
+    ...(!remoteError && !logTail ? ["runtime did not complete a healthy ready launch"] : []),
   ].join("; "));
 }
 
