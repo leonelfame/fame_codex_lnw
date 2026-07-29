@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
-import { buildWindowsMcpLauncher, createTunnelConfig, mcpCommand, windowsTunnelMcpCommand } from "../src/tunnel";
+import { createTunnelConfig, mcpCommand } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
 import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
@@ -82,7 +82,7 @@ describe("tunnel launchd ownership", () => {
     expect(existingFullSetupCredentials(defaultConfig("browser-only"))).toEqual({ tunnelId: false, runtimeKey: false });
   });
 
-  test("writes a shell-independent Windows MCP launcher for named-pipe transport", () => {
+  test("passes the Windows MCP runtime directly to tunnel-client without cmd.exe", () => {
     const root = join(tmpdir(), `codex-chatgpt-web-windows-mcp-${process.pid}-${Date.now()}`);
     roots.push(root);
     process.env.CODEX_CHATGPT_WEB_HOME = root;
@@ -93,20 +93,13 @@ describe("tunnel launchd ownership", () => {
     config.runtimeCommand = [runtime, join(root, "Program Files", "app", "cli.js")];
     config.brokerSocketPath = "\\\\.\\pipe\\codex-chatgpt-web-test";
 
-    const launcher = buildWindowsMcpLauncher(config);
-    expect(launcher).toContain("\r\n");
-    expect(launcher).toContain("chcp 65001 >nul");
-    expect(launcher).toContain(`"${runtime}"`);
-    expect(launcher).toContain('"\\\\.\\pipe\\codex-chatgpt-web-test"');
-    expect(launcher).not.toContain("'\"'\"'");
-
     const command = mcpCommand(config, "win32");
-    expect(command).toStartWith("cmd.exe /d /s /c call ");
-    const launcherPath = join(root, "bin", "mcp-launcher.cmd");
-    expect(existsSync(launcherPath)).toBe(true);
-
-    expect(windowsTunnelMcpCommand(String.raw`C:\Users\Administrator\.codex-chatgpt-web\bin\mcp-launcher.cmd`)).toBe(
-      String.raw`cmd.exe /d /s /c call "C:\\Users\\Administrator\\.codex-chatgpt-web\\bin\\mcp-launcher.cmd"`,
+    expect(command).toBe(
+      `"${runtime.replaceAll("\\", "\\\\")}" `
+      + `"${join(root, "Program Files", "app", "cli.js").replaceAll("\\", "\\\\")}" `
+      + '"mcp" "--broker-socket" "\\\\\\\\.\\\\pipe\\\\codex-chatgpt-web-test"',
     );
+    expect(command).not.toContain("cmd.exe");
+    expect(existsSync(join(root, "bin", "mcp-launcher.cmd"))).toBe(false);
   });
 });

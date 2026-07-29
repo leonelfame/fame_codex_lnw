@@ -175,38 +175,17 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function windowsBatchQuoted(value: string): string {
-  if (/["\r\n]/.test(value)) throw new Error("Windows MCP launcher values must not contain quotes or newlines");
-  return `"${value.replaceAll("%", "%%")}"`;
-}
-
 function tunnelCommandQuoted(value: string): string {
   if (/[\r\n]/.test(value)) throw new Error("Tunnel MCP command values must not contain newlines");
   // tunnel-client parses mcp.command with backslash escapes on every platform.
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-export function windowsTunnelMcpCommand(launcher: string): string {
-  return `cmd.exe /d /s /c call ${tunnelCommandQuoted(launcher)}`;
-}
-
-export function buildWindowsMcpLauncher(config: AppConfig): string {
-  const command = [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath];
-  return [
-    "@echo off",
-    "setlocal",
-    "chcp 65001 >nul",
-    `set "CODEX_CHATGPT_WEB_HOME=${getConfigDir().replaceAll("%", "%%")}"`,
-    command.map(windowsBatchQuoted).join(" "),
-    "",
-  ].join("\r\n");
-}
-
 export function mcpCommand(config: AppConfig, platform = process.platform): string {
   if (platform === "win32") {
-    const launcher = join(getConfigDir(), "bin", "mcp-launcher.cmd");
-    atomicWriteFile(launcher, buildWindowsMcpLauncher(config));
-    return windowsTunnelMcpCommand(launcher);
+    return [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath]
+      .map(tunnelCommandQuoted)
+      .join(" ");
   }
   return [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath].map(shellQuote).join(" ");
 }

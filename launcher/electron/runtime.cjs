@@ -216,7 +216,6 @@ class RuntimeHost {
       path.join(this.codexHome, "models_cache.json"),
       path.join(coreHome, "secrets", "tunnel-runtime.key"),
       path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web.yaml"),
-      path.join(coreHome, "bin", "mcp-launcher.cmd"),
     ]);
     if (snapshot.owner === "external" && this.platform === "darwin") {
       paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.daemon.plist"));

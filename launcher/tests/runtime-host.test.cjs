@@ -212,7 +212,6 @@ test("failed launcher update restores every mutable setup file before restarting
   const keyPath = path.join(coreHome, "secrets", "tunnel-runtime.key");
   const profileDir = path.join(coreHome, "tunnel", "profiles");
   const profilePath = path.join(profileDir, "custom.yaml");
-  const windowsLauncherPath = path.join(coreHome, "bin", "mcp-launcher.cmd");
   const codexConfigPath = path.join(codexHome, "config.toml");
   const codexModelsCachePath = path.join(codexHome, "models_cache.json");
   const oldConfig = {
@@ -225,14 +224,13 @@ test("failed launcher update restores every mutable setup file before restarting
       profileName: "custom",
     },
   };
-  for (const file of [configPath, journalPath, keyPath, profilePath, windowsLauncherPath, codexConfigPath, codexModelsCachePath]) {
+  for (const file of [configPath, journalPath, keyPath, profilePath, codexConfigPath, codexModelsCachePath]) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
   }
   fs.writeFileSync(configPath, `${JSON.stringify(oldConfig)}\n`, { mode: 0o600 });
   fs.writeFileSync(journalPath, "old journal\n", { mode: 0o600 });
   fs.writeFileSync(keyPath, "old key\n", { mode: 0o600 });
   fs.writeFileSync(profilePath, "old profile\n", { mode: 0o600 });
-  fs.writeFileSync(windowsLauncherPath, "old launcher\n", { mode: 0o600 });
   fs.writeFileSync(codexConfigPath, "old codex config\n", { mode: 0o600 });
   fs.writeFileSync(codexModelsCachePath, "old codex models cache\n", { mode: 0o600 });
 
@@ -265,7 +263,6 @@ test("failed launcher update restores every mutable setup file before restarting
     fs.writeFileSync(journalPath, "new journal\n");
     fs.writeFileSync(keyPath, "new key\n");
     fs.writeFileSync(profilePath, "new profile\n");
-    fs.writeFileSync(windowsLauncherPath, "new launcher\n");
     fs.writeFileSync(codexConfigPath, "new codex config\n");
     fs.rmSync(codexModelsCachePath);
     return { code: 0, stdout: "", stderr: "" };
@@ -281,7 +278,6 @@ test("failed launcher update restores every mutable setup file before restarting
     assert.equal(fs.readFileSync(journalPath, "utf8"), "old journal\n");
     assert.equal(fs.readFileSync(keyPath, "utf8"), "old key\n");
     assert.equal(fs.readFileSync(profilePath, "utf8"), "old profile\n");
-    assert.equal(fs.readFileSync(windowsLauncherPath, "utf8"), "old launcher\n");
     assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "old codex config\n");
     assert.equal(fs.readFileSync(codexModelsCachePath, "utf8"), "old codex models cache\n");
   } finally {
