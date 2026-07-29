@@ -71,6 +71,7 @@ export function resolveBrokerEndpoint(value: string): string {
 }
 
 const atomicWaitCell = new Int32Array(new SharedArrayBuffer(4));
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 150, 250, 350, 500] as const;
 
 function renameAtomicFile(source: string, destination: string): void {
   for (let attempt = 0; ; attempt += 1) {
@@ -81,8 +82,9 @@ function renameAtomicFile(source: string, destination: string): void {
       const code = (error as NodeJS.ErrnoException).code;
       const transientWindowsError = process.platform === "win32"
         && (code === "EBUSY" || code === "EPERM" || code === "EACCES");
-      if (!transientWindowsError || attempt >= 2) throw error;
-      Atomics.wait(atomicWaitCell, 0, 0, 25 * (attempt + 1));
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      if (!transientWindowsError || delay === undefined) throw error;
+      Atomics.wait(atomicWaitCell, 0, 0, delay);
     }
   }
 }

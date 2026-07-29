@@ -303,6 +303,35 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
   ]);
 });
 
+test("smoke submission waits for the semantic send control and uses trusted CDP input", async () => {
+  const clicks = [];
+  let reads = 0;
+  const fixture = {
+    readSmokeSendButton: BrowserHost.prototype.readSmokeSendButton,
+    evaluateBrowserPage: BrowserHost.prototype.evaluateBrowserPage,
+    evaluatePage: async ({ expression }) => {
+      assert.match(expression, /smoke-send-button-read/);
+      reads += 1;
+      return reads < 3
+        ? { ready: false, reason: "disabled" }
+        : { ready: true, point: { x: 300, y: 220 } };
+    },
+    view: { webContents: { debugger: {} } },
+  };
+
+  const button = await BrowserHost.prototype.waitForSmokeSendButton.call(fixture, 100, 1);
+  await BrowserHost.prototype.clickBrowserPoint.call({
+    view: fixture.view,
+    dispatchTrustedClick: async input => clicks.push(input),
+  }, button.point);
+
+  assert.equal(reads, 3);
+  assert.deepEqual(clicks, [{
+    debuggerClient: {},
+    point: { x: 300, y: 220 },
+  }]);
+});
+
 test("smoke effort selection is idempotent without comparing localized labels", async () => {
   const inputEvents = [];
   const fixture = {

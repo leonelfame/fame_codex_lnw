@@ -4,12 +4,14 @@ import { basename, dirname, join } from "node:path";
 import { unzipSync } from "fflate";
 import type { AppConfig, TunnelConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
-import { runCommand, runChecked } from "./process";
+import { processRunning, runCommand, runChecked } from "./process";
 import { getTunnelServiceStatus } from "./tunnel-service";
 
 const TUNNEL_VERSION = "0.0.10";
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+export const TUNNEL_READY_TIMEOUT_MS = 120_000;
+const TUNNEL_STATUS_POLL_INTERVAL_MS = 1_000;
 
 interface TunnelInstallManifest {
   version: 1;
@@ -208,7 +210,7 @@ export function connectTunnel(config: AppConfig): void {
     "--runtime-api-key", `file:${settings.runtimeKeyFile}`,
     "--mcp-command", mcpCommand(config),
     "--json",
-  ], { timeout: 60_000 });
+  ], { timeout: TUNNEL_READY_TIMEOUT_MS });
   const launchError = tunnelConnectLaunchError(result.stdout);
   if (launchError) throw new Error(`Tunnel runtime exited during launch: ${launchError}`);
 }
@@ -232,6 +234,18 @@ export interface TunnelRuntimeStatus {
   ready: boolean;
   state?: string;
   detail: string;
+}
+
+export function tunnelCommandOutput(result: {
+  status: number;
+  stdout: string;
+  stderr: string;
+}): string {
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
+  return result.status === 0
+    ? (stdout || stderr)
+    : [stderr, stdout].filter(Boolean).join("\n");
 }
 
 function safeTunnelDetail(value: unknown): string {
@@ -301,9 +315,7 @@ function launcherTunnelProcessRunning(): boolean {
       || (state.ownerPid as number) <= 0
       || !Number.isInteger(state.tunnelPid)
       || (state.tunnelPid as number) <= 0) return false;
-    process.kill(state.ownerPid as number, 0);
-    process.kill(state.tunnelPid as number, 0);
-    return true;
+    return processRunning(state.ownerPid) && processRunning(state.tunnelPid);
   } catch {
     return false;
   }
@@ -354,7 +366,7 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
     ["runtimes", "status", settings.alias, "--json"],
     { timeout: 10_000 },
   );
-  let output = (result.stdout || result.stderr).trim();
+  let output = tunnelCommandOutput(result);
   const service = getTunnelServiceStatus();
   if (result.status === 0 && (service.running || launcherTunnelProcessRunning())) {
     try {
@@ -369,11 +381,14 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
   return parseTunnelStatus(output, result.status);
 }
 
-export async function waitForTunnelReady(config: AppConfig, timeoutMs = 30_000): Promise<TunnelRuntimeStatus> {
+export async function waitForTunnelReady(
+  config: AppConfig,
+  timeoutMs = TUNNEL_READY_TIMEOUT_MS,
+): Promise<TunnelRuntimeStatus> {
   const deadline = Date.now() + timeoutMs;
   let status = tunnelStatus(config);
   while (!status.ok && Date.now() < deadline) {
-    await new Promise(resolveWait => setTimeout(resolveWait, 250));
+    await new Promise(resolveWait => setTimeout(resolveWait, TUNNEL_STATUS_POLL_INTERVAL_MS));
     status = tunnelStatus(config);
   }
   return status;

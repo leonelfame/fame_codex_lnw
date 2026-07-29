@@ -16,6 +16,7 @@ import {
   runtimeCommandForProcess,
 } from "../src/config";
 import { removeLegacyRuntimeArtifacts } from "../src/service";
+import { processRunning } from "../src/process";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -62,6 +63,20 @@ test("Windows uses a stable native named pipe for the outer Codex tool broker", 
   expect(isWindowsPipeEndpoint(first)).toBe(true);
   expect(resolveBrokerEndpoint(first)).toBe(first);
   expect(defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux")).toEndWith(join("runtime", "turn-broker.sock"));
+});
+
+test("permission-denied process probes preserve ownership evidence", () => {
+  expect(processRunning(123, () => {
+    const error = new Error("access denied") as NodeJS.ErrnoException;
+    error.code = "EPERM";
+    throw error;
+  })).toBe(true);
+  expect(processRunning(123, () => {
+    const error = new Error("not found") as NodeJS.ErrnoException;
+    error.code = "ESRCH";
+    throw error;
+  })).toBe(false);
+  expect(processRunning(0)).toBe(false);
 });
 
 test("user-home expansion accepts native Unix and Windows separators", () => {

@@ -7,7 +7,13 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { packagedRuntimePaths } = require("../electron/runtime-command.cjs");
 const { linuxDesktopEntry, requireAutostartState } = require("../electron/autostart.cjs");
-const { RuntimeSupervisor, validateConfig } = require("../electron/runtime-supervisor.cjs");
+const {
+  MAX_RESTARTS_PER_WINDOW,
+  TUNNEL_HEALTH_POLL_INTERVAL_MS,
+  TUNNEL_START_TIMEOUT_MS,
+  RuntimeSupervisor,
+  validateConfig,
+} = require("../electron/runtime-supervisor.cjs");
 
 async function freePort() {
   return await new Promise((resolve, reject) => {
@@ -146,6 +152,66 @@ test("launcher runtime validation accepts native Windows paths and a named pipe"
     runtimeCommand: ["C:\\Users\\Example\\.codex-chatgpt-web\\runtime\\bun.exe"],
   };
   assert.equal(validateConfig(config, descriptorPath, "win32"), config);
+});
+
+test("launcher gives cold cross-platform tunnel startup a bounded two-minute budget", () => {
+  assert.equal(TUNNEL_START_TIMEOUT_MS, 120_000);
+  assert.equal(TUNNEL_HEALTH_POLL_INTERVAL_MS, 1_000);
+});
+
+test("tunnel control failures preserve stderr even when stdout is also present", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-control-output-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  try {
+    const result = await supervisor.runTunnelCommand({
+      tunnel: {
+        binaryPath: process.execPath,
+        profileDir: root,
+      },
+    }, [
+      "-e",
+      "process.stdout.write('machine-readable output'); process.stderr.write('root failure'); process.exit(9)",
+    ], 5_000, "Synthetic tunnel command");
+    assert.equal(result.code, 9);
+    assert.equal(result.stdout, "machine-readable output");
+    assert.equal(result.stderr, "root failure");
+    assert.equal(result.output, "root failure\nmachine-readable output");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("crash-loop diagnostics include the last redacted child failure", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-crash-loop-diagnostic-"));
+  const operations = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+    publishOperation: operation => operations.push(operation),
+  });
+  supervisor.restartHistory.tunnel = Array.from(
+    { length: MAX_RESTARTS_PER_WINDOW },
+    () => Date.now(),
+  );
+  supervisor.lastChildFailure.tunnel = "tunnel exited (1): invalid profile for [tunnel-id]";
+  try {
+    supervisor.scheduleRecovery("tunnel");
+    const failure = operations.at(-1);
+    assert.equal(failure.status, "failed");
+    assert.match(failure.message, /automatic restart is disabled/);
+    assert.match(failure.message, /last failure: tunnel exited \(1\): invalid profile for \[tunnel-id\]/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("launcher supervisor refuses shutdown while a Codex turn is active and compensates the drain", async () => {

@@ -6,6 +6,21 @@ export interface CommandResult {
   stderr: string;
 }
 
+export function processRunning(
+  pid: unknown,
+  probe: (pid: number, signal: 0) => void = process.kill,
+): boolean {
+  if (!Number.isInteger(pid) || (pid as number) < 1) return false;
+  try {
+    probe(pid as number, 0);
+    return true;
+  } catch (error) {
+    // Windows and hardened Unix environments can deny signalling an existing process. EPERM is
+    // existence evidence, not proof that the launcher/browser/tunnel owner disappeared.
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
 export function runCommand(command: string, args: string[], options: SpawnSyncOptions = {}): CommandResult {
   const result = spawnSync(command, args, {
     encoding: "utf8",

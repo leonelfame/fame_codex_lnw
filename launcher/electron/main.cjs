@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const {
   app,
@@ -613,6 +614,21 @@ async function start() {
     if (app.isPackaged && !smokeRuntimeRoot) {
       throw new Error("Packaged launcher smoke test could not install its durable runtime");
     }
+    const versionInvocation = runtimeSupervisor.runtimeCommand(["--version"]);
+    const versionResult = spawnSync(versionInvocation.executable, versionInvocation.args, {
+      cwd: versionInvocation.cwd,
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    if (versionResult.error) throw versionResult.error;
+    if (versionResult.status !== 0 || versionResult.stdout.trim() !== app.getVersion()) {
+      throw new Error(
+        `Installed launcher runtime is not executable`
+        + ` (status=${versionResult.status ?? "unknown"}, stdout=${JSON.stringify(versionResult.stdout.trim())},`
+        + ` stderr=${JSON.stringify(versionResult.stderr.trim())})`,
+      );
+    }
     const markerPath = process.env.CODEX_WEB_GPT_SMOKE_FILE?.trim();
     if (!markerPath || !path.isAbsolute(markerPath)) {
       throw new Error("Packaged launcher smoke test requires an absolute CODEX_WEB_GPT_SMOKE_FILE");
@@ -623,6 +639,7 @@ async function start() {
       version: app.getVersion(),
       platform: process.platform,
       packaged: app.isPackaged,
+      runtimeVerified: true,
     })}\n`);
     browserHost.destroy();
     await browserControl.close();

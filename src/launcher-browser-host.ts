@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
+import { processRunning } from "./process";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 
@@ -119,8 +120,9 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
     throw new Error(`Launcher browser descriptor is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
   const descriptor = assertDescriptorShape(decoded);
-  try { process.kill(descriptor.pid, 0); }
-  catch { throw new Error(`Launcher browser host process is not running (pid ${descriptor.pid})`); }
+  if (!processRunning(descriptor.pid)) {
+    throw new Error(`Launcher browser host process is not running (pid ${descriptor.pid})`);
+  }
   return descriptor;
 }
 

@@ -9,6 +9,7 @@ interface PendingTurn {
   resolve: (value: string) => void;
   reject: (error: Error) => void;
   abortListener?: () => void;
+  sent?: boolean;
 }
 
 type HelperMessage =
@@ -93,17 +94,33 @@ export class LauncherBrowserHelperClient {
           return;
         }
         const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult };
+        this.pending.set(turn.traceId, pending);
         if (turn.abortSignal) {
-          const abortListener = () => void this.send({ type: "abort", id: turn.traceId }).catch(error => {
-            this.finishWithError(
-              turn.traceId,
-              error instanceof Error ? error : new Error(String(error)),
-            );
-          });
+          const abortListener = () => {
+            if (!pending.sent) {
+              this.finishWithError(
+                turn.traceId,
+                new DOMException("ChatGPT web turn aborted", "AbortError"),
+              );
+              return;
+            }
+            void this.send({ type: "abort", id: turn.traceId }).catch(error => {
+              this.finishWithError(
+                turn.traceId,
+                error instanceof Error ? error : new Error(String(error)),
+              );
+            });
+          };
           pending.abortListener = abortListener;
           turn.abortSignal.addEventListener("abort", abortListener, { once: true });
+          if (turn.abortSignal.aborted) {
+            abortListener();
+            return;
+          }
         }
-        this.pending.set(turn.traceId, pending);
+        // Setting this before the synchronous write call makes an abort either prevent dispatch or
+        // queue an `abort` after the `run` frame; it can never overtake the run frame in the pipe.
+        pending.sent = true;
         void this.send({
           type: "run",
           id: turn.traceId,

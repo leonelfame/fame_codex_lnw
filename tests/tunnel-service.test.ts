@@ -3,11 +3,47 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
-import { createTunnelConfig, mcpCommand } from "../src/tunnel";
+import { TUNNEL_READY_TIMEOUT_MS, createTunnelConfig, mcpCommand } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
 import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
 const roots: string[] = [];
+
+// Mirrors the pinned tunnel-client's config parser: backslash escapes the next rune and quotes
+// group an argument. This catches Windows command strings that look right but reconstruct the
+// wrong executable, script path, or named pipe in the actual tunnel worker.
+function parsePinnedTunnelCommand(command: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quoted = false;
+  let escaped = false;
+  let started = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      started = true;
+    } else if (character === "\\") {
+      escaped = true;
+      started = true;
+    } else if (character === '"') {
+      quoted = !quoted;
+      started = true;
+    } else if (/\s/.test(character) && !quoted) {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+    } else {
+      current += character;
+      started = true;
+    }
+  }
+  if (escaped || quoted) throw new Error("invalid tunnel command");
+  if (started) args.push(current);
+  return args;
+}
 
 afterEach(() => {
   delete process.env.CODEX_CHATGPT_WEB_HOME;
@@ -101,5 +137,16 @@ describe("tunnel launchd ownership", () => {
     );
     expect(command).not.toContain("cmd.exe");
     expect(existsSync(join(root, "bin", "mcp-launcher.cmd"))).toBe(false);
+    expect(parsePinnedTunnelCommand(command)).toEqual([
+      runtime,
+      join(root, "Program Files", "app", "cli.js"),
+      "mcp",
+      "--broker-socket",
+      "\\\\.\\pipe\\codex-chatgpt-web-test",
+    ]);
+  });
+
+  test("uses a realistic bounded tunnel cold-start budget", () => {
+    expect(TUNNEL_READY_TIMEOUT_MS).toBe(120_000);
   });
 });

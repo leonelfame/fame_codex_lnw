@@ -41,21 +41,54 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     versionsRoot,
     `${identity.version}-${identity.platform}-${identity.arch}`,
   );
-  if (fs.existsSync(destination)) return validateRuntimeBundle(destination, identity);
+  if (fs.existsSync(destination)) {
+    try {
+      return validateRuntimeBundle(destination, identity);
+    } catch {
+      // A terminated installer or external cleanup can leave a version directory present but
+      // incomplete. Rebuild the launcher-owned bundle transactionally from the signed package.
+    }
+  }
 
   fs.mkdirSync(versionsRoot, { recursive: true, mode: 0o700 });
   const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
+  const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
+  let previousMoved = false;
   try {
     fs.cpSync(source, temporary, { recursive: true, errorOnExist: true, force: false });
     validateRuntimeBundle(temporary, identity);
+    if (fs.existsSync(destination)) {
+      renameAtomicFile(destination, previous);
+      previousMoved = true;
+    }
     try {
       renameAtomicFile(temporary, destination);
-    } catch (error) {
-      if (!fs.existsSync(destination)) throw error;
       validateRuntimeBundle(destination, identity);
+    } catch (error) {
+      fs.rmSync(destination, { recursive: true, force: true });
+      if (previousMoved) {
+        try {
+          renameAtomicFile(previous, destination);
+          previousMoved = false;
+        } catch (restoreError) {
+          throw new Error(
+            `Runtime replacement failed: ${error instanceof Error ? error.message : String(error)}`
+            + `; previous runtime restoration failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+          );
+        }
+      }
+      throw error;
+    }
+    if (previousMoved) {
+      fs.rmSync(previous, { recursive: true, force: true });
+      previousMoved = false;
     }
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
+    if (previousMoved && fs.existsSync(previous) && !fs.existsSync(destination)) {
+      renameAtomicFile(previous, destination);
+      previousMoved = false;
+    }
   }
   try { fs.chmodSync(destination, 0o700); } catch {}
   return validateRuntimeBundle(destination, identity);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTunnelStatus, tunnelConnectLaunchError } from "../src/tunnel";
+import { parseTunnelStatus, tunnelCommandOutput, tunnelConnectLaunchError } from "../src/tunnel";
 
 describe("tunnel status boundary", () => {
   test("requires the managed runtime process, health, and readiness together", () => {
@@ -81,5 +81,18 @@ describe("tunnel status boundary", () => {
 
     expect(result.detail).toContain("runtime_log=runtime startup failed with [redacted-key]");
     expect(result.detail).not.toContain("sk-secret");
+  });
+
+  test("status diagnostics do not discard stderr when a failed command also wrote stdout", () => {
+    expect(tunnelCommandOutput({
+      status: 1,
+      stdout: '{"partial":true}',
+      stderr: "runtime process exited with status 1",
+    })).toBe('runtime process exited with status 1\n{"partial":true}');
+    expect(tunnelCommandOutput({
+      status: 0,
+      stdout: '{"ready":true}',
+      stderr: "non-fatal warning",
+    })).toBe('{"ready":true}');
   });
 });

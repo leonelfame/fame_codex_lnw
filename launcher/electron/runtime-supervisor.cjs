@@ -3,6 +3,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
   processRunning,
@@ -16,6 +17,8 @@ const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
 const DRAIN_IDLE_TIMEOUT_MS = 15_000;
 const DRAIN_POLL_INTERVAL_MS = 100;
+const TUNNEL_START_TIMEOUT_MS = 120_000;
+const TUNNEL_HEALTH_POLL_INTERVAL_MS = 1_000;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -176,6 +179,7 @@ class RuntimeSupervisor {
     this.expectedExits = new WeakSet();
     this.restartableChildren = new WeakSet();
     this.lastChildFailure = { daemon: null, tunnel: null };
+    this.lastChildOutput = { daemon: null, tunnel: null };
   }
 
   readConfig() {
@@ -297,8 +301,15 @@ class RuntimeSupervisor {
     });
     this[name] = child;
     this.lastChildFailure[name] = null;
-    collectLines(child.stdout, (line) => this.logger.info(`runtime.${name}_stdout`, { line }));
-    collectLines(child.stderr, (line) => this.logger.warn(`runtime.${name}_stderr`, { line }));
+    this.lastChildOutput[name] = null;
+    collectLines(child.stdout, (line) => {
+      this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
+      this.logger.info(`runtime.${name}_stdout`, { line });
+    });
+    collectLines(child.stderr, (line) => {
+      this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
+      this.logger.warn(`runtime.${name}_stderr`, { line });
+    });
     let terminalHandled = false;
     const handleTerminal = ({ code = null, signal = null, error = null }) => {
       if (terminalHandled) return;
@@ -310,7 +321,8 @@ class RuntimeSupervisor {
       if (this[name] === child) this[name] = null;
       const detail = error
         ? `${name} failed to start: ${error.message}`
-        : `${name} exited (${signal || code})`;
+        : `${name} exited (${signal || code})`
+          + (this.lastChildOutput[name] ? `: ${this.lastChildOutput[name]}` : "");
       this.lastChildFailure[name] = detail;
       const statePersisted = this.tryWriteState(expected ? "stopping" : "degraded", detail);
       this.logger[expected ? "info" : "error"](
@@ -414,14 +426,14 @@ class RuntimeSupervisor {
     }
   }
 
-  async waitForTunnel(config, timeoutMs = 30_000) {
+  async waitForTunnel(config, timeoutMs = TUNNEL_START_TIMEOUT_MS) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!this.tunnel) {
         throw new Error(this.lastChildFailure.tunnel || "Tunnel runtime exited before becoming ready");
       }
       if (await this.tunnelHealth(config)) return;
-      await sleep(250);
+      await sleep(TUNNEL_HEALTH_POLL_INTERVAL_MS);
     }
     throw new Error(`Tunnel runtime did not become healthy and ready within ${timeoutMs}ms`);
   }
@@ -612,7 +624,9 @@ class RuntimeSupervisor {
     if (this.restartTimers[name]) return;
     const attempts = this.recordRestart(name);
     if (attempts > MAX_RESTARTS_PER_WINDOW) {
-      const message = `${name} stopped more than ${MAX_RESTARTS_PER_WINDOW} times in 60 seconds; automatic restart is disabled`;
+      const cause = this.lastChildFailure[name];
+      const message = `${name} stopped more than ${MAX_RESTARTS_PER_WINDOW} times in 60 seconds; automatic restart is disabled`
+        + (cause ? `; last failure: ${cause}` : "");
       this.tryWriteState("failed", message);
       this.publishOperation?.({ name: "runtime-recovery", status: "failed", message });
       return;
@@ -923,9 +937,16 @@ class RuntimeSupervisor {
           }
           return;
         }
+        const exitCode = code ?? 1;
+        const stdoutText = Buffer.concat(stdout).toString("utf8").trim();
+        const stderrText = Buffer.concat(stderr).toString("utf8").trim();
         resolve({
-          code: code ?? 1,
-          output: Buffer.concat(stdout.length ? stdout : stderr).toString("utf8").trim(),
+          code: exitCode,
+          stdout: stdoutText,
+          stderr: stderrText,
+          output: exitCode === 0
+            ? (stdoutText || stderrText)
+            : [stderrText, stdoutText].filter(Boolean).join("\n"),
         });
       });
     });
@@ -1189,6 +1210,8 @@ class RuntimeSupervisor {
 module.exports = {
   MAX_RESTARTS_PER_WINDOW,
   RESTART_WINDOW_MS,
+  TUNNEL_HEALTH_POLL_INTERVAL_MS,
+  TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
   validateConfig,
 };

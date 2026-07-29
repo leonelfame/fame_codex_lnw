@@ -76,3 +76,52 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
     await client.close();
   }
 });
+
+test("an abort dispatched during run submission cannot overtake the run frame", async () => {
+  const controller = new AbortController();
+  const messages: string[] = [];
+  let released = false;
+  const client = new LauncherBrowserHelperClient({
+    appName: "Codex Native",
+    browserHost: "launcher",
+    browserHostDescriptorPath: "/durable/launcher.json",
+    storageStatePath: "/durable/unused-state.json",
+    chromeExecutablePath: "/durable/unused-chrome",
+    turnTimeoutMs: 60_000,
+    headed: true,
+    autoApproveToolCalls: false,
+  });
+  const internal = client as unknown as {
+    ensureChild(): Promise<void>;
+    send(message: { type: string; id?: string }): Promise<void>;
+    finishWithError(id: string, error: Error): void;
+  };
+  internal.ensureChild = async () => {};
+  internal.send = async message => {
+    messages.push(message.type);
+    if (message.type === "run") controller.abort();
+    if (message.type === "abort" && message.id) {
+      queueMicrotask(() => internal.finishWithError(
+        message.id!,
+        new DOMException("ChatGPT web turn aborted", "AbortError"),
+      ));
+    }
+  };
+
+  await expect(client.run({
+    traceId: "abort-order-123",
+    modelId: "gpt-5.6-sol",
+    reasoning: "high",
+    capabilities: { localToolsEnabled: false, proAvailable: false },
+    abortSignal: controller.signal,
+    prepare: async () => ({
+      text: "inspect",
+      images: [],
+      release: () => { released = true; },
+    }),
+    onTextDelta: () => {},
+  })).rejects.toMatchObject({ name: "AbortError" });
+
+  expect(messages).toEqual(["run", "abort"]);
+  expect(released).toBe(true);
+});

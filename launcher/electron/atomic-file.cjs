@@ -3,21 +3,31 @@ const path = require("node:path");
 
 let sequence = 0;
 const waitCell = new Int32Array(new SharedArrayBuffer(4));
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 150, 250, 350, 500];
 
 function waitSync(milliseconds) {
   Atomics.wait(waitCell, 0, 0, milliseconds);
 }
 
-function renameAtomicFile(source, destination) {
+function renameAtomicFile(
+  source,
+  destination,
+  {
+    platform = process.platform,
+    rename = fs.renameSync,
+    wait = waitSync,
+  } = {},
+) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      fs.renameSync(source, destination);
+      rename(source, destination);
       return;
     } catch (error) {
-      const transientWindowsError = process.platform === "win32"
+      const transientWindowsError = platform === "win32"
         && ["EBUSY", "EPERM", "EACCES"].includes(error?.code);
-      if (!transientWindowsError || attempt >= 2) throw error;
-      waitSync(25 * (attempt + 1));
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      if (!transientWindowsError || delay === undefined) throw error;
+      wait(delay);
     }
   }
 }
@@ -36,4 +46,8 @@ function writePrivateFileAtomic(filePath, content) {
   }
 }
 
-module.exports = { renameAtomicFile, writePrivateFileAtomic };
+module.exports = {
+  WINDOWS_RENAME_RETRY_DELAYS_MS,
+  renameAtomicFile,
+  writePrivateFileAtomic,
+};

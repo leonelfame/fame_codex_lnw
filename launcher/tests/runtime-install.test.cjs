@@ -65,3 +65,26 @@ test("packaged runtime installation rejects a platform or version mismatch", () 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("packaged runtime transactionally repairs an incomplete installed bundle", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-repair-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    const entrypoint = path.join(installed, "app", "cli.js");
+    fs.rmSync(entrypoint);
+    fs.writeFileSync(path.join(installed, "corrupt.partial"), "interrupted copy");
+
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.readFileSync(entrypoint, "utf8"), "cli");
+    assert.equal(fs.existsSync(path.join(installed, "corrupt.partial")), false);
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(installed)).filter(name => name.includes(".previous-") || name.includes(".tmp-")),
+      [],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

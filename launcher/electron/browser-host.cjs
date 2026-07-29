@@ -566,14 +566,8 @@ class BrowserHost {
     if (!focused) throw new Error("ChatGPT composer was not available for the smoke test");
     this.view.webContents.focus();
     this.view.webContents.insertText(SMOKE_TEXT);
-    await sleep(250);
-    const sent = await this.view.webContents.executeJavaScript(`(() => {
-      const button = ${visibleElementScript('[data-testid="send-button"]')};
-      if (!button || button.disabled) return false;
-      button.click();
-      return true;
-    })()`, true);
-    if (!sent) throw new Error("ChatGPT send button did not become available for the smoke test");
+    const send = await this.waitForSmokeSendButton();
+    await this.clickBrowserPoint(send.point);
 
     const deadline = Date.now() + 240_000;
     while (Date.now() < deadline) {
@@ -631,6 +625,36 @@ class BrowserHost {
     const contents = this.view.webContents;
     contents.sendInputEvent({ type: "keyDown", keyCode });
     contents.sendInputEvent({ type: "keyUp", keyCode });
+  }
+
+  async readSmokeSendButton() {
+    return await this.evaluateBrowserPage(`(() => {
+      /* smoke-send-button-read */
+      const button = ${visibleElementScript('[data-testid="send-button"]')};
+      if (!button) return { ready: false, reason: 'missing' };
+      if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
+        return { ready: false, reason: 'disabled' };
+      }
+      const rect = button.getBoundingClientRect();
+      return {
+        ready: true,
+        point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+      };
+    })()`);
+  }
+
+  async waitForSmokeSendButton(timeoutMs = 10_000, pollMs = 100) {
+    const deadline = Date.now() + timeoutMs;
+    let state;
+    do {
+      state = await this.readSmokeSendButton();
+      if (state.ready) return state;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT send button did not become available for the smoke test`
+      + ` (state=${state?.reason || "unknown"})`,
+    );
   }
 
   async readEffortControl() {

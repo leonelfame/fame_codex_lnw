@@ -8,6 +8,7 @@ import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
 import { getTunnelServiceStatus } from "./tunnel-service";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
+import { processRunning } from "./process";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -47,9 +48,7 @@ function launcherOwnershipError(config: AppConfig, health: Record<string, unknow
     || state.status !== "ready") {
     return "Launcher runtime ownership marker is incomplete or not ready";
   }
-  try {
-    process.kill(state.ownerPid as number, 0);
-  } catch {
+  if (!processRunning(state.ownerPid)) {
     return `Launcher owner process is not running (pid ${String(state.ownerPid)})`;
   }
   if (health.pid !== state.daemonPid) {

@@ -30,6 +30,49 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
   expect(sessions.activeCount()).toBe(0);
 });
 
+test("session cache expiry never cancels a still-active long browser turn", async () => {
+  const sessions = new ChatGptTurnSessions(1);
+  let cancelled = 0;
+  const active = sessions.getOrCreate("long-turn", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled += 1; },
+  }));
+
+  await Bun.sleep(5);
+  expect(sessions.activeCount()).toBe(1);
+  expect(sessions.getOrCreate("long-turn", () => {
+    throw new Error("active session must be reused");
+  })).toBe(active);
+  expect(cancelled).toBe(0);
+  sessions.clear();
+});
+
+test("settled replay sessions expire from their last use instead of their creation time", async () => {
+  const sessions = new ChatGptTurnSessions(50);
+  let starts = 0;
+  const start = () => {
+    starts += 1;
+    return {
+      mode: "read-only" as const,
+      browser: Promise.resolve("done"),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => {},
+    };
+  };
+  const first = sessions.getOrCreate("replay", start);
+  await first.browserOutcome;
+  await Bun.sleep(10);
+  expect(sessions.getOrCreate("replay", start)).toBe(first);
+  await Bun.sleep(70);
+  expect(sessions.getOrCreate("replay", start)).not.toBe(first);
+  expect(starts).toBe(2);
+  sessions.clear();
+});
+
 test("turn broker creates its private runtime directory on a cold start", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
   const socketPath = defaultBrokerEndpoint(root);

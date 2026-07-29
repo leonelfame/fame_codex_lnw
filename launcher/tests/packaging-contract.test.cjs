@@ -56,3 +56,11 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /bun run app:smoke/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
 });
+
+test("packaged smoke executes the relocated runtime instead of only checking copied files", () => {
+  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+  const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
+  assert.match(main, /runtimeCommand\(\["--version"\]\)/);
+  assert.match(main, /runtimeVerified:\s*true/);
+  assert.match(smoke, /marker\.runtimeVerified\s*!==\s*true/);
+});
