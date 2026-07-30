@@ -329,6 +329,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:snapshot", async () => ({
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
+    mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
@@ -470,6 +471,7 @@ function registerIpc({ logger, stateStore }) {
     const result = await runtimeHost.setupMcp({
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
+      replace: input?.replace === true,
     });
     stateStore.update({ mcpRuntimeInstalled: true, mcpGuideStep: 2, codexRestartRequired: true });
     return { ok: true, stdout: result.stdout };

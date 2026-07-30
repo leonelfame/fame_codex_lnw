@@ -1234,6 +1234,34 @@ code {
   font-size: var(--text-sm);
 }
 
+.saved-credentials {
+  margin: 18px 0 0 42px;
+}
+
+.saved-credentials .notice-row {
+  margin-top: 0;
+}
+
+.saved-credentials .notice-row span {
+  display: grid;
+  gap: 2px;
+}
+
+.saved-credentials .notice-row strong {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.saved-credentials .notice-row small {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.saved-credentials > .text-button,
+.keep-credentials {
+  margin-top: 9px;
+}
+
 .field-row input::placeholder {
   color: var(--color-text-disabled);
 }

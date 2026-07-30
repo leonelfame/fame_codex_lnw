@@ -203,6 +203,18 @@ class RuntimeHost {
     };
   }
 
+  mcpCredentialsConfigured() {
+    const config = this.runtimeConfigSnapshot().config;
+    const tunnel = config?.mode === "full" ? config.tunnel : null;
+    return Boolean(
+      tunnel
+      && /^tunnel_[a-f0-9]{32}$/.test(tunnel.tunnelId)
+      && typeof tunnel.runtimeKeyFile === "string"
+      && path.isAbsolute(tunnel.runtimeKeyFile)
+      && fs.existsSync(tunnel.runtimeKeyFile),
+    );
+  }
+
   captureSetupCheckpoint(snapshot) {
     if (typeof this.supervisor.configPath !== "string" || !path.isAbsolute(this.supervisor.configPath)) {
       throw new Error("Launcher runtime supervisor has no absolute configuration path for setup rollback");
@@ -546,27 +558,43 @@ class RuntimeHost {
     return { ...result, mode };
   }
 
-  setupMcp({ tunnelId, runtimeKey }) {
+  setupMcp({ tunnelId = "", runtimeKey = "", replace = false } = {}) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
-    if (!/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) throw new Error("Tunnel ID must be tunnel_ followed by 32 lowercase hexadecimal characters");
-    if (typeof runtimeKey !== "string" || runtimeKey.trim().length < 20) throw new Error("A Tunnels Read + Use runtime key is required");
+    const reuseSavedCredentials = replace !== true && this.mcpCredentialsConfigured();
+    if (!reuseSavedCredentials && !/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) {
+      throw new Error("Tunnel ID must be tunnel_ followed by 32 lowercase hexadecimal characters");
+    }
+    if (!reuseSavedCredentials && (typeof runtimeKey !== "string" || runtimeKey.trim().length < 20)) {
+      throw new Error("A Tunnels Read + Use runtime key is required");
+    }
+    const args = [
+      "setup",
+      "--full",
+      "--browser-host-descriptor",
+      this.browserDescriptorPath,
+    ];
+    if (reuseSavedCredentials) {
+      args.push("--acknowledge-unofficial", "--restart-service");
+      return this.runSetup("mcp-setup", args, {
+        message: "Reconnecting the native Codex harness with saved tunnel credentials",
+        successMessage: "Local MCP tools are ready",
+        timeoutMs: MCP_SETUP_TIMEOUT_MS,
+      });
+    }
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
     fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(secretsDir, 0o700); } catch {}
     const keyPath = path.join(secretsDir, `runtime-key-${randomBytes(16).toString("hex")}.tmp`);
     fs.writeFileSync(keyPath, runtimeKey.trim(), { flag: "wx", mode: 0o600 });
-    return this.runSetup("mcp-setup", [
-      "setup",
-      "--full",
-      "--browser-host-descriptor",
-      this.browserDescriptorPath,
+    args.push(
       "--tunnel-id",
       tunnelId,
       "--runtime-key-file",
       keyPath,
       "--acknowledge-unofficial",
       "--restart-service",
-    ], {
+    );
+    return this.runSetup("mcp-setup", args, {
       message: "Connecting the native Codex harness",
       successMessage: "Local MCP tools are ready",
       timeoutMs: MCP_SETUP_TIMEOUT_MS,

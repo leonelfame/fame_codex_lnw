@@ -63,6 +63,7 @@ export interface OperationState {
 export interface LauncherSnapshot {
   state: LauncherState;
   browser: BrowserState | null;
+  mcpCredentialsConfigured: boolean;
   logs: LogRecord[];
   urls: {
     github: string;
@@ -96,7 +97,11 @@ export interface LauncherApi {
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
-  setupMcp(input: { tunnelId: string; runtimeKey: string }): Promise<{ ok: boolean; stdout: string }>;
+  setupMcp(input: {
+    tunnelId?: string;
+    runtimeKey?: string;
+    replace?: boolean;
+  }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setPreference(key: "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;

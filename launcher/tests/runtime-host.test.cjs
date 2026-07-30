@@ -38,6 +38,48 @@ test("core setup starts in browser-only mode when no installation exists", async
   assert.deepEqual(fixture.invocation().args.slice(0, 2), ["setup", "--browser-only"]);
 });
 
+test("MCP setup reuses valid private credentials without exposing or rewriting them", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-saved-mcp-"));
+  const keyPath = path.join(root, "tunnel-runtime.key");
+  fs.writeFileSync(keyPath, "saved-private-runtime-key\n", { mode: 0o600 });
+  const fixture = hostFor({
+    mode: "full",
+    tunnel: {
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: keyPath,
+    },
+  });
+  try {
+    assert.equal(fixture.host.mcpCredentialsConfigured(), true);
+    await fixture.host.setupMcp({ replace: false });
+    assert.deepEqual(fixture.invocation().args, [
+      "setup",
+      "--full",
+      "--browser-host-descriptor",
+      "/runtime/launcher-browser.json",
+      "--acknowledge-unofficial",
+      "--restart-service",
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP credential replacement remains explicit and requires a complete new pair", async () => {
+  const fixture = hostFor(null);
+  await assert.rejects(
+    Promise.resolve().then(() => fixture.host.setupMcp({ replace: true })),
+    /Tunnel ID must be/,
+  );
+  await assert.rejects(
+    Promise.resolve().then(() => fixture.host.setupMcp({
+      replace: true,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    })),
+    /runtime key is required/,
+  );
+});
+
 test("mutating launcher operations are serialized before lifecycle changes begin", async () => {
   const fixture = hostFor(null);
   fixture.host.lifecycleOperation = "mcp-setup";

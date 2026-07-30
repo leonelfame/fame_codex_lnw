@@ -62,6 +62,10 @@ export interface ExistingFullSetupCredentials {
   runtimeKey: boolean;
 }
 
+export function launcherCapabilityProbeRequired(existing: AppConfig | undefined): boolean {
+  return !(existing?.browserHost === "launcher" && typeof existing.proAvailable === "boolean");
+}
+
 export function existingFullSetupCredentials(existing: AppConfig | undefined): ExistingFullSetupCredentials {
   const tunnel = existing?.mode === "full" ? existing.tunnel : undefined;
   return {
@@ -281,8 +285,11 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   let proAvailable: boolean | undefined;
   if (config.browserHost === "launcher") {
     if (options.forceLogin) throw new Error("Launcher browser login is owned by the launcher UI; --login cannot replace it");
-    const inspected = await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, { detectPro: true });
-    proAvailable = inspected.proAvailable;
+    const detectPro = launcherCapabilityProbeRequired(existing);
+    const inspected = await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, {
+      detectPro,
+    });
+    proAvailable = detectPro ? inspected.proAvailable : existing!.proAvailable;
   } else {
     proAvailable = storedBrowserLoginCapabilities(config).proAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);

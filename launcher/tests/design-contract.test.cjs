@@ -135,6 +135,14 @@ test("MCP wizard remains locked while a local or supervisor operation is active"
   assert.doesNotMatch(appSource, /connectorOpened/);
 });
 
+test("MCP wizard reuses saved credentials and exposes replacement explicitly", () => {
+  assert.match(electronMain, /mcpCredentialsConfigured:\s*runtimeHost\?\.mcpCredentialsConfigured\(\)\s*\?\?\s*false/);
+  assert.match(appSource, /credentialsConfigured && !replacingCredentials/);
+  assert.match(appSource, /\{ replace: false \}/);
+  assert.match(appSource, /\{ tunnelId, runtimeKey, replace: true \}/);
+  assert.match(i18nSource, /replaceCredentials: "Replace credentials"/);
+});
+
 test("MCP verification has one primary action and exposes live progress", () => {
   assert.doesNotMatch(
     appSource,
