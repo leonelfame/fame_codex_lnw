@@ -434,6 +434,7 @@ class BrowserHost {
     this.activeTraceId = traceId;
     this.activeHelperPid = helperPid;
     this.view.webContents.setBackgroundThrottling(false);
+    this.view.webContents.focus();
     if (reveal) this.show();
     this.setState({ status: "running", message: "ChatGPT is working", authenticated: true });
   }

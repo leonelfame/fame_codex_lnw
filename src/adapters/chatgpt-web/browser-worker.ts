@@ -529,7 +529,7 @@ export class ChatGptBrowserWorker {
       const clone = element.cloneNode(true) as HTMLElement;
       clone.querySelectorAll("[data-inline-selection-pill], [data-inline-selection-pill-cursor-target]")
         .forEach(part => part.remove());
-      return [...clone.children]
+      return [...clone.childNodes]
         .map(child => child.textContent ?? "")
         .join("\n")
         .trimStart();
@@ -559,17 +559,28 @@ export class ChatGptBrowserWorker {
 
   private async connectorIsSelected(composer: Locator): Promise<boolean> {
     const selected = this.selectedConnectorControl(composer);
-    const count = await selected.count();
-    if (count === 0) return false;
-    if (count !== 1) {
-      throw new Error(`ChatGPT composer exposed an ambiguous ${JSON.stringify(this.config.appName)} connector control`);
-    }
-    return true;
+    return await selected.count() > 0;
+  }
+
+  private async focusComposerAtEnd(composer: Locator): Promise<void> {
+    await composer.evaluate(element => {
+      const editable = element as HTMLElement;
+      editable.focus({ preventScroll: true });
+      if (document.activeElement !== editable && !editable.contains(document.activeElement)) {
+        throw new Error("ChatGPT composer did not accept focus");
+      }
+      const selection = document.getSelection();
+      if (!selection) throw new Error("ChatGPT composer selection is unavailable");
+      const range = document.createRange();
+      range.selectNodeContents(editable);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
   }
 
   private async selectConnector(page: Page): Promise<Locator> {
     let composer = await this.activeComposer(page);
-    await composer.fill("");
     if (await this.connectorIsSelected(composer)) return composer;
 
     const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
@@ -626,14 +637,13 @@ export class ChatGptBrowserWorker {
       // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
       // then transport the complete text in one CDP Input.insertText command.
       await composer.fill("");
-      await composer.focus();
+      await this.focusComposerAtEnd(composer);
       await page.keyboard.insertText(prompt);
       await this.assertPromptAttached(page, prompt);
       return;
     }
     const selectedComposer = await this.selectConnector(page);
-    await selectedComposer.focus();
-    await page.keyboard.press("End");
+    await this.focusComposerAtEnd(selectedComposer);
     await page.keyboard.insertText(` ${prompt}`);
     await this.assertPromptAttached(page, prompt);
   }
