@@ -24,6 +24,11 @@ import type {
 const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
+const MCP_GUIDE_MEDIA = [
+  new URL("./assets/mcp-create-tunnel.gif", import.meta.url).href,
+  new URL("./assets/mcp-connect-connector.gif", import.meta.url).href,
+  new URL("./assets/mcp-connect-connector.gif", import.meta.url).href,
+] as const;
 
 export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
@@ -755,7 +760,7 @@ function SetupSurface({
       </div>
 
       {snapshot.state.codexRestartRequired ? (
-        <NoticeRow icon="spark" tone="warning">
+        <NoticeRow icon="alert" tone="warning">
           {copy.restartCodex}
         </NoticeRow>
       ) : null}
@@ -874,10 +879,8 @@ function McpSurface({
       </div>
 
       <div className="mcp-stage">
-        <div className="guide-media" aria-label={copy.guideVideo}>
-          <Icon name="play" />
-          <span>{copy.guideVideo}</span>
-          <small>{copy.videoComing}</small>
+        <div className="guide-media">
+          <img alt={`${copy.guideVideo}: ${steps[step]!.title}`} src={MCP_GUIDE_MEDIA[step]} />
         </div>
 
         <AnimatePresence mode="wait" initial={false}>

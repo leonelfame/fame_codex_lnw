@@ -1130,36 +1130,21 @@ code {
 }
 
 .guide-media {
-  display: flex;
   width: 100%;
   height: clamp(190px, 34vh, 320px);
   min-height: 0;
   flex: none;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
+  overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: rgb(13 13 13 / 68%);
-  color: var(--color-text-secondary);
 }
 
-.guide-media svg {
-  width: 19px;
-  height: 19px;
-  margin-bottom: 3px;
-  color: var(--color-icon-tertiary);
-}
-
-.guide-media span {
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.guide-media small {
-  color: var(--color-text-tertiary);
-  font-size: var(--text-xs);
+.guide-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .mcp-stage {
@@ -1754,8 +1739,8 @@ code {
 }
 
 .welcome-option.is-active > span:first-child {
-  border-color: var(--color-border-focus);
-  color: var(--color-text-accent);
+  border-color: var(--green-300);
+  color: var(--color-text-success);
 }
 
 .welcome-option strong {
@@ -1789,7 +1774,7 @@ code {
 }
 
 .welcome-option.is-social.is-complete > svg {
-  color: var(--color-icon-secondary);
+  color: var(--color-text-success);
 }
 
 .welcome-footer {

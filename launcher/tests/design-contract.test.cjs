@@ -7,6 +7,7 @@ const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
 const styles = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 
 test("launcher uses native macOS chrome and controlled window translucency", () => {
   assert.match(electronMain, /backgroundColor:\s*isMac\s*\?\s*"#00000000"\s*:\s*"#181818"/);
@@ -63,7 +64,8 @@ test("launcher keeps browser chrome flush and MCP instructions below the video",
   assert.match(styles, /\.workspace\s*\{[^}]*padding-top:\s*0/s);
   assert.match(styles, /\.content-surface\s*\{[^}]*padding-top:\s*var\(--height-titlebar\)/s);
   assert.match(styles, /\.mcp-stage\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s);
-  assert.match(styles, /\.guide-media\s*\{[^}]*height:\s*clamp\(190px,\s*34vh,\s*320px\)/s);
+  assert.match(styles, /\.guide-media\s*\{[^}]*height:\s*clamp\(190px,\s*34vh,\s*320px\)[^}]*overflow:\s*hidden/s);
+  assert.match(styles, /\.guide-media img\s*\{[^}]*object-fit:\s*contain/s);
   assert.doesNotMatch(styles, /\.wizard-stepper\s*\{[^}]*border-(?:top|bottom)/s);
   assert.match(appSource, /M22\.2819 9\.8211/);
   assert.match(appSource, /sidebar-brand-identity/);
@@ -97,6 +99,28 @@ test("completed social actions preserve their service icon without the blue acti
   assert.match(appSource, /<span><Icon name=\{icon\} \/><\/span>/);
   assert.doesNotMatch(appSource, /complete \? "check" : icon/);
   assert.match(styles, /\.welcome-option\.is-social\.is-complete > span:first-child\s*\{[^}]*color:\s*var\(--color-icon-secondary\)/s);
+  assert.match(styles, /\.welcome-option\.is-social\.is-complete > svg\s*\{[^}]*color:\s*var\(--color-text-success\)/s);
+  assert.match(styles, /\.welcome-option\.is-active > span:first-child\s*\{[^}]*color:\s*var\(--color-text-success\)/s);
+});
+
+test("MCP guide uses the two optimized recordings in the requested step order", () => {
+  assert.match(
+    appSource,
+    /MCP_GUIDE_MEDIA = \[\s*new URL\("\.\/assets\/mcp-create-tunnel\.gif"[\s\S]*?new URL\("\.\/assets\/mcp-connect-connector\.gif"[\s\S]*?new URL\("\.\/assets\/mcp-connect-connector\.gif"/,
+  );
+  for (const file of ["mcp-create-tunnel.gif", "mcp-connect-connector.gif"]) {
+    const asset = fs.readFileSync(path.join(launcherRoot, "src", "assets", file));
+    assert.equal(asset.subarray(0, 6).toString("ascii"), "GIF89a");
+    assert.ok(asset.length < 5 * 1024 * 1024, `${file} is unexpectedly large`);
+  }
+});
+
+test("MCP copy includes every required account, key, and connector instruction", () => {
+  assert.match(i18nSource, /regular API key with Tunnels Read \+ Use \(free;/);
+  assert.match(i18nSource, /same OpenAI account that will use the ChatGPT plugin/);
+  assert.match(i18nSource, /enable Developer Mode[\s\S]*?choose Tunnel[\s\S]*?set Authentication to None/);
+  assert.match(appSource, /<NoticeRow icon="alert" tone="warning">/);
+  assert.doesNotMatch(appSource, /icon="spark"/);
 });
 
 test("MCP wizard remains locked while a local or supervisor operation is active", () => {

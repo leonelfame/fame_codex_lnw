@@ -2,6 +2,7 @@ import type { SVGProps } from "react";
 
 export type IconName =
   | "activity"
+  | "alert"
   | "back"
   | "browser"
   | "check"
@@ -14,12 +15,10 @@ export type IconName =
   | "logs"
   | "mcp"
   | "minus"
-  | "play"
   | "reload"
   | "settings"
   | "setup"
   | "sidebar"
-  | "spark"
   | "x"
   | "zoom";
 
@@ -28,6 +27,7 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" {...props}>
       {name === "activity" ? <><path {...common} d="M3 12h4l2.2-6 4.1 12 2.3-6H21" /></> : null}
+      {name === "alert" ? <><path {...common} d="M10.3 4.2 2.8 17.1A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.9L13.7 4.2a2 2 0 0 0-3.4 0Z" /><path {...common} d="M12 9v4M12 16.5h.01" /></> : null}
       {name === "back" ? <path {...common} d="m14.5 6-6 6 6 6" /> : null}
       {name === "browser" ? <><rect {...common} x="3" y="4" width="18" height="16" rx="3" /><path {...common} d="M3 9h18M7 6.5h.01M10 6.5h.01" /></> : null}
       {name === "check" ? <path {...common} d="m5 12.5 4.2 4.2L19 7" /> : null}
@@ -40,12 +40,10 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "logs" ? <><path {...common} d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4" /></> : null}
       {name === "mcp" ? <><path {...common} d="M8 7.5 12 4l4 3.5v5L12 16l-4-3.5v-5Z" /><path {...common} d="m8 12.5-3 2.7v3.3L8 21l3-2.5V16M16 12.5l3 2.7v3.3L16 21l-3-2.5V16" /></> : null}
       {name === "minus" ? <path {...common} d="M5 12h14" /> : null}
-      {name === "play" ? <path fill="currentColor" d="m8 5 11 7-11 7V5Z" /> : null}
       {name === "reload" ? <><path {...common} d="M19 8a8 8 0 1 0 .3 7" /><path {...common} d="M19 4v4h-4" /></> : null}
       {name === "settings" ? <><circle {...common} cx="12" cy="12" r="3" /><path {...common} d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 8.97 4.6 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15.03 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" /></> : null}
       {name === "setup" ? <><path {...common} d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.5 2.5-3-3 2.5-2.5Z" /></> : null}
       {name === "sidebar" ? <><rect {...common} x="3" y="4" width="18" height="16" rx="2.5" /><path {...common} d="M9 4v16" /></> : null}
-      {name === "spark" ? <><path {...common} d="m12 3 1.4 4.6L18 9l-4.6 1.4L12 15l-1.4-4.6L6 9l4.6-1.4L12 3Z" /><path {...common} d="m18.5 15 .7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3Z" /></> : null}
       {name === "x" ? <path fill="currentColor" d="M5 4h3.9l3.8 5.1L17.1 4H19l-5.4 6.4L19.5 20h-3.9l-4.1-5.6L6.7 20H4.8l5.8-6.9L5 4Zm3 1.5 8.4 13h1.2l-8.4-13H8Z" /> : null}
       {name === "zoom" ? <path {...common} d="M7 17 17 7M7 11v6h6M17 13V7h-6" /> : null}
     </svg>
