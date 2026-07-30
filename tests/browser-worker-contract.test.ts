@@ -60,11 +60,19 @@ test("the shared Playwright selector types the mention and accepts one exact con
       expect(connectorSelected).toBeTrue();
       calls.push(["waitForSelectedConnector"]);
     },
+    count: async () => 1,
   };
-  const selectedConnectorCandidates = {
-    filter: (options: { visible: boolean }) => {
-      expect(options).toEqual({ visible: true });
-      return { first: () => selectedConnector };
+  const footerActions = {
+    getByRole: (role: string, options: { name: string }) => {
+      expect(role).toBe("button");
+      expect(options).toEqual({ name: "Codex Native" });
+      return selectedConnector;
+    },
+  };
+  const composerForm = {
+    getByTestId: (testId: string) => {
+      expect(testId).toBe("composer-footer-actions");
+      return footerActions;
     },
   };
   const composer = {
@@ -78,10 +86,9 @@ test("the shared Playwright selector types the mention and accepts one exact con
       if (value === "Enter") connectorSelected = true;
       calls.push(["composerPress", value]);
     },
-    getByText: (text: string, options: { exact: boolean }) => {
-      expect(text).toBe("Codex Native");
-      expect(options).toEqual({ exact: true });
-      return selectedConnectorCandidates;
+    locator: (selector: string) => {
+      expect(selector).toBe("xpath=ancestor::form[1]");
+      return composerForm;
     },
   };
   const page = {

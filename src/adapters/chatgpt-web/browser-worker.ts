@@ -552,10 +552,13 @@ export class ChatGptBrowserWorker {
       throw new Error(`ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`);
     }
     await composer.press("Enter");
-    const selectedConnector = composer.getByText(this.config.appName, { exact: true })
-      .filter({ visible: true })
-      .first();
+    const composerForm = composer.locator("xpath=ancestor::form[1]");
+    const selectedConnector = composerForm.getByTestId("composer-footer-actions")
+      .getByRole("button", { name: this.config.appName });
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
+    if (await selectedConnector.count() !== 1) {
+      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector badge`);
+    }
     return composer;
   }
 
