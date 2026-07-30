@@ -18,7 +18,8 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).toContain('[data-inline-selection-pill][data-symbol="ecosystemMention"]');
+  expect(workerSource).toContain(".locator('[data-inline-selection-pill]')");
+  expect(workerSource).not.toContain('[data-symbol="ecosystemMention"]');
 });
 
 test("read-only multiline context is inserted atomically before exact verification", async () => {
@@ -75,8 +76,8 @@ test("the shared Playwright selector types the mention and accepts one exact con
     },
   };
   const connectorMarkers = {
-    filter: (options: { hasText: string }) => {
-      expect(options).toEqual({ hasText: "Codex Native" });
+    filter: (options: { hasText: string; visible: boolean }) => {
+      expect(options).toEqual({ hasText: "Codex Native", visible: true });
       return selectedConnector;
     },
   };
@@ -88,7 +89,7 @@ test("the shared Playwright selector types the mention and accepts one exact con
       calls.push(["pressSequentially", value]);
     },
     locator: (selector: string) => {
-      expect(selector).toBe('[data-inline-selection-pill][data-symbol="ecosystemMention"]');
+      expect(selector).toBe("[data-inline-selection-pill]");
       return connectorMarkers;
     },
   };

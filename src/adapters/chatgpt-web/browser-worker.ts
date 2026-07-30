@@ -576,8 +576,8 @@ export class ChatGptBrowserWorker {
     // Chromium across macOS, Windows, and Linux.
     await appResult.dispatchEvent("click");
     const selectedConnector = composer
-      .locator('[data-inline-selection-pill][data-symbol="ecosystemMention"]')
-      .filter({ hasText: this.config.appName });
+      .locator('[data-inline-selection-pill]')
+      .filter({ hasText: this.config.appName, visible: true });
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
     if (await selectedConnector.count() !== 1
       || await selectedConnector.getAttribute("data-keyword") !== this.config.appName) {
