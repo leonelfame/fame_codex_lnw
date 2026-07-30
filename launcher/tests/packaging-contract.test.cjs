@@ -30,6 +30,7 @@ test("launcher publishes native packages for all supported desktop operating sys
 test("release installers resolve checksummed native launcher assets", () => {
   const shellInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.sh"), "utf8");
   const windowsInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.ps1"), "utf8");
+  const packager = fs.readFileSync(path.join(launcherRoot, "scripts", "package.cjs"), "utf8");
   for (const installer of [shellInstaller, windowsInstaller]) {
     assert.match(installer, /checksums\.txt/);
     assert.match(installer, /SHA-?256/i);
@@ -39,6 +40,7 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(shellInstaller, /PLATFORM="linux"/);
   assert.match(shellInstaller, /codex-web-gpt\.desktop/);
   assert.match(shellInstaller, /--appimage-extract/);
+  assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(shellInstaller, /shell_quote\(\)/);
   assert.match(shellInstaller, /exec %s "\$@"/);
   assert.ok(

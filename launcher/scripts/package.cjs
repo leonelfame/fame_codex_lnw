@@ -61,7 +61,8 @@ try {
     throw new Error(`electron-builder produced no distributable artifact in ${staging}`);
   }
   for (const artifact of artifacts) {
-    fs.copyFileSync(path.join(staging, artifact.name), path.join(artifactsDirectory, artifact.name));
+    const publicName = artifact.name.replace(/-linux-x86_64(?=\.)/, "-linux-x64");
+    fs.copyFileSync(path.join(staging, artifact.name), path.join(artifactsDirectory, publicName));
   }
 } finally {
   fs.rmSync(staging, { recursive: true, force: true });

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
-import { defaultBrokerEndpoint } from "../src/config";
+import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
 test("explicit browser-turn cancellation aborts and removes every registered session", () => {
   const sessions = new ChatGptTurnSessions();
@@ -86,7 +86,7 @@ test("turn broker creates its private runtime directory on a cold start", async 
       tools: [],
     }, 10_000);
     if (process.platform === "win32") {
-      expect(existsSync(socketPath)).toBe(false);
+      expect(isWindowsPipeEndpoint(socketPath)).toBe(true);
     } else {
       expect(existsSync(socketPath)).toBe(true);
       expect(statSync(dirname(socketPath)).mode & 0o777).toBe(0o700);
