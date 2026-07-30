@@ -4,12 +4,8 @@ const os = require("node:os");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
-const executable = path.join(
-  root,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "electron-builder.cmd" : "electron-builder",
-);
+const executable = process.execPath;
+const electronBuilderCli = require.resolve("electron-builder/out/cli/cli.js", { paths: [root] });
 const requested = process.argv[2];
 const target = requested || (process.platform === "darwin" ? "--mac"
   : process.platform === "win32" ? "--win"
@@ -36,6 +32,7 @@ const staging = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-"))
 const artifactsDirectory = path.join(root, "artifacts");
 try {
   const result = spawnSync(executable, [
+    electronBuilderCli,
     target,
     "--publish",
     "never",
@@ -44,7 +41,7 @@ try {
     cwd: root,
     env,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: false,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);

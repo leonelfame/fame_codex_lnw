@@ -41,6 +41,9 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(shellInstaller, /codex-web-gpt\.desktop/);
   assert.match(shellInstaller, /--appimage-extract/);
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
+  assert.match(packager, /process\.execPath/);
+  assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);
+  assert.doesNotMatch(packager, /electron-builder\.cmd/);
   assert.match(shellInstaller, /shell_quote\(\)/);
   assert.match(shellInstaller, /exec %s "\$@"/);
   assert.ok(
