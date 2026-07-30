@@ -604,10 +604,15 @@ test("connector verification is effort-independent and works while the browser s
   );
 });
 
-test("connector selection reacquires focus, types the mention trigger, and confirms the exact pill", async () => {
+test("connector selection reacquires focus, types the mention trigger, and confirms the exact marker", async () => {
   const calls = [];
   let focused = false;
+  let connectorVisible = false;
   const fixture = {
+    connectorSelected: async (name) => {
+      calls.push(["marker", name]);
+      return connectorVisible;
+    },
     focusComposer: async () => {
       focused = true;
       calls.push(["focus"]);
@@ -617,7 +622,10 @@ test("connector selection reacquires focus, types the mention trigger, and confi
       calls.push(["clear"]);
       focused = false;
     },
-    waitForComposerText: async (text) => calls.push(["composer", text]),
+    waitForConnectorInput: async (name, text) => {
+      calls.push(["input", `${name}:${text}`]);
+      return "mention";
+    },
     waitForConnectorSuggestion: async (name) => {
       calls.push(["suggestion", name]);
       return { x: 320, y: 240 };
@@ -626,22 +634,59 @@ test("connector selection reacquires focus, types the mention trigger, and confi
       assert.equal(focused, true, "composer focus must be reacquired after clearing");
       calls.push(["type", text]);
     },
-    clickTrustedBrowserPoint: async (point) => calls.push(["click", JSON.stringify(point)]),
-    waitForConnectorSelected: async (name) => calls.push(["selected", name]),
+    clickTrustedBrowserPoint: async (point) => {
+      calls.push(["click", JSON.stringify(point)]);
+      connectorVisible = true;
+    },
+    waitForConnectorSelected: async (name) => {
+      assert.equal(connectorVisible, true);
+      calls.push(["selected", name]);
+    },
   };
 
   await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
 
   assert.deepEqual(calls, [
+    ["marker", "Codex Native"],
     ["focus"],
     ["clear"],
     ["focus"],
     ["type", "@c"],
-    ["composer", "@c"],
+    ["input", "Codex Native:@c"],
     ["suggestion", "Codex Native"],
     ["click", "{\"x\":320,\"y\":240}"],
     ["selected", "Codex Native"],
   ]);
+});
+
+test("connector selection accepts an existing connector marker without clearing or typing", async () => {
+  const fixture = {
+    connectorSelected: async (name) => {
+      assert.equal(name, "Codex Native");
+      return true;
+    },
+    focusComposer: async () => {
+      throw new Error("existing connector marker must short-circuit input");
+    },
+  };
+
+  await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
+});
+
+test("connector input accepts the final marker even when mention text is no longer present", async () => {
+  let reads = 0;
+  const fixture = {
+    connectorSelected: async () => {
+      reads += 1;
+      return reads === 2;
+    },
+    readComposerText: async () => "",
+  };
+
+  assert.equal(
+    await BrowserHost.prototype.waitForConnectorInput.call(fixture, "Codex Native", "@c", 100, 1),
+    "connector",
+  );
 });
 
 test("connector verification preserves an already hydrated Temporary Chat page", async () => {
@@ -651,9 +696,6 @@ test("connector verification preserves an already hydrated Temporary Chat page",
     setState() {},
     waitForAuthenticated: async () => {},
     selectConnector: async () => {},
-    focusComposer: async () => true,
-    clearFocusedComposer: async () => {},
-    pressBrowserKey() {},
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",

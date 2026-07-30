@@ -1135,7 +1135,23 @@ class BrowserHost {
     throw new Error(`ChatGPT did not confirm connector ${JSON.stringify(appName)} in the composer`);
   }
 
+  async waitForConnectorInput(appName, mention, timeoutMs = 10_000, pollMs = 50) {
+    const deadline = Date.now() + timeoutMs;
+    let actual = null;
+    do {
+      if (await this.connectorSelected(appName)) return "connector";
+      actual = await this.readComposerText();
+      if (actual === mention) return "mention";
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT composer did not expose the connector marker or preserve the mention text`
+      + ` (expectedChars=${mention.length}; actualChars=${typeof actual === "string" ? actual.length : "missing"})`,
+    );
+  }
+
   async selectConnector(appName) {
+    if (await this.connectorSelected(appName)) return;
     if (!await this.focusComposer()) {
       throw new Error("ChatGPT composer was not available for connector selection");
     }
@@ -1145,7 +1161,7 @@ class BrowserHost {
     }
     const mention = "@c";
     await this.typeTrustedBrowserText(mention);
-    await this.waitForComposerText(mention);
+    if (await this.waitForConnectorInput(appName, mention) === "connector") return;
     const point = await this.waitForConnectorSuggestion(appName);
     await this.clickTrustedBrowserPoint(point);
     await this.waitForConnectorSelected(appName);
@@ -1162,10 +1178,6 @@ class BrowserHost {
     }
     await this.waitForAuthenticated(60_000);
     await this.selectConnector(connectorName);
-    if (!await this.focusComposer()) {
-      throw new Error("ChatGPT composer lost focus after connector verification");
-    }
-    await this.clearFocusedComposer();
     this.logger.info("connector.verified", { appName: connectorName });
     this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
     return { ok: true, appName: connectorName };
