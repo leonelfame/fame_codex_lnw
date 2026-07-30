@@ -43,6 +43,8 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(packager, /process\.execPath/);
   assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);
+  assert.match(packager, /target === "--mac" && !env\.CSC_LINK && !env\.CSC_NAME/);
+  assert.match(packager, /--config\.mac\.identity=-/);
   assert.doesNotMatch(packager, /electron-builder\.cmd/);
   assert.match(shellInstaller, /shell_quote\(\)/);
   assert.match(shellInstaller, /exec %s "\$@"/);
@@ -65,6 +67,8 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   }
   assert.match(release, /launcher\/build\/runtime/);
   assert.match(release, /bun run app:smoke/);
+  assert.match(release, /codesign --verify --deep --strict --verbose=2/);
+  assert.match(release, /Codex Web GPT\.app/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
 });
 

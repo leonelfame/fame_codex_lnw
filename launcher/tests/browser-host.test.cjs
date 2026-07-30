@@ -402,7 +402,7 @@ test("effort selection waits for an already-open menu to hydrate instead of clos
   ]);
 });
 
-test("smoke submission uses trusted Enter and waits for an accepted user turn", async () => {
+test("smoke submission focuses the send button before trusted Enter and waits for an accepted user turn", async () => {
   const keys = [];
   let sendReads = 0;
   let submissionReads = 0;
@@ -417,6 +417,7 @@ test("smoke submission uses trusted Enter and waits for an accepted user turn", 
           ? { ready: false, reason: "disabled" }
           : { ready: true, point: { x: 300, y: 220 } };
       }
+      if (expression.includes("smoke-send-button-focus")) return true;
       assert.match(expression, /smoke-submission-read/);
       submissionReads += 1;
       return {
@@ -429,6 +430,7 @@ test("smoke submission uses trusted Enter and waits for an accepted user turn", 
   };
 
   await BrowserHost.prototype.waitForSmokeSendButton.call(fixture, 100, 1);
+  assert.equal(await BrowserHost.prototype.focusSmokeSendButton.call(fixture), true);
   await BrowserHost.prototype.pressTrustedBrowserKey.call({
     view: fixture.view,
     dispatchTrustedKey: async input => keys.push(input),
