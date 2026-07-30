@@ -548,9 +548,14 @@ export class ChatGptBrowserWorker {
     await composer.fill("");
     await composer.focus();
     await composer.pressSequentially("@c", { delay: 25 });
-    const appResult = page.getByRole("group").filter({ hasText: this.config.appName }).last();
+    const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
+      has: page.getByText(this.config.appName, { exact: true }),
+    });
     await appResult.waitFor({ state: "visible", timeout: 20_000 });
-    await composer.press("Enter");
+    if (await appResult.count() !== 1) {
+      throw new Error(`ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`);
+    }
+    await appResult.click();
     const selectedPlugin = composer.getByRole("link", { name: this.config.appName, exact: true });
     await selectedPlugin.waitFor({ state: "visible", timeout: 10_000 });
     await composer.focus();

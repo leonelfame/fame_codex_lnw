@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  dispatchTrustedClick,
   dispatchTrustedKey,
   dispatchTrustedText,
   evaluatePage,
@@ -134,6 +135,43 @@ test("trusted connector mention is typed as discrete keyboard events", async () 
         code: "KeyC",
         windowsVirtualKeyCode: 67,
         nativeVirtualKeyCode: 67,
+      },
+    },
+  ]);
+  assert.equal(detached(), true);
+});
+
+test("trusted connector selection clicks one exact DOM-derived point", async () => {
+  const { client, commands, detached } = createDebugger();
+  await dispatchTrustedClick({
+    debuggerClient: client,
+    point: { x: 320.5, y: 240.25 },
+  });
+  assert.deepEqual(commands, [
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseMoved", x: 320.5, y: 240.25 },
+    },
+    {
+      method: "Input.dispatchMouseEvent",
+      params: {
+        type: "mousePressed",
+        x: 320.5,
+        y: 240.25,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      },
+    },
+    {
+      method: "Input.dispatchMouseEvent",
+      params: {
+        type: "mouseReleased",
+        x: 320.5,
+        y: 240.25,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
       },
     },
   ]);

@@ -620,12 +620,13 @@ test("connector selection reacquires focus, types the mention trigger, and confi
     waitForComposerText: async (text) => calls.push(["composer", text]),
     waitForConnectorSuggestion: async (name) => {
       calls.push(["suggestion", name]);
+      return { x: 320, y: 240 };
     },
     typeTrustedBrowserText: async (text) => {
       assert.equal(focused, true, "composer focus must be reacquired after clearing");
       calls.push(["type", text]);
     },
-    pressTrustedBrowserKey: async (key) => calls.push(["key", key]),
+    clickTrustedBrowserPoint: async (point) => calls.push(["click", JSON.stringify(point)]),
     waitForConnectorSelected: async (name) => calls.push(["selected", name]),
   };
 
@@ -638,7 +639,7 @@ test("connector selection reacquires focus, types the mention trigger, and confi
     ["type", "@c"],
     ["composer", "@c"],
     ["suggestion", "Codex Native"],
-    ["key", "Enter"],
+    ["click", "{\"x\":320,\"y\":240}"],
     ["selected", "Codex Native"],
   ]);
 });

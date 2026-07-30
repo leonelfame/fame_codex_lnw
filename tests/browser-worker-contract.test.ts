@@ -45,6 +45,8 @@ test("tool-capable prompts type the mention trigger and accept the exact connect
   const calls: Array<[string, string?]> = [];
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
+    count: async () => 1,
+    click: async () => { calls.push(["clickResult"]); },
   };
   const selectedPlugin = {
     waitFor: async () => { calls.push(["waitForPill"]); },
@@ -64,14 +66,22 @@ test("tool-capable prompts type the mention trigger and accept the exact connect
     },
   };
   const page = {
-    locator: () => ({ last: () => composer }),
-    getByRole: (role: string) => ({
-      filter: (options: { hasText: string }) => {
-        expect(role).toBe("group");
-        expect(options).toEqual({ hasText: "Codex Native" });
-        return { last: () => appResult };
-      },
-    }),
+    getByText: (text: string, options: { exact: boolean }) => {
+      expect(text).toBe("Codex Native");
+      expect(options).toEqual({ exact: true });
+      return { exactConnectorLabel: true };
+    },
+    locator: (selector: string) => {
+      if (selector.includes("__menu-item")) {
+        return {
+          filter: (options: { has: unknown }) => {
+            expect(options).toEqual({ has: { exactConnectorLabel: true } });
+            return appResult;
+          },
+        };
+      }
+      return { last: () => composer };
+    },
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
       press: async (value: string) => { calls.push(["press", value]); },
@@ -91,7 +101,7 @@ test("tool-capable prompts type the mention trigger and accept the exact connect
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["composerPress", "Enter"],
+    ["clickResult"],
     ["waitForPill"],
     ["focus"],
     ["press", "End"],

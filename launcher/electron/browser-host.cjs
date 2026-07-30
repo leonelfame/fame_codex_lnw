@@ -4,7 +4,12 @@ const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { dispatchTrustedKey, dispatchTrustedText, evaluatePage } = require("./cdp-input.cjs");
+const {
+  dispatchTrustedClick,
+  dispatchTrustedKey,
+  dispatchTrustedText,
+  evaluatePage,
+} = require("./cdp-input.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -675,6 +680,19 @@ class BrowserHost {
     }
   }
 
+  async clickTrustedBrowserPoint(point) {
+    try {
+      await dispatchTrustedClick({
+        debuggerClient: this.view.webContents.debugger,
+        point,
+      });
+    } catch (error) {
+      throw new Error(
+        `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async evaluateBrowserPage(expression) {
     const contents = this.view.webContents;
     try {
@@ -1064,28 +1082,35 @@ class BrowserHost {
           && rect.width > 0
           && rect.height > 0;
       };
-      const roleCandidates = ['option', 'menuitem', 'group'].flatMap((role) => (
-        Array.from(document.querySelectorAll('[role="' + role + '"]'))
-      ));
-      return roleCandidates.filter(visible).some((element) => {
-        const text = normalize(element.innerText || element.textContent);
-        if (text === expected) return true;
-        return Array.from(element.querySelectorAll('span, strong, p, div')).some((child) => (
+      const rows = Array.from(document.querySelectorAll('.__menu-item[tabindex="0"]'))
+        .filter(visible)
+        .filter((row) => Array.from(row.querySelectorAll('span, strong, p, div')).some((child) => (
           visible(child) && normalize(child.innerText || child.textContent) === expected
-        ));
-      });
+        )));
+      if (rows.length !== 1) return { count: rows.length, point: null };
+      const rect = rows[0].getBoundingClientRect();
+      return {
+        count: 1,
+        point: {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        },
+      };
     })()`);
   }
 
   async waitForConnectorSuggestion(appName, timeoutMs = 25_000, pollMs = 100) {
     const deadline = Date.now() + timeoutMs;
+    let result = null;
     do {
-      if (await this.readConnectorSuggestion(appName)) return;
+      result = await this.readConnectorSuggestion(appName);
+      if (result?.count === 1 && result.point) return result.point;
       await sleep(pollMs);
     } while (Date.now() < deadline);
     throw new Error(
       `ChatGPT connector ${JSON.stringify(appName)} was not found in the mention menu;`
-      + ` attach the tunnel and use that exact name`,
+      + ` attach the tunnel and use that exact name`
+      + ` (matchingRows=${result?.count ?? "unknown"})`,
     );
   }
 
@@ -1121,8 +1146,8 @@ class BrowserHost {
     const mention = "@c";
     await this.typeTrustedBrowserText(mention);
     await this.waitForComposerText(mention);
-    await this.waitForConnectorSuggestion(appName);
-    await this.pressTrustedBrowserKey("Enter");
+    const point = await this.waitForConnectorSuggestion(appName);
+    await this.clickTrustedBrowserPoint(point);
     await this.waitForConnectorSelected(appName);
   }
 
