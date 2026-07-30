@@ -18,8 +18,30 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).toContain(".locator('[data-inline-selection-pill]')");
-  expect(workerSource).not.toContain('[data-symbol="ecosystemMention"]');
+  expect(workerSource).toContain('getByTestId("composer-footer-actions")');
+  expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
+});
+
+test("active composer resolution waits for exactly one visible editor", async () => {
+  const composer = { id: "active" };
+  const counts = [2, 1];
+  const visibleComposers = {
+    count: async () => counts.shift() ?? 1,
+    first: () => composer,
+  };
+  const page = {
+    locator: () => ({
+      filter: (options: { visible: boolean }) => {
+        expect(options).toEqual({ visible: true });
+        return visibleComposers;
+      },
+    }),
+  };
+  const activeComposer = (ChatGptBrowserWorker.prototype as unknown as {
+    activeComposer(page: unknown, timeoutMs?: number): Promise<unknown>;
+  }).activeComposer;
+
+  expect(await activeComposer.call({}, page, 500)).toBe(composer);
 });
 
 test("read-only multiline context is inserted atomically before exact verification", async () => {
@@ -31,7 +53,6 @@ test("read-only multiline context is inserted atomically before exact verificati
     focus: async () => { calls.push(["focus"]); },
   };
   const page = {
-    locator: () => ({ last: () => composer }),
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
     },
@@ -41,6 +62,7 @@ test("read-only multiline context is inserted atomically before exact verificati
   }).attachPrompt;
 
   await attachPrompt.call({
+    activeComposer: async () => composer,
     assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
   }, page, prompt, false);
 
@@ -52,7 +74,7 @@ test("read-only multiline context is inserted atomically before exact verificati
   expect(asserted).toBe(prompt);
 });
 
-test("the shared Playwright selector types the mention and accepts one exact connector", async () => {
+test("connector selection re-resolves the active composer after ChatGPT replaces it", async () => {
   const calls: Array<[string, string?]> = [];
   let connectorSelected = false;
   const appResult = {
@@ -70,27 +92,31 @@ test("the shared Playwright selector types the mention and accepts one exact con
       calls.push(["waitForSelectedConnector"]);
     },
     count: async () => 1,
-    getAttribute: async (name: string) => {
-      expect(name).toBe("data-keyword");
-      return "Codex Native";
-    },
   };
-  const connectorMarkers = {
-    filter: (options: { hasText: string; visible: boolean }) => {
-      expect(options).toEqual({ hasText: "Codex Native", visible: true });
+  const footerActions = {
+    getByRole: (role: string, options: { name: string }) => {
+      expect(role).toBe("button");
+      expect(options).toEqual({ name: "Codex Native" });
       return selectedConnector;
     },
   };
-  const composer = {
+  const selectedComposer = {
+    locator: (selector: string) => {
+      expect(selector).toBe("xpath=ancestor::form[1]");
+      return {
+        getByTestId: (testId: string) => {
+          expect(testId).toBe("composer-footer-actions");
+          return footerActions;
+        },
+      };
+    },
+  };
+  const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
     pressSequentially: async (value: string, options: { delay: number }) => {
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
-    },
-    locator: (selector: string) => {
-      expect(selector).toBe("[data-inline-selection-pill]");
-      return connectorMarkers;
     },
   };
   const page = {
@@ -108,21 +134,24 @@ test("the shared Playwright selector types the mention and accepts one exact con
           },
         };
       }
-      return { last: () => composer };
-    },
-    keyboard: {
-      insertText: async (value: string) => { calls.push(["insertText", value]); },
-      press: async (value: string) => { calls.push(["press", value]); },
+      throw new Error(`Unexpected locator: ${selector}`);
     },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
   }).selectConnector;
 
-  await selectConnector.call({
+  let activeComposerCalls = 0;
+  const resolved = await selectConnector.call({
     config: { appName: "Codex Native" },
+    activeComposer: async () => {
+      activeComposerCalls += 1;
+      return activeComposerCalls === 1 ? initialComposer : selectedComposer;
+    },
   }, page);
 
+  expect(resolved).toBe(selectedComposer);
+  expect(activeComposerCalls).toBe(2);
   expect(calls).toEqual([
     ["fill", ""],
     ["focus"],
@@ -145,7 +174,6 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       calls.push("selected");
     },
     count: async () => 1,
-    getAttribute: async () => "Codex Native",
   };
   const appResult = {
     waitFor: async () => {
@@ -159,28 +187,39 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       calls.push("activate");
     },
   };
-  const composer = {
+  const selectedComposer = {
+    locator: () => ({
+      getByTestId: () => ({
+        getByRole: () => selectedConnector,
+      }),
+    }),
+  };
+  const initialComposer = {
     fill: async () => { calls.push("clear"); },
     focus: async () => { calls.push("focus"); },
     pressSequentially: async (value: string) => {
       expect(value).toBe("@c");
       calls.push("type");
     },
-    locator: () => ({
-      filter: () => selectedConnector,
-    }),
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult }
-      : { last: () => composer },
+      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
   }).selectConnector;
 
-  await selectConnector.call({ config: { appName: "Codex Native" } }, page);
+  let activeComposerCalls = 0;
+  await selectConnector.call({
+    config: { appName: "Codex Native" },
+    activeComposer: async () => {
+      activeComposerCalls += 1;
+      return activeComposerCalls === 1 ? initialComposer : selectedComposer;
+    },
+  }, page);
 
   expect(calls).toEqual([
     "clear", "focus", "type", "menu:1",
@@ -198,7 +237,6 @@ test("tool-capable prompts use the shared Playwright connector selection before 
       calls.push(["selectedConnector"]);
     },
     count: async () => 1,
-    getAttribute: async () => "Codex Native",
   };
   const appResult = {
     waitFor: async () => { calls.push(["connectorMenu"]); },
@@ -208,19 +246,24 @@ test("tool-capable prompts use the shared Playwright connector selection before 
       calls.push(["selectConnector"]);
     },
   };
-  const composer = {
+  const selectedComposer = {
+    focus: async () => { calls.push(["selectedFocus"]); },
+    locator: () => ({
+      getByTestId: () => ({
+        getByRole: () => selectedConnector,
+      }),
+    }),
+  };
+  const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
     pressSequentially: async (value: string) => { calls.push(["type", value]); },
-    locator: () => ({
-      filter: () => selectedConnector,
-    }),
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult }
-      : { last: () => composer },
+      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
       press: async (value: string) => { calls.push(["press", value]); },
@@ -233,9 +276,14 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     selectConnector(page: unknown): Promise<unknown>;
   }).selectConnector;
 
+  let activeComposerCalls = 0;
   await attachPrompt.call({
     config: { appName: "Codex Native" },
     selectConnector,
+    activeComposer: async () => {
+      activeComposerCalls += 1;
+      return activeComposerCalls === 1 ? initialComposer : selectedComposer;
+    },
     assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
   }, page, "context", true);
 
@@ -246,7 +294,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],
-    ["focus"],
+    ["selectedFocus"],
     ["press", "End"],
     ["insertText", " context"],
     ["assertPrompt"],
@@ -306,7 +354,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     attachFiles(page: unknown, prompt: unknown): Promise<void>;
   }).attachFiles;
 
-  await attachFiles.call({}, page, {
+  await attachFiles.call({ activeComposer: async () => composer }, page, {
     images: [{ ref: "codex-input-image-1", imageUrl }],
   });
 

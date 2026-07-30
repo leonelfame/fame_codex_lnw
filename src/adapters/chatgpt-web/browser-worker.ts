@@ -452,7 +452,7 @@ export class ChatGptBrowserWorker {
     capabilities: ChatGptWebCapabilities,
   ): Promise<ChatGptWebModelMode> {
     const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
-    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
     try {
@@ -511,8 +511,20 @@ export class ChatGptBrowserWorker {
     );
   }
 
+  private async activeComposer(page: Page, timeoutMs = 30_000): Promise<Locator> {
+    const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+    const deadline = Date.now() + timeoutMs;
+    let count = 0;
+    while (Date.now() < deadline) {
+      count = await composers.count();
+      if (count === 1) return composers.first();
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+    }
+    throw new Error(`ChatGPT did not expose exactly one visible composer (visibleComposers=${count})`);
+  }
+
   private async attachedPromptText(page: Page): Promise<string> {
-    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    const composer = await this.activeComposer(page);
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
       clone.querySelectorAll("[data-inline-selection-pill], [data-inline-selection-pill-cursor-target]")
@@ -540,7 +552,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async selectConnector(page: Page): Promise<Locator> {
-    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    const composer = await this.activeComposer(page);
     const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
@@ -575,20 +587,23 @@ export class ChatGptBrowserWorker {
     // the resolved row itself; this also avoids viewport-coordinate differences in embedded
     // Chromium across macOS, Windows, and Linux.
     await appResult.dispatchEvent("click");
-    const selectedConnector = composer
-      .locator('[data-inline-selection-pill]')
-      .filter({ hasText: this.config.appName, visible: true });
+    // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
+    // again instead of returning the pre-selection locator, otherwise the real turn can focus a
+    // detached/hidden editor even though verification just succeeded.
+    const selectedComposer = await this.activeComposer(page);
+    const selectedConnector = selectedComposer.locator("xpath=ancestor::form[1]")
+      .getByTestId("composer-footer-actions")
+      .getByRole("button", { name: this.config.appName });
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
-    if (await selectedConnector.count() !== 1
-      || await selectedConnector.getAttribute("data-keyword") !== this.config.appName) {
-      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector marker`);
+    if (await selectedConnector.count() !== 1) {
+      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector badge`);
     }
-    return composer;
+    return selectedComposer;
   }
 
   private async attachPrompt(page: Page, prompt: string, localTools: boolean): Promise<void> {
-    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
     if (!localTools) {
+      const composer = await this.activeComposer(page);
       // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
       // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
       // then transport the complete text in one CDP Input.insertText command.
@@ -610,9 +625,8 @@ export class ChatGptBrowserWorker {
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
       await page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
-    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
     try {
-      await composer.waitFor({ state: "visible", timeout: 30_000 });
+      await this.activeComposer(page);
     } catch {
       throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
     }
@@ -625,7 +639,7 @@ export class ChatGptBrowserWorker {
   private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt): Promise<void> {
     const files = chatGptPromptFilePayloads(prompt);
     if (files.length === 0) return;
-    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const input = page.locator('input[data-testid="upload-photos-input"]');
     await input.waitFor({ state: "attached", timeout: 20_000 });
@@ -822,10 +836,9 @@ export class ChatGptBrowserWorker {
       await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
         page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
       ));
-      const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
       try {
         await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
-          composer.waitFor({ state: "visible", timeout: 30_000 })
+          this.activeComposer(page)
         ));
       } catch {
         throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
