@@ -1,8 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  dispatchTrustedClick,
   dispatchTrustedKey,
+  dispatchTrustedText,
   evaluatePage,
 } = require("../electron/cdp-input.cjs");
 
@@ -85,24 +85,56 @@ test("trusted Enter is dispatched through the owned Electron WebContents target"
   assert.equal(detached(), true);
 });
 
-test("trusted connector selection clicks inside the owned Electron WebContents target", async () => {
+test("trusted connector mention is typed as discrete keyboard events", async () => {
   const { client, commands, detached } = createDebugger();
-  await dispatchTrustedClick({
+  await dispatchTrustedText({
     debuggerClient: client,
-    point: { x: 220.5, y: 140.25 },
+    text: "@C",
   });
   assert.deepEqual(commands, [
     {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mouseMoved", x: 220.5, y: 140.25 },
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyDown",
+        key: "@",
+        code: "Digit2",
+        windowsVirtualKeyCode: 50,
+        nativeVirtualKeyCode: 50,
+        text: "@",
+        unmodifiedText: "@",
+      },
     },
     {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mousePressed", x: 220.5, y: 140.25, button: "left", clickCount: 1 },
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyUp",
+        key: "@",
+        code: "Digit2",
+        windowsVirtualKeyCode: 50,
+        nativeVirtualKeyCode: 50,
+      },
     },
     {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mouseReleased", x: 220.5, y: 140.25, button: "left", clickCount: 1 },
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyDown",
+        key: "C",
+        code: "KeyC",
+        windowsVirtualKeyCode: 67,
+        nativeVirtualKeyCode: 67,
+        text: "C",
+        unmodifiedText: "C",
+      },
+    },
+    {
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyUp",
+        key: "C",
+        code: "KeyC",
+        windowsVirtualKeyCode: 67,
+        nativeVirtualKeyCode: 67,
+      },
     },
   ]);
   assert.equal(detached(), true);
@@ -130,9 +162,9 @@ test("WebContents CDP commands fail closed without an owned debugger", async () 
     /WebContents debugger is unavailable/,
   );
   await assert.rejects(
-    dispatchTrustedClick({
+    dispatchTrustedText({
       debuggerClient: null,
-      point: { x: 10, y: 10 },
+      text: "@Codex Native",
     }),
     /WebContents debugger is unavailable/,
   );

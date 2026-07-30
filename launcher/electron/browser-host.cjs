@@ -4,7 +4,7 @@ const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { dispatchTrustedClick, dispatchTrustedKey, evaluatePage } = require("./cdp-input.cjs");
+const { dispatchTrustedKey, dispatchTrustedText, evaluatePage } = require("./cdp-input.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -119,8 +119,8 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
-    this.dispatchTrustedClick = dispatchTrustedClick;
     this.dispatchTrustedKey = dispatchTrustedKey;
+    this.dispatchTrustedText = dispatchTrustedText;
     this.evaluatePage = evaluatePage;
     this.surfaceId = randomBytes(24).toString("base64url");
     this.visible = false;
@@ -661,15 +661,16 @@ class BrowserHost {
     }
   }
 
-  async clickTrustedBrowserPoint(point) {
+  async typeTrustedBrowserText(text) {
     try {
-      await this.dispatchTrustedClick({
+      await this.dispatchTrustedText({
         debuggerClient: this.view.webContents.debugger,
-        point,
+        text,
+        delayMs: 25,
       });
     } catch (error) {
       throw new Error(
-        `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
+        `ChatGPT trusted browser typing failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -1066,40 +1067,24 @@ class BrowserHost {
       const roleCandidates = ['option', 'menuitem', 'group'].flatMap((role) => (
         Array.from(document.querySelectorAll('[role="' + role + '"]'))
       ));
-      const matching = roleCandidates.filter(visible).map((element) => {
+      return roleCandidates.filter(visible).some((element) => {
         const text = normalize(element.innerText || element.textContent);
-        if (text === expected) return { target: element, score: text.length };
-        const exactChild = Array.from(element.querySelectorAll('span, strong, p, div')).find((child) => (
+        if (text === expected) return true;
+        return Array.from(element.querySelectorAll('span, strong, p, div')).some((child) => (
           visible(child) && normalize(child.innerText || child.textContent) === expected
         ));
-        return exactChild ? { target: exactChild, score: text.length } : null;
-      }).filter(Boolean).sort((left, right) => left.score - right.score);
-      const target = matching[0]?.target;
-      if (!target) return { found: false };
-      const rect = target.getBoundingClientRect();
-      return {
-        found: true,
-        point: {
-          x: rect.left + (rect.width / 2),
-          y: rect.top + (rect.height / 2),
-        },
-      };
+      });
     })()`);
   }
 
   async waitForConnectorSuggestion(appName, timeoutMs = 25_000, pollMs = 100) {
     const deadline = Date.now() + timeoutMs;
     do {
-      const suggestion = await this.readConnectorSuggestion(appName);
-      if (suggestion?.found
-        && Number.isFinite(suggestion.point?.x)
-        && Number.isFinite(suggestion.point?.y)) {
-        return suggestion;
-      }
+      if (await this.readConnectorSuggestion(appName)) return;
       await sleep(pollMs);
     } while (Date.now() < deadline);
     throw new Error(
-      `ChatGPT connector ${JSON.stringify(appName)} was not found in the @c menu;`
+      `ChatGPT connector ${JSON.stringify(appName)} was not found in the mention menu;`
       + ` attach the tunnel and use that exact name`,
     );
   }
@@ -1130,11 +1115,11 @@ class BrowserHost {
       throw new Error("ChatGPT composer was not available for connector selection");
     }
     await this.clearFocusedComposer();
-    this.view.webContents.focus();
-    this.view.webContents.insertText("@c");
-    await this.waitForComposerText("@c");
-    const suggestion = await this.waitForConnectorSuggestion(appName);
-    await this.clickTrustedBrowserPoint(suggestion.point);
+    const mention = `@${appName}`;
+    await this.typeTrustedBrowserText(mention);
+    await this.waitForComposerText(mention);
+    await this.waitForConnectorSuggestion(appName);
+    await this.pressTrustedBrowserKey("Enter");
     await this.waitForConnectorSelected(appName);
   }
 

@@ -35,34 +35,52 @@ async function dispatchTrustedKey({ debuggerClient, key }) {
   });
 }
 
-async function dispatchTrustedClick({ debuggerClient, point }) {
-  if (!point
-    || !Number.isFinite(point.x)
-    || !Number.isFinite(point.y)
-    || point.x < 0
-    || point.y < 0) {
-    throw new Error("Trusted CDP click requires a finite non-negative point");
+function printableKeyDescription(character) {
+  if (/^[a-z]$/i.test(character)) {
+    return {
+      code: `Key${character.toUpperCase()}`,
+      keyCode: character.toUpperCase().charCodeAt(0),
+    };
   }
+  if (/^[0-9]$/.test(character)) {
+    return { code: `Digit${character}`, keyCode: character.charCodeAt(0) };
+  }
+  if (character === "@") return { code: "Digit2", keyCode: 50 };
+  if (character === " ") return { code: "Space", keyCode: 32 };
+  throw new Error(`Trusted CDP typing does not support character ${JSON.stringify(character)}`);
+}
+
+async function dispatchTrustedText({ debuggerClient, text, delayMs = 0 }) {
+  if (typeof text !== "string" || text.length === 0) {
+    throw new Error("Trusted CDP text requires a non-empty string");
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 1_000) {
+    throw new Error("Trusted CDP text delay must be between 0 and 1000 milliseconds");
+  }
+  const characters = Array.from(text);
   await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
-    await sendCommand("Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: point.x,
-      y: point.y,
-    });
-    await sendCommand("Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: point.x,
-      y: point.y,
-      button: "left",
-      clickCount: 1,
-    });
-    await sendCommand("Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: point.x,
-      y: point.y,
-      button: "left",
-      clickCount: 1,
-    });
+    for (const [index, character] of characters.entries()) {
+      const description = printableKeyDescription(character);
+      await sendCommand("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: character,
+        code: description.code,
+        windowsVirtualKeyCode: description.keyCode,
+        nativeVirtualKeyCode: description.keyCode,
+        text: character,
+        unmodifiedText: character,
+      });
+      await sendCommand("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: character,
+        code: description.code,
+        windowsVirtualKeyCode: description.keyCode,
+        nativeVirtualKeyCode: description.keyCode,
+      });
+      if (delayMs > 0 && index < characters.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
   });
 }
 
@@ -87,8 +105,8 @@ async function evaluatePage({ debuggerClient, expression }) {
 }
 
 module.exports = {
-  dispatchTrustedClick,
   dispatchTrustedKey,
+  dispatchTrustedText,
   evaluatePage,
   withWebContentsDebugger,
 };

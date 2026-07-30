@@ -144,7 +144,7 @@ not expose a public IP, open an inbound port, or require router forwarding.
 4. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
    exact Tunnel, set **Authentication** to **None**, and name it exactly `Codex Native`.
 5. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
-   opens the `@c` menu and selects the exact `Codex Native` result.
+   types and accepts the full `@Codex Native` mention, then confirms the connector pill.
 
 Write/modify actions require a ChatGPT workspace and admin policy that permit them. OpenAI
 currently documents those actions for Business and Enterprise/Edu workspaces; personal Pro is

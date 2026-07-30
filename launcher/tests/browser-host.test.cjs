@@ -604,7 +604,7 @@ test("connector verification is effort-independent and works while the browser s
   );
 });
 
-test("connector selection types @c, chooses the exact menu result, and confirms the pill", async () => {
+test("connector selection types the full mention, accepts it, and confirms the pill", async () => {
   const calls = [];
   const fixture = {
     focusComposer: async () => true,
@@ -612,27 +612,20 @@ test("connector selection types @c, chooses the exact menu result, and confirms 
     waitForComposerText: async (text) => calls.push(["composer", text]),
     waitForConnectorSuggestion: async (name) => {
       calls.push(["suggestion", name]);
-      return { point: { x: 210, y: 130 } };
     },
-    clickTrustedBrowserPoint: async (point) => calls.push(["click", point]),
+    typeTrustedBrowserText: async (text) => calls.push(["type", text]),
+    pressTrustedBrowserKey: async (key) => calls.push(["key", key]),
     waitForConnectorSelected: async (name) => calls.push(["selected", name]),
-    view: {
-      webContents: {
-        focus: () => calls.push(["focus"]),
-        insertText: (text) => calls.push(["insert", text]),
-      },
-    },
   };
 
   await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
 
   assert.deepEqual(calls, [
     ["clear"],
-    ["focus"],
-    ["insert", "@c"],
-    ["composer", "@c"],
+    ["type", "@Codex Native"],
+    ["composer", "@Codex Native"],
     ["suggestion", "Codex Native"],
-    ["click", { x: 210, y: 130 }],
+    ["key", "Enter"],
     ["selected", "Codex Native"],
   ]);
 });

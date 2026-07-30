@@ -137,8 +137,8 @@ ChatGPT Web 条目，因此原生模型、任务历史、审批、沙箱和工�
 3. 粘贴 Tunnel ID 和 API 密钥，然后点击 **连接 Harness**。
 4. 在 ChatGPT 设置中启用 **开发者模式**。创建连接器时选择 **Tunnel**，选择刚创建的
    Tunnel，将 **身份验证** 设为 **无**，并将连接器准确命名为 `Codex Native`。
-5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。验证过程会打开 `@c` 菜单并选择
-   精确匹配的 `Codex Native` 项。
+5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。验证过程会逐字输入并确认完整的
+   `@Codex Native` mention，然后检查连接器 pill。
 
 写入/修改操作需要 ChatGPT 工作区及管理员政策允许。OpenAI 目前仅为 Business 和
 Enterprise/Edu 工作区说明了这些操作；个人 Pro 账户仅限 read/fetch MCP 权限。请参阅

@@ -41,11 +41,10 @@ test("read-only multiline context is inserted atomically before exact verificati
   expect(asserted).toBe(prompt);
 });
 
-test("tool-capable prompts select the exact connector from the @c menu before inserting context", async () => {
+test("tool-capable prompts type and accept the exact connector before inserting context", async () => {
   const calls: Array<[string, string?]> = [];
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
-    click: async () => { calls.push(["clickResult"]); },
   };
   const selectedPlugin = {
     waitFor: async () => { calls.push(["waitForPill"]); },
@@ -53,6 +52,11 @@ test("tool-capable prompts select the exact connector from the @c menu before in
   const composer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
+    pressSequentially: async (value: string, options: { delay: number }) => {
+      expect(options).toEqual({ delay: 25 });
+      calls.push(["pressSequentially", value]);
+    },
+    press: async (value: string) => { calls.push(["composerPress", value]); },
     getByRole: (role: string, options: { name: string; exact: boolean }) => {
       expect(role).toBe("link");
       expect(options).toEqual({ name: "Codex Native", exact: true });
@@ -85,9 +89,9 @@ test("tool-capable prompts select the exact connector from the @c menu before in
   expect(calls).toEqual([
     ["fill", ""],
     ["focus"],
-    ["insertText", "@c"],
+    ["pressSequentially", "@Codex Native"],
     ["waitForResult"],
-    ["clickResult"],
+    ["composerPress", "Enter"],
     ["waitForPill"],
     ["focus"],
     ["press", "End"],
