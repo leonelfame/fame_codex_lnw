@@ -552,14 +552,21 @@ export class ChatGptBrowserWorker {
   }
 
   private selectedConnectorControl(composer: Locator): Locator {
-    return composer.locator("xpath=ancestor::form[1]")
-      .locator('button.__composer-pill[data-tone="accent"]')
+    return composer
+      .locator('[data-inline-selection-pill][data-symbol="ecosystemMention"]')
       .filter({ hasText: this.config.appName, visible: true });
   }
 
   private async connectorIsSelected(composer: Locator): Promise<boolean> {
     const selected = this.selectedConnectorControl(composer);
-    return await selected.count() > 0;
+    const keywords = await selected.evaluateAll(elements => (
+      elements.map(element => element.getAttribute("data-keyword"))
+    ));
+    const exactMatches = keywords.filter(keyword => keyword === this.config.appName).length;
+    if (exactMatches > 1) {
+      throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
+    }
+    return exactMatches === 1;
   }
 
   private async selectConnector(page: Page): Promise<Locator> {
