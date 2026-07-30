@@ -53,7 +53,7 @@ test("the shared Playwright selector types the mention and accepts one exact con
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    click: async () => { calls.push(["clickResult"]); },
+    press: async (key: string) => { calls.push(["pressResult", key]); },
   };
   const selectedPlugin = {
     waitFor: async () => { calls.push(["waitForPill"]); },
@@ -107,7 +107,7 @@ test("the shared Playwright selector types the mention and accepts one exact con
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["clickResult"],
+    ["pressResult", "Enter"],
     ["waitForPill"],
   ]);
 });
