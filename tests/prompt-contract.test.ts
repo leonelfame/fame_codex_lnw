@@ -89,6 +89,47 @@ test("assigns prior assistant output to the model and never attributes Codex con
   expect(compiled.text).toContain("do not attribute, quote, summarize, or otherwise mention them");
 });
 
+test("the replayed context never carries a finished turn's broker handles", () => {
+  const staleToken = "turn_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const staleBinding = "binding_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+  const token = "turn_12345678901234567890123456789012";
+  const replayed: CodexParsedRequest = {
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: {
+      systemPrompt: ["preserve-system"],
+      messages: [
+        { role: "user", content: "keep working", timestamp: 1 },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call_1", name: "codex_bind_turn", arguments: { turn_token: staleToken } }],
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call_1",
+          toolName: "codex_bind_turn",
+          isError: false,
+          content: `{"binding_id":"${staleBinding}"}`,
+          timestamp: 3,
+        },
+      ],
+    },
+    stream: true,
+    options: { reasoning: "high" },
+  };
+
+  const compiled = compileChatGptWebPrompt(replayed, { localToolsEnabled: true, proAvailable: true }, token);
+
+  expect(compiled.text).not.toContain(staleToken);
+  expect(compiled.text).not.toContain(staleBinding);
+  expect(compiled.text).toContain("[retired turn handle]");
+  expect(compiled.text).toContain("[retired binding handle]");
+  expect(compiled.text).toContain(token);
+  expect(compiled.text).toContain("keep working");
+  const envelope = compiled.text.split("<codex_context_json>")[1]!.split("</codex_context_json>")[0]!.trim();
+  expect(() => JSON.parse(envelope) as unknown).not.toThrow();
+});
+
 test("requires ChatGPT-native rich results to include a safe Markdown answer for Codex", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),
