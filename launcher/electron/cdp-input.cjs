@@ -62,36 +62,47 @@ async function dispatchTrustedText({ debuggerClient, text, delayMs = 0, focusExp
   }
   const characters = Array.from(text);
   await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
-    for (const [index, character] of characters.entries()) {
+    let focusEmulationEnabled = false;
+    try {
       if (focusExpression) {
-        const focused = await sendCommand("Runtime.evaluate", {
-          expression: focusExpression,
-          returnByValue: true,
-          awaitPromise: true,
+        await sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+        focusEmulationEnabled = true;
+      }
+      for (const [index, character] of characters.entries()) {
+        if (focusExpression) {
+          const focused = await sendCommand("Runtime.evaluate", {
+            expression: focusExpression,
+            returnByValue: true,
+            awaitPromise: true,
+          });
+          if (focused?.exceptionDetails || focused?.result?.value !== true) {
+            throw new Error("Trusted CDP text could not focus the live composer");
+          }
+        }
+        const description = printableKeyDescription(character);
+        await sendCommand("Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: character,
+          code: description.code,
+          windowsVirtualKeyCode: description.keyCode,
+          nativeVirtualKeyCode: description.keyCode,
+          text: character,
+          unmodifiedText: character,
         });
-        if (focused?.exceptionDetails || focused?.result?.value !== true) {
-          throw new Error("Trusted CDP text could not focus the live composer");
+        await sendCommand("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: character,
+          code: description.code,
+          windowsVirtualKeyCode: description.keyCode,
+          nativeVirtualKeyCode: description.keyCode,
+        });
+        if (delayMs > 0 && index < characters.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
       }
-      const description = printableKeyDescription(character);
-      await sendCommand("Input.dispatchKeyEvent", {
-        type: "keyDown",
-        key: character,
-        code: description.code,
-        windowsVirtualKeyCode: description.keyCode,
-        nativeVirtualKeyCode: description.keyCode,
-        text: character,
-        unmodifiedText: character,
-      });
-      await sendCommand("Input.dispatchKeyEvent", {
-        type: "keyUp",
-        key: character,
-        code: description.code,
-        windowsVirtualKeyCode: description.keyCode,
-        nativeVirtualKeyCode: description.keyCode,
-      });
-      if (delayMs > 0 && index < characters.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } finally {
+      if (focusEmulationEnabled) {
+        await sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false });
       }
     }
   });

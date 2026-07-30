@@ -143,10 +143,12 @@ test("trusted connector mention is typed as discrete keyboard events", async () 
 
 test("trusted connector typing focuses the current composer before every key", async () => {
   const { client, commands, detached } = createDebugger([
+    {},
     { result: { type: "boolean", value: true } },
     {},
     {},
     { result: { type: "boolean", value: true } },
+    {},
     {},
     {},
   ]);
@@ -176,13 +178,28 @@ test("trusted connector typing focuses the current composer before every key", a
       },
     ],
   );
+  assert.deepEqual(
+    commands.filter(({ method }) => method === "Emulation.setFocusEmulationEnabled"),
+    [
+      {
+        method: "Emulation.setFocusEmulationEnabled",
+        params: { enabled: true },
+      },
+      {
+        method: "Emulation.setFocusEmulationEnabled",
+        params: { enabled: false },
+      },
+    ],
+  );
   assert.equal(detached(), true);
 });
 
 test("trusted connector typing fails closed when the live composer cannot be focused", async () => {
-  const { client, detached } = createDebugger([{
-    result: { type: "boolean", value: false },
-  }]);
+  const { client, commands, detached } = createDebugger([
+    {},
+    { result: { type: "boolean", value: false } },
+    {},
+  ]);
   await assert.rejects(
     dispatchTrustedText({
       debuggerClient: client,
@@ -191,6 +208,10 @@ test("trusted connector typing fails closed when the live composer cannot be foc
     }),
     /could not focus the live composer/,
   );
+  assert.deepEqual(commands.at(-1), {
+    method: "Emulation.setFocusEmulationEnabled",
+    params: { enabled: false },
+  });
   assert.equal(detached(), true);
 });
 
