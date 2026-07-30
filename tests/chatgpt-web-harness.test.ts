@@ -563,7 +563,8 @@ describe("ChatGPT outer-native harness v3", () => {
     await broker.nextToolBatch(token);
     broker.revoke(token);
     await expect(invocation).rejects.toThrow("revoked");
-    await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId })).rejects.toThrow("invalid or expired");
+    await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId }))
+      .rejects.toThrow("has already finished");
     await broker.close();
   });
 

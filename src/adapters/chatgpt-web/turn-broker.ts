@@ -66,6 +66,7 @@ interface BrokerResponse {
 
 const brokers = new Map<string, TurnBroker>();
 const MAX_BROKER_LINE_CHARS = 67_108_864;
+const MAX_RETIRED_TURN_HANDLES = 64;
 
 export async function closeTurnBrokers(): Promise<void> {
   const active = [...brokers.values()];
@@ -84,6 +85,10 @@ function opaqueId(prefix: string): string {
 
 function errorOf(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+function retiredTurnLabel(traceId: string): string {
+  return traceId && traceId !== "unknown" ? `Codex turn ${traceId}` : "a Codex turn";
 }
 
 function environmentIdentity(environment: ChatGptTurnEnvironment): string {
@@ -108,6 +113,11 @@ export class TurnBroker {
   private readonly channels = new Map<string, TurnChannel>();
   private readonly pending = new Map<string, TurnChannel>();
   private readonly bindings = new Map<string, { token: string; channel: TurnChannel }>();
+  // The Codex context replayed into ChatGPT still carries the handles of finished turns, so a model
+  // can present one. Remembering which turn retired a handle is what separates "you are holding a
+  // previous turn's handle" from "this handle never existed".
+  private readonly retiredBindings = new Map<string, string>();
+  private readonly retiredTokens = new Map<string, string>();
   private server?: Server;
   private startPromise?: Promise<void>;
 
@@ -176,8 +186,22 @@ export class TurnBroker {
     if (!channel) return;
     this.channels.delete(token);
     this.pending.delete(token);
-    if (channel.bindingId) this.bindings.delete(channel.bindingId);
+    if (channel.bindingId) {
+      this.bindings.delete(channel.bindingId);
+      this.retire(this.retiredBindings, channel.bindingId, channel.traceId);
+    }
+    this.retire(this.retiredTokens, token, channel.traceId);
     this.rejectChannel(channel, new Error("Codex turn binding was revoked"));
+  }
+
+  private retire(history: Map<string, string>, handle: string, traceId: string): void {
+    history.delete(handle);
+    history.set(handle, traceId);
+    while (history.size > MAX_RETIRED_TURN_HANDLES) {
+      const oldest = history.keys().next();
+      if (oldest.done) return;
+      history.delete(oldest.value);
+    }
   }
 
   async close(): Promise<void> {
@@ -334,8 +358,17 @@ export class TurnBroker {
       const token = request.token?.trim();
       if (!token) throw new Error("turn token is required");
       const channel = this.channels.get(token);
-      console.error(`[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)})`);
-      if (!channel) throw new Error("turn token is invalid, expired, or revoked");
+      const retiredTurn = channel ? undefined : this.retiredTokens.get(token);
+      console.error(
+        `[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
+        + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
+      );
+      if (!channel) {
+        throw new Error(retiredTurn !== undefined
+          ? `This turn_token was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
+          + " Use the turn_token supplied with the current task context instead of one from earlier context."
+          : "turn token is invalid, expired, or revoked");
+      }
       if (channel.bindingId) {
         const existing = this.bindings.get(channel.bindingId);
         if (!existing || existing.token !== token || existing.channel !== channel) {
@@ -353,7 +386,17 @@ export class TurnBroker {
     const bindingId = request.bindingId?.trim();
     if (!bindingId) throw new Error("binding id is required");
     const binding = this.bindings.get(bindingId);
-    if (!binding) throw new Error("binding id is invalid or expired");
+    if (!binding) {
+      const retiredTurn = this.retiredBindings.get(bindingId);
+      console.error(
+        `[chatgpt-web] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
+        + ` retiredTurn=${retiredTurn ?? "unknown"})`,
+      );
+      throw new Error(retiredTurn !== undefined
+        ? `This binding_id belongs to ${retiredTurnLabel(retiredTurn)}, which has already finished.`
+        + " Call codex_bind_turn with the current turn_token and use the binding_id it returns."
+        : "binding id is invalid or expired");
+    }
     if (request.method === "release") {
       this.revoke(binding.token);
       return { released: true };

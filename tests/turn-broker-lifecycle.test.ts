@@ -3,7 +3,7 @@ import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/a
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
+import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
 test("explicit browser-turn cancellation aborts and removes every registered session", () => {
@@ -91,6 +91,54 @@ test("turn broker creates its private runtime directory on a cold start", async 
       expect(existsSync(socketPath)).toBe(true);
       expect(statSync(dirname(socketPath)).mode & 0o777).toBe(0o700);
     }
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn broker names the finished turn that owns a replayed handle", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    }, 60_000, "turn-alpha");
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+    broker.revoke(token);
+
+    const rejection = async (request: Parameters<typeof callTurnBroker>[1]): Promise<string> => {
+      try {
+        await callTurnBroker(socketPath, request);
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      throw new Error("turn broker accepted a handle it should have rejected");
+    };
+
+    const replayedBinding = await rejection({
+      method: "invoke",
+      bindingId: claimed.bindingId,
+      wireName: "exec_command",
+    });
+    expect(replayedBinding).toContain("turn-alpha");
+    expect(replayedBinding).toContain("codex_bind_turn");
+
+    const replayedToken = await rejection({ method: "claim", token });
+    expect(replayedToken).toContain("turn-alpha");
+    expect(replayedToken).toContain("current task context");
+
+    const unknownBinding = await rejection({
+      method: "invoke",
+      bindingId: "binding_never-issued",
+      wireName: "exec_command",
+    });
+    expect(unknownBinding).toBe("binding id is invalid or expired");
   } finally {
     await broker.close();
     rmSync(root, { recursive: true, force: true });
