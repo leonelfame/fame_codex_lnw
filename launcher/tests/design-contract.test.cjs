@@ -105,5 +105,24 @@ test("MCP wizard remains locked while a local or supervisor operation is active"
   assert.match(appSource, /const safeMove = async \(next: number\) => \{\s*if \(busy\) return;/);
   assert.match(appSource, /disabled=\{busy \|\| index > step\}/);
   assert.match(appSource, /disabled=\{busy\} onClick=\{\(\) => void safeMove\(1\)\}/);
-  assert.match(appSource, /disabled=\{busy \|\| !doctor\?\.ok\}/);
+  assert.doesNotMatch(appSource, /connectorOpened/);
+});
+
+test("MCP verification has one primary action and exposes live progress", () => {
+  assert.doesNotMatch(
+    appSource,
+    /<SecondaryButton disabled=\{busy \|\| !connectorOpened\} onClick=\{\(\) => void verify\(\)\}>/,
+  );
+  assert.match(appSource, /<PrimaryButton\s+disabled=\{busy\}/);
+  assert.match(appSource, /onClick=\{\(\) => void \(doctor\?\.ok \? onDone\(\) : verify\(\)\)\}/);
+  assert.match(appSource, /operation\?\.name === "mcp-verification"/);
+  assert.match(
+    electronMain,
+    /Checking local runtime[\s\S]*?await runtimeHost\.doctor\(\)[\s\S]*?Checking ChatGPT connector[\s\S]*?await browserHost\.verifyConnector/,
+  );
+  const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
+  assert.doesNotMatch(
+    browserHostSource,
+    /querySelectorAll\('\[role="group"\], \[role="option"\], \[role="menuitem"\]'\)/,
+  );
 });

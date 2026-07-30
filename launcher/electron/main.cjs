@@ -377,11 +377,30 @@ function registerIpc({ logger, stateStore }) {
     return result;
   });
   handle("launcher:mcp-verify", async () => {
-    await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
+    const operationName = "mcp-verification";
+    publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
     const report = await runtimeHost.doctor();
-    if (!report.ok) throw new Error("The connector is visible, but the local MCP runtime is not healthy");
-    stateStore.update({ mcpSetupComplete: true });
-    return report;
+    if (!report.ok) {
+      const message = report.checks
+        .filter((check) => check.status === "error")
+        .map((check) => check.message)
+        .filter(Boolean)
+        .join("; ") || "The local MCP runtime is not healthy";
+      publishOperation({ name: operationName, status: "failed", message });
+      return report;
+    }
+    try {
+      publishOperation({ name: operationName, status: "running", message: "Checking ChatGPT connector" });
+      await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
+      const state = stateStore.update({ mcpSetupComplete: true });
+      send("launcher:state-changed", state);
+      publishOperation({ name: operationName, status: "completed", message: "Runtime and connector verified" });
+      return report;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      publishOperation({ name: operationName, status: "failed", message });
+      throw error;
+    }
   });
 
   handle("launcher:doctor", () => runtimeHost.doctor());

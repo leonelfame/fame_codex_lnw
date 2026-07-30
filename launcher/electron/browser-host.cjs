@@ -1029,11 +1029,11 @@ class BrowserHost {
 
   async runConnectorVerification(appName) {
     if (typeof appName !== "string" || !appName.trim() || appName.length > 80) throw new Error("Connector name is invalid");
-    this.show();
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
+      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    }
     await this.waitForAuthenticated(60_000);
-    await this.selectHighEffort();
     if (!await this.focusComposer()) {
       throw new Error("ChatGPT composer was not available for the connector check");
     }
@@ -1043,7 +1043,7 @@ class BrowserHost {
     while (Date.now() < deadline) {
       const found = await this.view.webContents.executeJavaScript(`(() => {
         const expected = ${JSON.stringify(appName.trim())};
-        return Array.from(document.querySelectorAll('[role="group"], [role="option"], [role="menuitem"]')).some((element) => {
+        return Array.from(document.querySelectorAll('[role="option"], [role="menuitem"]')).some((element) => {
           const rect = element.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0 && (element.innerText || element.textContent || '').includes(expected);
         });
@@ -1103,6 +1103,8 @@ class BrowserHost {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
     this.manualOperation = name;
+    const contents = this.view?.webContents;
+    if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(false);
     try {
       return await action();
     } catch (error) {
@@ -1110,6 +1112,7 @@ class BrowserHost {
       this.setState({ status: "error", message });
       throw error;
     } finally {
+      if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
       this.manualOperation = null;
     }
   }

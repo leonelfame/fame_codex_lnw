@@ -570,6 +570,90 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
   );
 });
 
+test("connector verification is effort-independent and works while the browser surface is hidden", async () => {
+  const calls = [];
+  const fixture = {
+    logger: { info: (event, detail) => calls.push(["log", event, detail]) },
+    setState: (patch) => calls.push(["state", patch]),
+    show: () => calls.push(["show"]),
+    waitForAuthenticated: async () => calls.push(["authenticated"]),
+    selectHighEffort: async () => {
+      throw new Error("connector verification must not select an effort");
+    },
+    focusComposer: async () => {
+      calls.push(["focus"]);
+      return true;
+    },
+    clearFocusedComposer: async () => calls.push(["clear"]),
+    pressBrowserKey: (key) => calls.push(["key", key]),
+    view: {
+      webContents: {
+        getURL: () => "about:blank",
+        loadURL: async (url) => calls.push(["load", url]),
+        insertText: (text) => calls.push(["insert", text]),
+        executeJavaScript: async () => true,
+      },
+    },
+  };
+
+  const result = await BrowserHost.prototype.runConnectorVerification.call(fixture, "Codex Native");
+
+  assert.deepEqual(result, { ok: true, appName: "Codex Native" });
+  assert.equal(calls.some(([type]) => type === "show"), false);
+  assert.deepEqual(
+    calls.filter(([type]) => ["load", "insert"].includes(type)),
+    [
+      ["load", "https://chatgpt.com/?temporary-chat=true"],
+      ["insert", "@Codex Native"],
+    ],
+  );
+});
+
+test("connector verification preserves an already hydrated Temporary Chat page", async () => {
+  let loaded = false;
+  const fixture = {
+    logger: { info() {} },
+    setState() {},
+    waitForAuthenticated: async () => {},
+    focusComposer: async () => true,
+    clearFocusedComposer: async () => {},
+    pressBrowserKey() {},
+    view: {
+      webContents: {
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        loadURL: async () => { loaded = true; },
+        insertText() {},
+        executeJavaScript: async () => true,
+      },
+    },
+  };
+
+  await BrowserHost.prototype.runConnectorVerification.call(fixture, "Codex Native");
+
+  assert.equal(loaded, false);
+});
+
+test("manual browser operations disable background throttling until completion", async () => {
+  const throttling = [];
+  const fixture = {
+    activeTraceId: null,
+    manualOperation: null,
+    setState() {},
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        setBackgroundThrottling: (enabled) => throttling.push(enabled),
+      },
+    },
+  };
+
+  const result = await BrowserHost.prototype.withManualOperation.call(fixture, "hidden check", async () => "ok");
+
+  assert.equal(result, "ok");
+  assert.deepEqual(throttling, [false, true]);
+  assert.equal(fixture.manualOperation, null);
+});
+
 test("a stale helper cannot end a replacement turn with the same trace id", async () => {
   await assert.rejects(
     BrowserHost.prototype.endTurn.call(

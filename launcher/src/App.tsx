@@ -795,7 +795,6 @@ function McpSurface({
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const [connectorOpened, setConnectorOpened] = useState(false);
   const steps = useMemo(() => [
     { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
     { title: copy.mcpStepTwo, body: copy.mcpStepTwoBody },
@@ -842,6 +841,7 @@ function McpSurface({
     if (busy) return;
     setLocalBusy(true);
     setError(null);
+    setDoctor(null);
     try {
       setDoctor(await api!.verifyMcp());
       updateState((await api!.snapshot()).state);
@@ -945,16 +945,12 @@ function McpSurface({
                       setError(null);
                       try {
                         await api!.openExternal(snapshot.urls.connectors);
-                        setConnectorOpened(true);
                       } catch (cause) {
                         setError(messageOf(cause));
                       }
                     })()}
                   >
                     {copy.openConnectors}
-                  </SecondaryButton>
-                  <SecondaryButton disabled={busy || !connectorOpened} onClick={() => void verify()}>
-                    {copy.verifyRuntime}
                   </SecondaryButton>
                 </div>
                 {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
@@ -975,8 +971,15 @@ function McpSurface({
           </PrimaryButton>
         ) : null}
         {step === 2 ? (
-          <PrimaryButton disabled={busy || !doctor?.ok} onClick={onDone}>
-            {doctor?.ok ? copy.done : copy.verifyRuntime}
+          <PrimaryButton
+            disabled={busy}
+            onClick={() => void (doctor?.ok ? onDone() : verify())}
+          >
+            {busy
+              ? operation?.name === "mcp-verification" && operation.status === "running"
+                ? operation.message
+                : copy.running
+              : doctor?.ok ? copy.done : copy.verifyRuntime}
           </PrimaryButton>
         ) : null}
       </div>
