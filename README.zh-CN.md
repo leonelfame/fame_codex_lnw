@@ -35,6 +35,9 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 
 ## 亮点
 
+- **精致的跨平台启动器。** 一条命令即可安装原生 macOS、Windows 或 Linux 应用。登录、设置、
+  冒烟测试、MCP 指南、运行状态和本地日志都集中在同一处；内置浏览器还能让你实时看到每个
+  ChatGPT 轮次的执行过程。
 - **原生 Codex harness。** 使用的仍然是你熟悉的 Codex 模型选择器、任务历史、上下文生命周期、
   审批、沙箱、流式输出、追踪和工具界面，而不是另一个聊天客户端。与 OpenCodex 类似，
   它只更换模型后端，同时保留原生工作流。

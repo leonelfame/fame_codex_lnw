@@ -35,6 +35,9 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 
 ## Highlights
 
+- **A polished cross-platform launcher.** One command installs the native macOS, Windows, or Linux
+  app. It keeps sign-in, setup, smoke testing, MCP guidance, runtime health, and local logs in one
+  place, while the embedded browser lets you watch every ChatGPT turn as it happens.
 - **Native Codex harness.** This is the same model-picker, task history, context lifecycle,
   approvals, sandbox, streaming, tracing, and tool UI you already use in Codex—not a second chat
   client. Like OpenCodex, it changes the model backend while preserving the native workflow.
