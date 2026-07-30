@@ -1,4 +1,6 @@
 import { createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { closeTurnBrokers } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
@@ -152,6 +154,9 @@ export async function responseRequest(req: Request, config: AppConfig): Promise<
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
   }
+  const requestedPreviousResponseId = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as { previous_response_id?: unknown }).previous_response_id
+    : undefined;
   const expanded = expandPreviousResponseInput(raw);
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
@@ -160,6 +165,13 @@ export async function responseRequest(req: Request, config: AppConfig): Promise<
     route = routeChatGptWebRequest(parsed, config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  if (typeof requestedPreviousResponseId === "string" && expanded === raw) {
+    return formatErrorResponse(
+      409,
+      "invalid_request_error",
+      "Local continuation state for previous_response_id is unavailable; refusing to run ChatGPT Web with partial Codex context. Compact the Codex task or start a new task before retrying.",
+    );
   }
 
   if (parsed._compactionRequest === true) {
@@ -260,9 +272,15 @@ export async function compactRequest(req: Request, _config: AppConfig): Promise<
   );
 }
 
-export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
+export function startServer(
+  config: AppConfig,
+  dependencies: { fetchUpstream?: NativeFetch } = {},
+): ReturnType<typeof Bun.serve> {
   const startedAt = Date.now();
   let draining = false;
+  let shutdownPromise: Promise<void> | undefined;
+  let successfulModelCatalogRequests = 0;
+  let lastSuccessfulModelCatalogRequestAt: string | null = null;
   const httpTurns = new HttpTurnCounter();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
@@ -290,6 +308,8 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
           accepting_turns: !draining,
+          successful_model_catalog_requests: successfulModelCatalogRequests,
+          last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           ...activity(),
         });
       }
@@ -303,8 +323,43 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
         const cancelled = chatGptTurnSessions.clear();
         return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() });
       }
+      if (req.method === "POST" && url.pathname === "/admin/shutdown") {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        const current = activity();
+        if (!draining || current.active_http_turns > 0 || current.active_browser_turns > 0) {
+          return Response.json(
+            {
+              status: "refused",
+              accepting_turns: !draining,
+              ...current,
+            },
+            { status: 409 },
+          );
+        }
+        setTimeout(shutdown, 0);
+        return Response.json({ status: "ok", accepting_turns: false, ...current });
+      }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        return modelsRequest(req, config, undefined, readCodexModelContextOverride);
+        if (draining) {
+          return formatErrorResponse(
+            503,
+            "server_error",
+            "codex-chatgpt-web is draining for a requested service operation",
+          );
+        }
+        return httpTurns.track(async () => {
+          const response = await modelsRequest(
+            req,
+            config,
+            dependencies.fetchUpstream,
+            readCodexModelContextOverride,
+          );
+          if (response.ok) {
+            successfulModelCatalogRequests += 1;
+            lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
+          }
+          return response;
+        });
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
@@ -323,11 +378,31 @@ export function startServer(config: AppConfig): ReturnType<typeof Bun.serve> {
       return new Response("Not found", { status: 404 });
     },
   });
-  const shutdown = () => {
+  function shutdown(): void {
+    if (shutdownPromise) return;
     draining = true;
+    chatGptTurnSessions.clear();
     flushResponseState();
-    void server.stop(true);
-  };
+    shutdownPromise = (async () => {
+      const results = await Promise.allSettled([
+        closeChatGptBrowserWorkers(),
+        closeTurnBrokers(),
+      ]);
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map(result => result.reason);
+      if (failures.length > 0) {
+        process.exitCode = 1;
+        for (const failure of failures) {
+          console.error(`[codex-chatgpt-web] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+        }
+      }
+      await server.stop(true);
+    })().catch(error => {
+      process.exitCode = 1;
+      console.error(`[codex-chatgpt-web] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   return server;

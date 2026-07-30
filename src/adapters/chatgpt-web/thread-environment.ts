@@ -32,8 +32,13 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function pathIdentity(value: string): string {
+  const normalized = resolve(value);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 function contains(root: string, path: string): boolean {
-  const rel = relative(root, path);
+  const rel = relative(pathIdentity(root), pathIdentity(path));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
@@ -41,13 +46,18 @@ function absolutePaths(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length === 0 || value.some(path => typeof path !== "string" || !isAbsolute(path))) {
     throw new Error(`Invalid persisted ChatGPT thread ${field}`);
   }
-  return [...new Set(value.map(path => resolve(path as string)))];
+  const unique = new Map<string, string>();
+  for (const path of value.map(path => resolve(path as string))) {
+    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
+  }
+  return [...unique.values()];
 }
 
 function sandboxPolicy(value: unknown, roots: string[], writableRoots: string[]): ChatGptSandboxPolicy {
   const parsed = record(value);
   if (parsed?.type === "dangerFullAccess") {
-    if (writableRoots.length !== roots.length || writableRoots.some(path => !roots.includes(path))) {
+    const rootIdentities = new Set(roots.map(pathIdentity));
+    if (writableRoots.length !== roots.length || writableRoots.some(path => !rootIdentities.has(pathIdentity(path)))) {
       throw new Error("Invalid persisted ChatGPT danger-full-access roots");
     }
     return { type: "dangerFullAccess" };

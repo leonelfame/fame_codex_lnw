@@ -1,10 +1,12 @@
 #!/usr/bin/env bun
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
+import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
 import { getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
+import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 import { uninstallCodexIntegration } from "./codex-integration";
 import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
@@ -38,6 +40,8 @@ Setup options:
   --full                       Fixed Instant–Extra High tool models plus read-only Pro
   --port NUMBER                Loopback Responses port (default: 17841)
   --chrome PATH                Google Chrome executable
+  --browser-host-descriptor PATH
+                               Use the embedded launcher browser described by this owner-only file
   --app-name NAME              ChatGPT connector name (default: Codex Native)
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
@@ -117,7 +121,10 @@ async function setupCommand(args: string[]): Promise<void> {
   const tunnelId = takeOption(args, "--tunnel-id");
   const runtimeKeyFile = takeOption(args, "--runtime-key-file");
   const chrome = takeOption(args, "--chrome");
+  const browserHostDescriptorPath = takeOption(args, "--browser-host-descriptor");
+  if (chrome && browserHostDescriptorPath) throw new Error("Choose either --chrome or --browser-host-descriptor, not both");
   if (chrome) options.chromeExecutablePath = chrome;
+  if (browserHostDescriptorPath) options.browserHostDescriptorPath = browserHostDescriptorPath;
   if (appName) options.appName = appName;
   if (tunnelId) options.tunnelId = tunnelId;
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
@@ -242,21 +249,41 @@ async function openCommand(args: string[]): Promise<void> {
 async function uninstallCommand(args: string[]): Promise<void> {
   const yes = takeFlag(args, "--yes");
   const keepData = takeFlag(args, "--keep-data");
+  const launcherControl = takeFlag(args, "--launcher-control");
   assertNoArgs(args);
+  if (launcherControl) {
+    const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+    const supplied = process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN?.trim();
+    if (!descriptorPath || !supplied) {
+      throw new Error("Launcher-controlled uninstall requires a live launcher authorization");
+    }
+    const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+    const expectedBytes = Buffer.from(descriptor.control.token);
+    const suppliedBytes = Buffer.from(supplied);
+    if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
+      throw new Error("Launcher-controlled uninstall authorization is invalid");
+    }
+    delete process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN;
+  }
   if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
     throw new Error("Uninstall cancelled");
   }
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
+  if (config?.browserHost === "launcher" && !launcherControl) {
+    throw new Error(
+      "Launcher-owned integration must be removed from Codex Web GPT Settings so the active runtime can be drained safely.",
+    );
+  }
   if (!config && process.platform === "darwin" && getServiceStatus().installed) {
     throw new Error("Service exists but configuration is missing; refusing an unverifiable uninstall");
   }
   if (config && process.platform === "darwin") await assertServiceIdle(config);
-  uninstallCodexIntegration();
   if (config?.mode === "full") {
     if (process.platform === "darwin") await uninstallTunnelService();
     stopTunnel(config);
   }
   if (config && process.platform === "darwin") await uninstallService(config);
+  uninstallCodexIntegration();
   if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
   stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
 }
@@ -278,15 +305,25 @@ async function main(): Promise<void> {
   else if (command === "setup") await setupCommand(args);
   else if (command === "login") {
     assertNoArgs(args);
-    const result = await loginToChatGpt(loadConfig());
+    const config = loadConfig();
+    if (config.browserHost === "launcher") {
+      throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
+    }
+    const result = await loginToChatGpt(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
   } else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);
     if (action !== "check") throw new Error("Browser command must be: browser check");
-    await checkBrowserEngine(loadConfig());
-    stdout.write("Playwright can launch the configured Chrome executable.\n");
+    const config = loadConfig();
+    if (config.browserHost === "launcher") {
+      await inspectLauncherBrowserHost(config.browserHostDescriptorPath!);
+      stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
+    } else {
+      await checkBrowserEngine(config);
+      stdout.write("Playwright can launch the configured Chrome executable.\n");
+    }
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();

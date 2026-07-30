@@ -1,0 +1,264 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { expandUserPath } from "./config";
+import { processRunning } from "./process";
+
+export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
+
+export interface LauncherBrowserHostDescriptor {
+  version: 1;
+  kind: typeof LAUNCHER_BROWSER_HOST_KIND;
+  pid: number;
+  endpoint: string;
+  control: {
+    endpoint: string;
+    token: string;
+  };
+  helper: {
+    executable: string;
+    script: string;
+  };
+  partition: string;
+  idleUrl: string;
+  surfaceId: string;
+  createdAt: string;
+}
+
+export interface LauncherBrowserConnection {
+  descriptor: LauncherBrowserHostDescriptor;
+  browser: Browser;
+  context: BrowserContext;
+  page: Page;
+}
+
+function assertLoopbackEndpoint(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is missing`);
+  let parsed: URL;
+  try { parsed = new URL(value); }
+  catch { throw new Error(`${label} is not a valid URL`); }
+  if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") {
+    throw new Error(`${label} must use http://127.0.0.1`);
+  }
+  if (!parsed.port || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(`${label} must contain only a loopback host and explicit port`);
+  }
+  return parsed.origin;
+}
+
+function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Launcher browser descriptor is not an object");
+  }
+  const descriptor = value as Partial<LauncherBrowserHostDescriptor>;
+  if (descriptor.version !== 1 || descriptor.kind !== LAUNCHER_BROWSER_HOST_KIND) {
+    throw new Error("Launcher browser descriptor has an unsupported identity or version");
+  }
+  if (!Number.isInteger(descriptor.pid) || descriptor.pid! < 1) {
+    throw new Error("Launcher browser descriptor has an invalid pid");
+  }
+  const endpoint = assertLoopbackEndpoint(descriptor.endpoint, "Launcher CDP endpoint");
+  if (!descriptor.control || typeof descriptor.control !== "object") {
+    throw new Error("Launcher browser descriptor is missing its control channel");
+  }
+  const controlEndpoint = assertLoopbackEndpoint(descriptor.control.endpoint, "Launcher control endpoint");
+  if (typeof descriptor.control.token !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(descriptor.control.token)) {
+    throw new Error("Launcher browser descriptor has an invalid control token");
+  }
+  if (!descriptor.helper || typeof descriptor.helper !== "object") {
+    throw new Error("Launcher browser descriptor is missing its Node helper command");
+  }
+  const helperExecutable = typeof descriptor.helper.executable === "string" ? resolve(descriptor.helper.executable) : "";
+  const helperScript = typeof descriptor.helper.script === "string" ? resolve(descriptor.helper.script) : "";
+  if (!helperExecutable || !existsSync(helperExecutable)) {
+    throw new Error("Launcher browser descriptor helper executable does not exist");
+  }
+  if (!helperScript || !existsSync(helperScript)) {
+    throw new Error("Launcher browser descriptor helper script does not exist");
+  }
+  if (descriptor.partition !== "persist:codex-web-gpt-chatgpt") {
+    throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
+  }
+  if (descriptor.idleUrl !== "about:blank#codex-web-gpt-browser-host") {
+    throw new Error("Launcher browser descriptor identifies an unexpected idle surface");
+  }
+  if (typeof descriptor.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(descriptor.surfaceId)) {
+    throw new Error("Launcher browser descriptor has an invalid owned surface id");
+  }
+  if (typeof descriptor.createdAt !== "string" || Number.isNaN(Date.parse(descriptor.createdAt))) {
+    throw new Error("Launcher browser descriptor has an invalid creation time");
+  }
+  return {
+    version: 1,
+    kind: LAUNCHER_BROWSER_HOST_KIND,
+    pid: descriptor.pid!,
+    endpoint,
+    control: { endpoint: controlEndpoint, token: descriptor.control.token },
+    helper: { executable: helperExecutable, script: helperScript },
+    partition: descriptor.partition,
+    idleUrl: descriptor.idleUrl,
+    surfaceId: descriptor.surfaceId,
+    createdAt: descriptor.createdAt,
+  };
+}
+
+export function readLauncherBrowserHostDescriptor(configuredPath: string): LauncherBrowserHostDescriptor {
+  const path = resolve(expandUserPath(configuredPath));
+  if (!existsSync(path)) throw new Error(`Launcher browser host is unavailable: descriptor is missing at ${path}`);
+  const stat = statSync(path);
+  if (!stat.isFile()) throw new Error(`Launcher browser descriptor is not a regular file: ${path}`);
+  if (process.platform !== "win32") {
+    if ((stat.mode & 0o077) !== 0) throw new Error(`Launcher browser descriptor has unsafe permissions: ${path}`);
+    const getuid = process.getuid;
+    if (typeof getuid === "function" && stat.uid !== getuid()) {
+      throw new Error(`Launcher browser descriptor is not owned by the current user: ${path}`);
+    }
+  }
+  let decoded: unknown;
+  try { decoded = JSON.parse(readFileSync(path, "utf8")); }
+  catch (error) {
+    throw new Error(`Launcher browser descriptor is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const descriptor = assertDescriptorShape(decoded);
+  if (!processRunning(descriptor.pid)) {
+    throw new Error(`Launcher browser host process is not running (pid ${descriptor.pid})`);
+  }
+  return descriptor;
+}
+
+async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeoutMs: number): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${descriptor.endpoint}/json/version`, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json() as Record<string, unknown>;
+    if (typeof body.webSocketDebuggerUrl !== "string" || !body.webSocketDebuggerUrl.startsWith("ws://127.0.0.1:")) {
+      throw new Error("CDP metadata did not expose a loopback WebSocket endpoint");
+    }
+  } catch (error) {
+    throw new Error(`Launcher browser CDP endpoint is not ready: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function selectLauncherPage(
+  browser: Browser,
+  descriptor: LauncherBrowserHostDescriptor,
+  timeoutMs: number,
+): Promise<{ context: BrowserContext; page: Page }> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
+    const inspected = await Promise.all(candidates.map(async candidate => ({
+      ...candidate,
+      surfaceId: await candidate.page.evaluate(
+        () => (globalThis as typeof globalThis & { __CODEX_WEB_GPT_SURFACE_ID__?: unknown })
+          .__CODEX_WEB_GPT_SURFACE_ID__,
+      ).catch(() => undefined),
+    })));
+    const owned = inspected.filter(candidate => candidate.surfaceId === descriptor.surfaceId);
+    if (owned.length === 1) {
+      return { context: owned[0].context, page: owned[0].page };
+    }
+    if (owned.length > 1) {
+      throw new Error(`Launcher browser host exposed ${owned.length} surfaces with the same ownership id`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  throw new Error("Launcher browser host did not expose its owned browser surface");
+}
+
+export async function connectLauncherBrowserHost(
+  descriptorPath: string,
+  timeoutMs = 20_000,
+): Promise<LauncherBrowserConnection> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
+  let browser: Browser;
+  try {
+    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
+  } catch (error) {
+    throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const { context, page } = await selectLauncherPage(browser, descriptor, timeoutMs);
+  return { descriptor, browser, context, page };
+}
+
+export async function inspectLauncherBrowserHost(
+  descriptorPath: string,
+  options: { detectPro?: boolean; timeoutMs?: number } = {},
+): Promise<{ proAvailable?: boolean; url: string }> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/session/inspect`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ detectPro: options.detectPro === true }),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `HTTP ${response.status}`);
+    if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
+      throw new Error("Launcher returned invalid ChatGPT session evidence");
+    }
+    if (options.detectPro && typeof body.proAvailable !== "boolean") {
+      throw new Error("Launcher did not return ChatGPT Pro capability evidence");
+    }
+    return { url: body.url, ...(options.detectPro ? { proAvailable: body.proAvailable as boolean } : {}) };
+  } catch (error) {
+    throw new Error(`Launcher ChatGPT session could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type LauncherTurnActivity =
+  | { phase: "start"; traceId: string; helperPid: number }
+  | {
+      phase: "end";
+      traceId: string;
+      helperPid: number;
+      status: "completed" | "failed" | "aborted";
+      message?: string;
+    };
+
+export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
+export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
+
+export async function notifyLauncherTurn(
+  descriptorPath: string,
+  activity: LauncherTurnActivity,
+  timeoutMs = activity.phase === "end"
+    ? LAUNCHER_TURN_END_TIMEOUT_MS
+    : LAUNCHER_TURN_START_TIMEOUT_MS,
+): Promise<void> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(activity),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
+  } catch (error) {
+    throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}

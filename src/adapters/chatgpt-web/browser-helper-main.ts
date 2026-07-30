@@ -1,0 +1,190 @@
+import { createInterface } from "node:readline";
+import { stdin, stderr, stdout } from "node:process";
+import type { CodexProviderConfig } from "../../types";
+import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
+import type { ChatGptWebCapabilities } from "./model";
+import type { CompiledChatGptWebPrompt } from "./prompt";
+
+interface RunMessage {
+  type: "run";
+  id: string;
+  config: {
+    appName: string;
+    browserHostDescriptorPath: string;
+    turnTimeoutMs: number;
+    autoApproveToolCalls: boolean;
+  };
+  turn: {
+    traceId: string;
+    modelId: string;
+    reasoning?: string;
+    capabilities: ChatGptWebCapabilities;
+    prepared: CompiledChatGptWebPrompt;
+  };
+}
+
+interface VerifyMessage {
+  type: "verify";
+  id: string;
+  config: {
+    appName: string;
+    browserHostDescriptorPath: string;
+  };
+}
+
+type InputMessage = RunMessage | VerifyMessage | { type: "abort"; id: string } | { type: "shutdown" };
+
+const writeProtocol = (message: unknown): void => {
+  stdout.write(`${JSON.stringify(message)}\n`);
+};
+
+const diagnostic = (...values: unknown[]): void => {
+  stderr.write(`${values.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" ")}\n`);
+};
+console.info = diagnostic;
+console.warn = diagnostic;
+console.error = diagnostic;
+
+const abortControllers = new Map<string, AbortController>();
+let shuttingDown = false;
+let shutdownPromise: Promise<void> | undefined;
+
+function requestShutdown(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  let completeShutdown!: () => void;
+  shutdownPromise = new Promise<void>(resolveShutdown => {
+    completeShutdown = resolveShutdown;
+  });
+  shuttingDown = true;
+  for (const controller of abortControllers.values()) controller.abort();
+  input.close();
+  void closeChatGptBrowserWorkers().then(
+    () => {
+      completeShutdown();
+      process.exit(0);
+    },
+    error => {
+      diagnostic(`Browser helper shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      completeShutdown();
+      process.exit(1);
+    },
+  );
+  return shutdownPromise;
+}
+
+async function run(message: RunMessage): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id) || message.id !== message.turn.traceId) {
+    throw new Error("Browser helper turn identity is invalid");
+  }
+  if (abortControllers.has(message.id)) throw new Error(`Browser helper turn already exists: ${message.id}`);
+  if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {
+    throw new Error("Browser helper prompt is invalid");
+  }
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: "https://chatgpt.com",
+    chatgptWeb: {
+      appName: message.config.appName,
+      browserHost: "launcher",
+      browserHostDescriptorPath: message.config.browserHostDescriptorPath,
+      turnTimeoutMs: message.config.turnTimeoutMs,
+      autoApproveToolCalls: message.config.autoApproveToolCalls,
+    },
+  };
+  const abortController = new AbortController();
+  abortControllers.set(message.id, abortController);
+  const turn: BrowserTurn = {
+    traceId: message.turn.traceId,
+    modelId: message.turn.modelId,
+    reasoning: message.turn.reasoning,
+    capabilities: message.turn.capabilities,
+    prepare: async () => ({ ...message.turn.prepared, release: () => {} }),
+    abortSignal: abortController.signal,
+    onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
+    onReasoningSummary: text => writeProtocol({ type: "event", id: message.id, event: "reasoning", text }),
+    onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
+    onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
+  };
+  try {
+    const text = await ChatGptBrowserWorker.forProvider(provider).run(turn);
+    writeProtocol({ type: "result", id: message.id, text });
+  } catch (error) {
+    writeProtocol({
+      type: "error",
+      id: message.id,
+      name: error instanceof Error ? error.name : "Error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    abortControllers.delete(message.id);
+  }
+}
+
+async function verify(message: VerifyMessage): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id)) {
+    throw new Error("Browser helper verification identity is invalid");
+  }
+  const appName = message.config.appName?.trim();
+  const browserHostDescriptorPath = message.config.browserHostDescriptorPath?.trim();
+  if (!appName || appName.length > 80 || !browserHostDescriptorPath) {
+    throw new Error("Browser helper verification config is invalid");
+  }
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: "https://chatgpt.com",
+    chatgptWeb: {
+      appName,
+      browserHost: "launcher",
+      browserHostDescriptorPath,
+    },
+  };
+  try {
+    const selected = await ChatGptBrowserWorker.forProvider(provider).verifyConnector();
+    writeProtocol({ type: "result", id: message.id, text: selected });
+  } catch (error) {
+    writeProtocol({
+      type: "error",
+      id: message.id,
+      name: error instanceof Error ? error.name : "Error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+const input = createInterface({ input: stdin, crlfDelay: Infinity });
+input.on("line", line => {
+  if (shuttingDown) return;
+  let message: InputMessage;
+  try { message = JSON.parse(line) as InputMessage; }
+  catch {
+    writeProtocol({ type: "error", id: "protocol", message: "Browser helper received invalid JSON" });
+    return;
+  }
+  if (message.type === "abort") abortControllers.get(message.id)?.abort();
+  else if (message.type === "shutdown") {
+    void requestShutdown();
+  } else if (message.type === "verify") {
+    void verify(message).catch(error => writeProtocol({
+      type: "error",
+      id: message.id,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+  } else {
+    void run(message).catch(error => writeProtocol({
+      type: "error",
+      id: message.id,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+  }
+});
+input.on("close", () => {
+  void requestShutdown();
+});
+process.once("SIGINT", () => {
+  void requestShutdown();
+});
+process.once("SIGTERM", () => {
+  void requestShutdown();
+});
+
+writeProtocol({ type: "ready" });

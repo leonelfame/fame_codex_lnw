@@ -70,3 +70,121 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
     await server.stop(true);
   }
 });
+
+test("a drained runtime rejects new model-catalog work before shutdown", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  const endpoint = `http://127.0.0.1:${server.port}`;
+  const authorization = { authorization: `Bearer ${config.controlToken}` };
+  try {
+    const drain = await fetch(`${endpoint}/admin/drain`, {
+      method: "POST",
+      headers: authorization,
+    });
+    expect(drain.status).toBe(200);
+
+    const models = await fetch(`${endpoint}/v1/models`);
+    expect(models.status).toBe(503);
+    expect(await models.json()).toMatchObject({
+      error: {
+        type: "server_error",
+        message: "codex-chatgpt-web is draining for a requested service operation",
+      },
+    });
+
+    const resume = await fetch(`${endpoint}/admin/resume`, {
+      method: "POST",
+      headers: authorization,
+    });
+    expect(resume.status).toBe(200);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("health proves that Codex received a successful augmented model catalog", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config, {
+    fetchUpstream: async () => Response.json({
+      models: [{
+        slug: "gpt-5.6-sol",
+        display_name: "5.6 Sol",
+        visibility: "list",
+        supported_in_api: true,
+        supported_reasoning_levels: [],
+        tool_mode: "code_mode_only",
+      }],
+    }),
+  });
+  const endpoint = `http://127.0.0.1:${server.port}`;
+  try {
+    expect(await (await fetch(`${endpoint}/healthz`)).json()).toMatchObject({
+      successful_model_catalog_requests: 0,
+      last_successful_model_catalog_request_at: null,
+    });
+
+    const models = await fetch(`${endpoint}/v1/models`, {
+      headers: { authorization: "Bearer test-codex-session" },
+    });
+    expect(models.status).toBe(200);
+
+    const health = await (await fetch(`${endpoint}/healthz`)).json() as Record<string, unknown>;
+    expect(health.successful_model_catalog_requests).toBe(1);
+    expect(typeof health.last_successful_model_catalog_request_at).toBe("string");
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("authenticated shutdown requires a verified idle drain", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  const endpoint = `http://127.0.0.1:${server.port}`;
+  const authorization = { authorization: `Bearer ${config.controlToken}` };
+
+  try {
+    const unauthorized = await fetch(`${endpoint}/admin/shutdown`, {
+      method: "POST",
+      headers: { authorization: "Bearer invalid" },
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const undrained = await fetch(`${endpoint}/admin/shutdown`, {
+      method: "POST",
+      headers: authorization,
+    });
+    expect(undrained.status).toBe(409);
+
+    const drain = await fetch(`${endpoint}/admin/drain`, {
+      method: "POST",
+      headers: authorization,
+    });
+    expect(drain.status).toBe(200);
+
+    const shutdown = await fetch(`${endpoint}/admin/shutdown`, {
+      method: "POST",
+      headers: authorization,
+    });
+    expect(shutdown.status).toBe(200);
+    expect(await shutdown.json()).toMatchObject({
+      status: "ok",
+      accepting_turns: false,
+      active_http_turns: 0,
+      active_browser_turns: 0,
+    });
+
+    const deadline = Date.now() + 2_000;
+    let stopped = false;
+    while (Date.now() < deadline && !stopped) {
+      await Bun.sleep(20);
+      try {
+        await fetch(`${endpoint}/healthz`);
+      } catch {
+        stopped = true;
+      }
+    }
+    expect(stopped).toBe(true);
+  } finally {
+    await server.stop(true);
+  }
+});

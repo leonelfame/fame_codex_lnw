@@ -15,6 +15,8 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
       models: [{
         slug: "gpt-5.6-sol",
         display_name: "5.6 Sol",
+        visibility: "list",
+        supported_in_api: true,
         supported_reasoning_levels: [],
         tool_mode: "code_mode_only",
       }],

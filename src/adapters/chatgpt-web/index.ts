@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { expandUserPath, getConfigDir } from "../../config";
+import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
@@ -15,7 +15,7 @@ import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
-  return resolve(expandUserPath(configured || `${getConfigDir()}/runtime/turn-broker.sock`));
+  return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {

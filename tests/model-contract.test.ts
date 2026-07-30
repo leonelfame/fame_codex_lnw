@@ -5,23 +5,23 @@ test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes
   const capabilities = { localToolsEnabled: true, proAvailable: true };
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", capabilities)).toMatchObject({
     displayLabel: "Instant",
-    uiEffortLabel: "Instant 5.5",
+    uiEffortIndex: 0,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "medium", capabilities)).toMatchObject({
-    uiEffortLabel: "Medium",
+    uiEffortIndex: 1,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "high", capabilities)).toMatchObject({
-    uiEffortLabel: "High",
+    uiEffortIndex: 2,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", capabilities)).toMatchObject({
-    uiEffortLabel: "Extra High",
+    uiEffortIndex: 3,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", capabilities)).toMatchObject({
-    uiEffortLabel: "Pro",
+    uiEffortIndex: 4,
     localTools: false,
   });
 });

@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  getCodexHome,
   getCodexJournalPath,
+  getCodexModelsCachePath,
   installCodexIntegration,
+  preflightCodexIntegration,
   readCodexModelContextOverride,
   uninstallCodexIntegration,
 } from "../src/codex-integration";
@@ -30,6 +33,11 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("expands a configured tilde Codex home consistently with launcher paths", () => {
+    process.env.CODEX_HOME = "~/custom-codex-home";
+    expect(getCodexHome()).toBe(join(homedir(), "custom-codex-home"));
+  });
+
   test("reads the selected model's explicit context override from Codex config", () => {
     const { codexHome } = fixture();
     writeFileSync(
@@ -62,6 +70,21 @@ describe("reversible native Codex route integration", () => {
     expect(uninstallCodexIntegration()).toEqual({ changed: false });
   });
 
+  test("invalidates Codex's provider-agnostic model cache on install and uninstall", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const cachePath = getCodexModelsCachePath();
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    writeFileSync(cachePath, '{"models":["native-only"]}\n');
+
+    installCodexIntegration(defaultConfig("browser-only"));
+    expect(() => readFileSync(cachePath, "utf8")).toThrow();
+
+    writeFileSync(cachePath, '{"models":["native-and-web"]}\n');
+    uninstallCodexIntegration();
+    expect(() => readFileSync(cachePath, "utf8")).toThrow();
+  });
+
   test("requires explicit replacement and restores every prior route assignment", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");
@@ -80,6 +103,18 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toBe(original);
   });
 
+  test("preflight detects route conflicts without changing Codex or creating a journal", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:9999/v1"\n';
+    writeFileSync(configPath, original);
+
+    expect(() => preflightCodexIntegration(defaultConfig("browser-only")))
+      .toThrow("--replace-codex-route");
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(() => readFileSync(getCodexJournalPath(), "utf8")).toThrow();
+  });
+
   test("updates its own route idempotently without changing the preserved baseline", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");
@@ -92,6 +127,38 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toContain('openai_base_url = "http://127.0.0.1:17842/v1"');
     uninstallCodexIntegration();
     expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5.6-sol"\n');
+  });
+
+  test("does not apply one application home's journal to a different Codex home", () => {
+    const { root, codexHome } = fixture();
+    const firstConfig = join(codexHome, "config.toml");
+    writeFileSync(firstConfig, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+
+    const secondCodexHome = join(root, "other-codex");
+    mkdirSync(secondCodexHome, { recursive: true });
+    const secondConfig = join(secondCodexHome, "config.toml");
+    writeFileSync(secondConfig, 'model = "gpt-5.5"\n');
+    process.env.CODEX_HOME = secondCodexHome;
+
+    expect(() => preflightCodexIntegration(defaultConfig("browser-only")))
+      .toThrow("journal belongs");
+    expect(readFileSync(secondConfig, "utf8")).toBe('model = "gpt-5.5"\n');
+  });
+
+  test("preserves Windows line endings and a missing final newline", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const windowsOriginal = 'model = "gpt-5.6-sol"\r\n\r\n[features]\r\ngoals = true';
+    writeFileSync(configPath, windowsOriginal);
+
+    installCodexIntegration(defaultConfig("browser-only"));
+    const installed = readFileSync(configPath, "utf8");
+    expect(installed).toContain('\r\nopenai_base_url = "http://127.0.0.1:17841/v1"\r\n');
+    expect(installed.endsWith("\n")).toBe(false);
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(windowsOriginal);
   });
 
   test("migrates the removed static-catalog integration without reviving a missing foreign catalog", () => {

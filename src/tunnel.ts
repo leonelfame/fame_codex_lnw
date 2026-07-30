@@ -1,15 +1,16 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { unzipSync } from "fflate";
 import type { AppConfig, TunnelConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
-import { getTunnelServiceStatus } from "./tunnel-service";
 
 const TUNNEL_VERSION = "0.0.10";
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+export const TUNNEL_READY_TIMEOUT_MS = 120_000;
+const TUNNEL_STATUS_POLL_INTERVAL_MS = 1_000;
 
 interface TunnelInstallManifest {
   version: 1;
@@ -33,14 +34,23 @@ function platformAsset(): string {
   return `tunnel-client-v${TUNNEL_VERSION}-${os}-${arch}.zip`;
 }
 
-async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
-  const length = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(length) && length > MAX_DOWNLOAD_BYTES) throw new Error(`Download exceeds ${MAX_DOWNLOAD_BYTES} bytes: ${url}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_DOWNLOAD_BYTES) throw new Error(`Download exceeds ${MAX_DOWNLOAD_BYTES} bytes: ${url}`);
-  return bytes;
+async function fetchBytes(url: string, timeoutMs = 120_000): Promise<Uint8Array> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { redirect: "follow", signal: controller.signal });
+    if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
+    const length = Number(response.headers.get("content-length") ?? "0");
+    if (Number.isFinite(length) && length > MAX_DOWNLOAD_BYTES) throw new Error(`Download exceeds ${MAX_DOWNLOAD_BYTES} bytes: ${url}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > MAX_DOWNLOAD_BYTES) throw new Error(`Download exceeds ${MAX_DOWNLOAD_BYTES} bytes: ${url}`);
+    return bytes;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`Download timed out after ${timeoutMs}ms: ${url}`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function parseExpectedChecksum(text: string, asset: string): string {
@@ -65,9 +75,20 @@ export async function installTunnelClient(): Promise<string> {
     const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Partial<TunnelInstallManifest>;
     const actual = sha256(readFileSync(executable));
     if (manifest.version === 1 && manifest.tunnelClientVersion === TUNNEL_VERSION && manifest.binarySha256 === actual) {
+      if (process.platform !== "win32" && (statSync(executable).mode & 0o111) === 0) {
+        throw new Error(`Existing tunnel-client is not executable: ${executable}`);
+      }
+      const version = runChecked(executable, ["--version"], { timeout: 10_000 });
+      if (!version.stdout.includes(TUNNEL_VERSION) && !version.stderr.includes(TUNNEL_VERSION)) {
+        throw new Error(`Existing tunnel-client did not report version ${TUNNEL_VERSION}`);
+      }
       return executable;
     }
     throw new Error(`Existing tunnel-client failed integrity validation: ${executable}`);
+  }
+  if (existsSync(executable) || existsSync(manifestFile)) {
+    rmSync(executable, { force: true });
+    rmSync(manifestFile, { force: true });
   }
 
   const asset = platformAsset();
@@ -86,6 +107,17 @@ export async function installTunnelClient(): Promise<string> {
   mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
   atomicWriteFile(executable, binary);
   if (process.platform !== "win32") chmodSync(executable, 0o700);
+  let version: ReturnType<typeof runChecked>;
+  try {
+    version = runChecked(executable, ["--version"], { timeout: 10_000 });
+  } catch (error) {
+    rmSync(executable, { force: true });
+    throw error;
+  }
+  if (!version.stdout.includes(TUNNEL_VERSION) && !version.stderr.includes(TUNNEL_VERSION)) {
+    rmSync(executable, { force: true });
+    throw new Error(`Installed tunnel-client did not report version ${TUNNEL_VERSION}`);
+  }
   const manifest: TunnelInstallManifest = {
     version: 1,
     tunnelClientVersion: TUNNEL_VERSION,
@@ -94,10 +126,6 @@ export async function installTunnelClient(): Promise<string> {
     binarySha256: sha256(binary),
   };
   atomicWriteFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-  const version = runChecked(executable, ["--version"]);
-  if (!version.stdout.includes(TUNNEL_VERSION) && !version.stderr.includes(TUNNEL_VERSION)) {
-    throw new Error(`Installed tunnel-client did not report version ${TUNNEL_VERSION}`);
-  }
   return executable;
 }
 
@@ -148,7 +176,18 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-export function mcpCommand(config: AppConfig): string {
+function tunnelCommandQuoted(value: string): string {
+  if (/[\r\n]/.test(value)) throw new Error("Tunnel MCP command values must not contain newlines");
+  // tunnel-client parses mcp.command with backslash escapes on every platform.
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+export function mcpCommand(config: AppConfig, platform = process.platform): string {
+  if (platform === "win32") {
+    return [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath]
+      .map(tunnelCommandQuoted)
+      .join(" ");
+  }
   return [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath].map(shellQuote).join(" ");
 }
 
@@ -160,7 +199,7 @@ function tunnel(config: AppConfig): TunnelConfig {
 export function connectTunnel(config: AppConfig): void {
   const settings = tunnel(config);
   mkdirSync(settings.profileDir, { recursive: true, mode: 0o700 });
-  runChecked(settings.binaryPath, [
+  const result = runCommand(settings.binaryPath, [
     "runtimes", "connect",
     "--alias", settings.alias,
     "--profile", settings.profileName,
@@ -170,13 +209,31 @@ export function connectTunnel(config: AppConfig): void {
     "--runtime-api-key", `file:${settings.runtimeKeyFile}`,
     "--mcp-command", mcpCommand(config),
     "--json",
-  ]);
+  ], { timeout: TUNNEL_READY_TIMEOUT_MS });
+  const structuredOutput = result.stdout.trim();
+  const launchError = structuredOutput
+    ? tunnelConnectLaunchError(structuredOutput)
+    : undefined;
+  if (result.status !== 0) {
+    const detail = launchError && launchError !== "tunnel-client returned non-JSON connect output"
+      ? launchError
+      : safeTunnelDetail(tunnelCommandOutput(result) || `exit ${result.status}`);
+    throw new Error(`Tunnel managed startup failed: ${detail}`);
+  }
+  if (launchError) throw new Error(`Tunnel runtime exited during launch: ${launchError}`);
 }
 
 export function stopTunnel(config: AppConfig): void {
   const settings = tunnel(config);
-  const result = runCommand(settings.binaryPath, ["runtimes", "stop", settings.alias, "--json"]);
-  if (result.status !== 0 && !/not found|not running|unknown alias/i.test(`${result.stdout}\n${result.stderr}`)) {
+  const result = runCommand(
+    settings.binaryPath,
+    ["runtimes", "stop", settings.alias, "--json"],
+    { timeout: 15_000 },
+  );
+  if (result.status !== 0
+    && !/not found|not running|unknown alias|\balias\b[^\r\n]{0,160}\bis not known\b/i.test(
+      `${result.stdout}\n${result.stderr}`,
+    )) {
     throw new Error(`Failed to stop tunnel runtime: ${result.stderr.trim() || result.stdout.trim()}`);
   }
 }
@@ -190,12 +247,69 @@ export interface TunnelRuntimeStatus {
   detail: string;
 }
 
+export function tunnelCommandOutput(result: {
+  status: number;
+  stdout: string;
+  stderr: string;
+}): string {
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
+  return result.status === 0
+    ? (stdout || stderr)
+    : [stderr, stdout].filter(Boolean).join("\n");
+}
+
 function safeTunnelDetail(value: unknown): string {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   return text
     .replace(/tunnel_[a-f0-9]{32}/g, "[tunnel-id]")
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, "[redacted-key]")
     .slice(0, 2_000);
+}
+
+function nestedRecord(value: unknown, key: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const nested = (value as Record<string, unknown>)[key];
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : undefined;
+}
+
+function runtimeLogTail(parsed: Record<string, unknown>): string | undefined {
+  const launchTail = nestedRecord(parsed, "launch_diagnostics")?.log_tail;
+  if (typeof launchTail === "string" && launchTail.trim()) return launchTail.trim();
+  const statusTail = nestedRecord(nestedRecord(parsed, "local"), "log")?.tail;
+  return typeof statusTail === "string" && statusTail.trim() ? statusTail.trim() : undefined;
+}
+
+export function tunnelConnectLaunchError(output: string): string | undefined {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(output) as Record<string, unknown>;
+  } catch {
+    return "tunnel-client returned non-JSON connect output";
+  }
+  const running = parsed.running === true;
+  const healthy = parsed.healthy === true;
+  const ready = parsed.ready === true;
+  if (running && healthy && ready) return undefined;
+  const diagnostics = nestedRecord(parsed, "launch_diagnostics");
+  const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code
+    : typeof diagnostics?.exit_code === "number" ? diagnostics.exit_code
+      : undefined;
+  const remoteError = typeof parsed.remote_error === "string" && parsed.remote_error.trim()
+    ? parsed.remote_error.trim()
+    : undefined;
+  const logTail = runtimeLogTail(parsed);
+  return safeTunnelDetail([
+    `running=${running}`,
+    `healthy=${healthy}`,
+    `ready=${ready}`,
+    ...(exitCode !== undefined ? [`exit_code=${exitCode}`] : []),
+    ...(remoteError ? [`remote_error=${remoteError}`] : []),
+    ...(logTail ? [`runtime_log=${logTail}`] : []),
+    ...(!remoteError && !logTail ? ["runtime did not complete a healthy ready launch"] : []),
+  ].join("; "));
 }
 
 export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntimeStatus {
@@ -214,10 +328,19 @@ export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntime
       ? ((parsed.local as { issues: unknown[] }).issues).filter(issue => typeof issue === "string").slice(0, 3)
       : [];
     const explicitError = typeof parsed.error === "string" && parsed.error ? parsed.error : undefined;
+    const logTail = runtimeLogTail(parsed);
     const ok = processRunning && healthy && ready;
     const detail = ok
       ? "process_running=true healthy=true ready=true"
-      : safeTunnelDetail([`process_running=${processRunning}`, `healthy=${healthy}`, `ready=${ready}`, ...(state ? [`state=${state}`] : []), ...(explicitError ? [explicitError] : []), ...issues].join("; "));
+      : safeTunnelDetail([
+        `process_running=${processRunning}`,
+        `healthy=${healthy}`,
+        `ready=${ready}`,
+        ...(state ? [`state=${state}`] : []),
+        ...(explicitError ? [explicitError] : []),
+        ...issues,
+        ...(logTail ? [`runtime_log=${logTail}`] : []),
+      ].join("; "));
     return { ok, processRunning, healthy, ready, ...(state ? { state } : {}), detail };
   } catch {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: `tunnel-client returned non-JSON status: ${safeTunnelDetail(output)}` };
@@ -229,27 +352,22 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
   if (!existsSync(settings.binaryPath)) {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: `Missing ${settings.binaryPath}` };
   }
-  const result = runCommand(settings.binaryPath, ["runtimes", "status", settings.alias, "--json"]);
-  let output = (result.stdout || result.stderr).trim();
-  const service = getTunnelServiceStatus();
-  if (result.status === 0 && service.running) {
-    try {
-      const parsed = JSON.parse(output) as Record<string, unknown>;
-      parsed.process_running = true;
-      if (parsed.healthy === true && parsed.ready === true) parsed.runtime_state = "ready";
-      output = JSON.stringify(parsed);
-    } catch {
-      // parseTunnelStatus owns the diagnostic for malformed output.
-    }
-  }
-  return parseTunnelStatus(output, result.status);
+  const result = runCommand(
+    settings.binaryPath,
+    ["runtimes", "status", settings.alias, "--json"],
+    { timeout: 10_000 },
+  );
+  return parseTunnelStatus(tunnelCommandOutput(result), result.status);
 }
 
-export async function waitForTunnelReady(config: AppConfig, timeoutMs = 30_000): Promise<TunnelRuntimeStatus> {
+export async function waitForTunnelReady(
+  config: AppConfig,
+  timeoutMs = TUNNEL_READY_TIMEOUT_MS,
+): Promise<TunnelRuntimeStatus> {
   const deadline = Date.now() + timeoutMs;
   let status = tunnelStatus(config);
   while (!status.ok && Date.now() < deadline) {
-    await new Promise(resolveWait => setTimeout(resolveWait, 250));
+    await new Promise(resolveWait => setTimeout(resolveWait, TUNNEL_STATUS_POLL_INTERVAL_MS));
     status = tunnelStatus(config);
   }
   return status;

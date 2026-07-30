@@ -133,6 +133,7 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
 
 export class ChatGptTurnSession {
   readonly createdAt = Date.now();
+  private lastTouchedAt = this.createdAt;
   readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
   private readonly outstandingById = new Map<string, BrokerToolRequest>();
   private readonly deliveredResultIds = new Set<string>();
@@ -154,9 +155,18 @@ export class ChatGptTurnSession {
   }
 
   runExclusive<T>(task: () => Promise<T>): Promise<T> {
+    this.touch();
     const run = this.tail.then(task);
     this.tail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  touch(): void {
+    this.lastTouchedAt = Date.now();
+  }
+
+  lastUsedAt(): number {
+    return this.lastTouchedAt;
   }
 
   outstanding(): BrokerToolRequest[] {
@@ -236,7 +246,10 @@ export class ChatGptTurnSessions {
   getOrCreate(key: string, start: () => ChatGptTurnRuntime): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
-    if (existing) return existing;
+    if (existing) {
+      existing.touch();
+      return existing;
+    }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start());
     this.entries.set(key, session);
@@ -260,7 +273,7 @@ export class ChatGptTurnSessions {
   private prune(): void {
     const cutoff = Date.now() - this.ttlMs;
     for (const [key, session] of this.entries) {
-      if (session.createdAt >= cutoff) continue;
+      if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
       session.cancel();
       this.entries.delete(key);
     }

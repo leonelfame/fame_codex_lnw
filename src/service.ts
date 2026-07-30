@@ -93,7 +93,10 @@ ${args.map(arg => `    <string>${xml(arg)}</string>`).join("\n")}
 
 function assertMacOs(): void {
   if (process.platform !== "darwin") {
-    throw new Error("Version 0.1 supports managed background services on macOS only; run `codex-chatgpt-web serve` manually on this platform.");
+    throw new Error(
+      "Terminal-managed background services require macOS. "
+      + "Use the Codex Web GPT launcher on Windows or Linux.",
+    );
   }
 }
 
@@ -202,6 +205,17 @@ async function acquireDrain(config: AppConfig): Promise<DrainLease> {
   return negotiateDrain(action => control(config, action));
 }
 
+async function releaseDrainAfterFailure(lease: DrainLease, failure: unknown): Promise<never> {
+  try {
+    await lease.release();
+  } catch (resumeError) {
+    const primary = failure instanceof Error ? failure.message : String(failure);
+    const compensation = resumeError instanceof Error ? resumeError.message : String(resumeError);
+    throw new Error(`${primary}; compensating daemon resume also failed: ${compensation}`);
+  }
+  throw failure instanceof Error ? failure : new Error(String(failure));
+}
+
 export async function assertServiceIdle(config: AppConfig): Promise<void> {
   const lease = await acquireDrain(config);
   await lease.release();
@@ -216,8 +230,7 @@ export async function restartService(config: AppConfig): Promise<ServiceStatus> 
     await waitForServiceUnloaded();
     await bootstrapService(plistPath());
   } catch (error) {
-    await lease.release().catch(() => {});
-    throw error;
+    return releaseDrainAfterFailure(lease, error);
   }
   return getServiceStatus();
 }
@@ -240,8 +253,7 @@ export async function stopService(config: AppConfig): Promise<ServiceStatus> {
       runChecked("launchctl", ["bootout", serviceTarget()]);
       await waitForServiceUnloaded();
     } catch (error) {
-      await lease.release().catch(() => {});
-      throw error;
+      return releaseDrainAfterFailure(lease, error);
     }
   }
   return getServiceStatus();
@@ -255,8 +267,7 @@ export async function uninstallService(config: AppConfig): Promise<ServiceStatus
       runChecked("launchctl", ["bootout", serviceTarget()]);
       await waitForServiceUnloaded();
     } catch (error) {
-      await lease.release().catch(() => {});
-      throw error;
+      return releaseDrainAfterFailure(lease, error);
     }
   }
   rmSync(plistPath(), { force: true });

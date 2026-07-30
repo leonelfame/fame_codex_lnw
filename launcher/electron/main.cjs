@@ -1,0 +1,752 @@
+const fs = require("node:fs");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
+const {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  screen,
+  shell,
+  Tray,
+} = require("electron");
+const { BrowserHost } = require("./browser-host.cjs");
+const { BrowserControlServer } = require("./control-server.cjs");
+const { getAutostart, setAutostart } = require("./autostart.cjs");
+const { createLogger, registerLoggedIpc } = require("./logging.cjs");
+const { RuntimeHost } = require("./runtime.cjs");
+const { ensurePackagedRuntime } = require("./runtime-install.cjs");
+const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
+const { createStateStore, validateSidebarState } = require("./state.cjs");
+const {
+  MIN_WINDOW_BOUNDS,
+  readWindowState,
+  trackWindowState,
+} = require("./window-state.cjs");
+
+const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const SOURCE_ROOT = path.resolve(__dirname, "../..");
+function resolveUserPath(value) {
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.resolve(os.homedir(), value.slice(2));
+  }
+  return path.resolve(value);
+}
+const CORE_HOME = process.env.CODEX_CHATGPT_WEB_HOME?.trim()
+  ? resolveUserPath(process.env.CODEX_CHATGPT_WEB_HOME.trim())
+  : path.join(os.homedir(), ".codex-chatgpt-web");
+const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
+const BROWSER_HELPER_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
+  : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
+const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
+const X_URL = "https://x.com/miu21590";
+const CONNECTORS_URL = "https://chatgpt.com/#settings/Connectors";
+const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
+const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
+const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
+const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
+const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+
+app.setName("Codex Web GPT");
+if (process.platform === "win32") app.setAppUserModelId("dev.codexwebgpt.launcher");
+const configuredUserData = process.env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim();
+const launcherUserData = configuredUserData
+  ? resolveUserPath(configuredUserData)
+  : path.join(app.getPath("appData"), "Codex Web GPT");
+fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
+if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
+app.setPath("userData", launcherUserData);
+
+let mainWindow = null;
+let browserHost = null;
+let runtimeHost = null;
+let browserControl = null;
+let runtimeSupervisor = null;
+let tray = null;
+let quitting = false;
+let shutdownInProgress = false;
+let exitCommitted = false;
+let smokePassedThisSession = false;
+let cdpPort = 0;
+let lastOperation = null;
+let catalogVerificationTimer = null;
+let catalogVerificationInFlight = false;
+
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+function send(channel, value) {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(channel, value);
+  }
+}
+
+function publishOperation(operation) {
+  lastOperation = operation;
+  send("launcher:operation", operation);
+}
+
+function stopCatalogVerificationMonitor() {
+  if (catalogVerificationTimer) clearInterval(catalogVerificationTimer);
+  catalogVerificationTimer = null;
+}
+
+function startCatalogVerificationMonitor({ logger, stateStore }) {
+  stopCatalogVerificationMonitor();
+  const check = async () => {
+    const current = stateStore.read();
+    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
+      stopCatalogVerificationMonitor();
+      return;
+    }
+    if (catalogVerificationInFlight || !runtimeSupervisor) return;
+    catalogVerificationInFlight = true;
+    try {
+      const config = runtimeSupervisor.readConfig();
+      const health = await runtimeSupervisor.proxyHealthPayload(config);
+      if (!Number.isInteger(health?.successful_model_catalog_requests)
+        || health.successful_model_catalog_requests < 1) return;
+      const state = stateStore.update({
+        codexCatalogVerified: true,
+        codexRestartRequired: false,
+      });
+      logger.info("codex.model_catalog_verified", {
+        requests: health.successful_model_catalog_requests,
+        at: health.last_successful_model_catalog_request_at,
+      });
+      send("launcher:state-changed", state);
+      stopCatalogVerificationMonitor();
+    } catch (error) {
+      logger.debug("codex.model_catalog_verification_pending", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      catalogVerificationInFlight = false;
+    }
+  };
+  catalogVerificationTimer = setInterval(() => { void check(); }, 2_000);
+  catalogVerificationTimer.unref?.();
+  void check();
+}
+
+function trayImage() {
+  if (process.platform !== "darwin") {
+    return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+  image.setTemplateImage(true);
+  return image;
+}
+
+function createTray(logger) {
+  try {
+    tray = new Tray(trayImage());
+    tray.setToolTip("Codex Web GPT");
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: "Open Codex Web GPT", click: () => showMainWindow() },
+      { type: "separator" },
+      { label: "Quit", click: () => { void requestQuit(); } },
+    ]));
+    tray.on("click", () => showMainWindow());
+    return true;
+  } catch (error) {
+    tray = null;
+    logger.warn("launcher.tray_unavailable", { message: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+async function openWebUrl(url) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`Refusing to open a non-web URL: ${parsed.protocol}`);
+  }
+  await shell.openExternal(parsed.toString());
+}
+
+function rendererNavigationAllowed(value) {
+  let target;
+  try {
+    target = new URL(value);
+  } catch {
+    return false;
+  }
+  if (isDev) {
+    try {
+      return target.origin === new URL(process.env.VITE_DEV_SERVER_URL).origin;
+    } catch {
+      return false;
+    }
+  }
+  target.hash = "";
+  target.search = "";
+  return target.href === PACKAGED_RENDERER_URL;
+}
+
+function windowStateSnapshot(window) {
+  return {
+    fullScreen: Boolean(window && !window.isDestroyed() && window.isFullScreen()),
+    maximized: Boolean(window && !window.isDestroyed() && window.isMaximized()),
+  };
+}
+
+function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
+  const isMac = process.platform === "darwin";
+  const state = stateStore.read();
+  const windowState = readWindowState(windowStatePath, screen.getAllDisplays());
+  const window = new BrowserWindow({
+    width: windowState.bounds.width,
+    height: windowState.bounds.height,
+    ...(Number.isFinite(windowState.bounds.x) && Number.isFinite(windowState.bounds.y)
+      ? { x: windowState.bounds.x, y: windowState.bounds.y }
+      : {}),
+    minWidth: MIN_WINDOW_BOUNDS.width,
+    minHeight: MIN_WINDOW_BOUNDS.height,
+    title: "Codex Web GPT",
+    icon: APP_ICON_PATH,
+    show: false,
+    backgroundColor: isMac ? "#00000000" : "#181818",
+    titleBarStyle: isMac ? "hiddenInset" : "hidden",
+    transparent: isMac,
+    ...(isMac ? {
+      trafficLightPosition: { x: 16, y: 17 },
+      vibrancy: "under-window",
+      visualEffectState: "active",
+    } : {
+      titleBarOverlay: {
+        color: "#181818",
+        symbolColor: "#a8a8a8",
+        height: 46,
+      },
+    }),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: true,
+      v8CacheOptions: "bypassHeatCheckAndEagerCompile",
+    },
+  });
+  window.setMenuBarVisibility(false);
+  const guardRendererNavigation = (event, url) => {
+    if (rendererNavigationAllowed(url)) return;
+    event.preventDefault();
+    let destination = "invalid URL";
+    try { destination = new URL(url).origin; } catch {}
+    logger.warn("launcher.renderer_navigation_blocked", { destination });
+  };
+  window.webContents.on("will-navigate", guardRendererNavigation);
+  window.webContents.on("will-redirect", guardRendererNavigation);
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    void openWebUrl(url).catch((error) => {
+      logger.warn("launcher.external_url_rejected", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return { action: "deny" };
+  });
+  window.on("close", (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    if (process.platform === "darwin" && tray) window.hide();
+    else void requestQuit();
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  for (const event of ["enter-full-screen", "leave-full-screen", "maximize", "unmaximize"]) {
+    window.on(event, () => send("launcher:window-state-changed", windowStateSnapshot(window)));
+  }
+  window.once("ready-to-show", () => {
+    if (!state.onboardingComplete && !Number.isFinite(windowState.bounds.x)) window.center();
+    if (windowState.maximized) window.maximize();
+    if (windowState.fullscreen) window.setFullScreen(true);
+    if (!startHidden) window.show();
+  });
+  trackWindowState(window, windowStatePath, (error) => {
+    logger.warn("launcher.window_state_write_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  });
+  logger.info("launcher.window_created", { platform: process.platform, cdpPort });
+  return window;
+}
+
+async function loadRenderer(window) {
+  if (isDev) {
+    await window.loadURL(process.env.VITE_DEV_SERVER_URL);
+    return;
+  }
+  await window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+}
+
+function validateLanguage(value) {
+  if (value !== "en" && value !== "zh-CN") throw new Error("Language must be en or zh-CN");
+  return value;
+}
+
+function validateBounds(value) {
+  if (!value || typeof value !== "object") throw new Error("Browser bounds are required");
+  for (const key of ["x", "y", "width", "height"]) {
+    if (!Number.isFinite(value[key])) throw new Error(`Browser bounds ${key} must be finite`);
+  }
+  return value;
+}
+
+function smokePassedForCurrentVersion(state) {
+  return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
+}
+
+function registerIpc({ logger, stateStore }) {
+  const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  handle("launcher:snapshot", async () => ({
+    state: stateStore.read(),
+    browser: browserHost?.snapshot() ?? null,
+    mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
+    logs: logger.recent(),
+    urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
+    platform: process.platform,
+    packaged: app.isPackaged,
+    version: app.getVersion(),
+    smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
+    operation: lastOperation,
+  }));
+
+  handle("launcher:set-language", (_event, language) => stateStore.update({ language: validateLanguage(language) }));
+  handle("launcher:open-social", async (_event, target) => {
+    const url = target === "github" ? GITHUB_URL : target === "x" ? X_URL : null;
+    if (!url) throw new Error("Unknown social target");
+    await openWebUrl(url);
+    const patch = target === "github" ? { githubOpened: true } : { xOpened: true };
+    return stateStore.update(patch);
+  });
+  handle("launcher:complete-onboarding", (_event, language) => {
+    const current = stateStore.read();
+    if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
+    if (current.autoStart) setAutostart(app, true);
+    const next = stateStore.update({ language: validateLanguage(language), onboardingComplete: true });
+    logger.info("launcher.onboarding_completed", { language: next.language });
+    return next;
+  });
+
+  handle("launcher:open-external", async (_event, url) => {
+    if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
+    await openWebUrl(url);
+    return true;
+  });
+
+  handle("launcher:browser-bounds", (_event, bounds) => {
+    browserHost?.setBounds(validateBounds(bounds));
+    return true;
+  });
+  handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
+  handle("launcher:browser-show", () => browserHost.reveal());
+  handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
+  handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
+  handle("launcher:browser-login", () => browserHost.openLogin());
+  handle("launcher:browser-smoke", async () => {
+    const result = await browserHost.smokeTest();
+    stateStore.update({ browserSmokePassed: true, browserSmokeVersion: app.getVersion() });
+    smokePassedThisSession = true;
+    return result;
+  });
+  handle("launcher:mcp-verify", async () => {
+    const operationName = "mcp-verification";
+    publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
+    const report = await runtimeHost.doctor();
+    if (!report.ok) {
+      const message = report.checks
+        .filter((check) => check.status === "error")
+        .map((check) => check.message)
+        .filter(Boolean)
+        .join("; ") || "The local MCP runtime is not healthy";
+      publishOperation({ name: operationName, status: "failed", message });
+      return report;
+    }
+    try {
+      publishOperation({ name: operationName, status: "running", message: "Checking ChatGPT connector" });
+      await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
+      const state = stateStore.update({ mcpSetupComplete: true });
+      send("launcher:state-changed", state);
+      publishOperation({ name: operationName, status: "completed", message: "Runtime and connector verified" });
+      return report;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      publishOperation({ name: operationName, status: "failed", message });
+      throw error;
+    }
+  });
+
+  handle("launcher:doctor", () => runtimeHost.doctor());
+  handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
+  handle("launcher:uninstall-integration", async () => {
+    const language = stateStore.read().language;
+    const chinese = language === "zh-CN";
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: chinese ? ["取消", "移除"] : ["Cancel", "Remove"],
+      defaultId: 0,
+      cancelId: 0,
+      title: chinese ? "移除 Codex Web GPT" : "Remove Codex Web GPT",
+      message: chinese
+        ? "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？"
+        : "Remove the ChatGPT Web models from Codex and restore the previous model route?",
+      detail: chinese
+        ? "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。"
+        : "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return { cancelled: true };
+    try {
+      await runtimeHost.uninstallIntegration();
+    } finally {
+      browserHost.writeDescriptor();
+    }
+    const state = stateStore.update({
+      coreSetupComplete: false,
+      codexCatalogVerified: false,
+      mcpSetupComplete: false,
+      mcpRuntimeInstalled: false,
+      mcpGuideStep: 0,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
+    return { cancelled: false, state };
+  });
+  handle("launcher:setup-core", async () => {
+    const browser = await browserHost.probeAuthentication();
+    if (!browser.authenticated) throw new Error("Sign in to ChatGPT before installing the Codex integration");
+    if (!(smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()))) {
+      throw new Error("Run the browser smoke test before installing the Codex integration");
+    }
+    const result = await runtimeHost.setupCore();
+    stateStore.update({
+      coreSetupComplete: true,
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+      ...(result.mode === "browser-only" ? {
+        mcpSetupComplete: false,
+        mcpRuntimeInstalled: false,
+        mcpGuideStep: 0,
+      } : {}),
+    });
+    await browserHost.returnToIdle().catch((error) => {
+      logger.warn("browser.idle_cleanup_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    startCatalogVerificationMonitor({ logger, stateStore });
+    return { ok: true, stdout: result.stdout, restartRequired: true };
+  });
+  handle("launcher:setup-mcp", async (_event, input) => {
+    await browserHost.reveal();
+    const result = await runtimeHost.setupMcp({
+      tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
+      runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
+      replace: input?.replace === true,
+    });
+    stateStore.update({ mcpRuntimeInstalled: true, mcpGuideStep: 2, codexRestartRequired: true });
+    return { ok: true, stdout: result.stdout };
+  });
+  handle("launcher:set-mcp-step", (_event, step) => {
+    if (!Number.isInteger(step) || step < 0 || step > 2) throw new Error("Invalid MCP guide step");
+    return stateStore.update({ mcpGuideStep: step });
+  });
+
+  handle("launcher:autostart", (_event, enabled) => {
+    const desired = enabled === true;
+    const autostart = setAutostart(app, desired);
+    return {
+      state: stateStore.update({ autoStart: desired }),
+      ...autostart,
+    };
+  });
+  handle("launcher:set-preference", (_event, key, value) => {
+    if (key !== "showBrowserDuringTurns") throw new Error("Unknown preference");
+    return stateStore.update({ [key]: value === true });
+  });
+  handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
+  handle("launcher:logs", (_event, limit) => logger.recent(limit));
+  handle("launcher:open-logs", async () => {
+    const error = await shell.openPath(path.dirname(logger.filePath));
+    if (error) throw new Error(`Could not open the launcher log directory: ${error}`);
+    return logger.filePath;
+  });
+  handle("launcher:window-state", (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return windowStateSnapshot(window);
+  });
+  ipcMain.on("launcher:window-control", (event, action) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) return;
+    if (action === "close") window.close();
+    else if (action === "minimize") window.minimize();
+    else if (action === "zoom") window.isMaximized() ? window.unmaximize() : window.maximize();
+  });
+}
+
+async function requestQuit() {
+  if (shutdownInProgress || exitCommitted) return;
+  shutdownInProgress = true;
+  try {
+    const activeOperation = runtimeHost?.currentOperation();
+    if (activeOperation) {
+      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+    }
+    await runtimeSupervisor?.shutdown();
+    stopCatalogVerificationMonitor();
+    quitting = true;
+    browserHost?.destroy();
+    await browserControl?.close();
+    exitCommitted = true;
+    app.quit();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    quitting = false;
+    showMainWindow();
+    publishOperation({ name: "launcher-quit", status: "failed", message });
+  } finally {
+    shutdownInProgress = false;
+  }
+}
+
+async function start() {
+  cdpPort = await findFreePort();
+  if (process.platform === "linux") app.commandLine.appendSwitch("class", "codex-web-gpt");
+  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+  app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
+
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
+    app.quit();
+    return;
+  }
+  app.on("second-instance", () => showMainWindow());
+  await app.whenReady();
+  let installedRuntimeRoot = null;
+  let runtimeRootResolved = false;
+  const runtimeRootProvider = () => {
+    const packagedRuntimeWasRemoved = app.isPackaged
+      && (!installedRuntimeRoot || !fs.existsSync(installedRuntimeRoot));
+    if (!runtimeRootResolved || packagedRuntimeWasRemoved) {
+      installedRuntimeRoot = ensurePackagedRuntime({
+        app,
+        coreHome: CORE_HOME,
+        resourcesPath: process.resourcesPath,
+      });
+      runtimeRootResolved = true;
+    }
+    return installedRuntimeRoot;
+  };
+
+  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const persistedState = stateStore.read();
+  if (persistedState.coreSetupComplete === true && persistedState.codexCatalogVerified === undefined) {
+    stateStore.update({
+      coreSetupComplete: false,
+      codexCatalogVerified: false,
+      codexRestartRequired: false,
+    });
+  }
+  const autostart = getAutostart(app);
+  if (stateStore.read().onboardingComplete && autostart.supported && stateStore.read().autoStart !== autostart.enabled) {
+    setAutostart(app, stateStore.read().autoStart);
+  }
+  const logger = createLogger({
+    filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
+    publish: (record) => send("launcher:log", record),
+  });
+  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  nativeTheme.themeSource = "system";
+  mainWindow = createWindow({
+    logger,
+    stateStore,
+    windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
+    startHidden,
+  });
+  browserControl = await new BrowserControlServer({
+    logger,
+    getBrowserHost: () => browserHost,
+    getPreferences: () => stateStore.read(),
+  }).start();
+  browserHost = new BrowserHost({
+    window: mainWindow,
+    descriptorPath: BROWSER_DESCRIPTOR_PATH,
+    cdpPort,
+    control: browserControl.descriptor(),
+    helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
+    logger,
+    publishState: (state) => send("launcher:browser-state", state),
+  });
+  runtimeSupervisor = new RuntimeSupervisor({
+    app,
+    logger,
+    sourceRoot: SOURCE_ROOT,
+    installedRuntimeRoot,
+    runtimeRootProvider,
+    coreHome: CORE_HOME,
+    browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
+    publishOperation,
+  });
+  runtimeHost = new RuntimeHost({
+    app,
+    logger,
+    sourceRoot: SOURCE_ROOT,
+    installedRuntimeRoot,
+    runtimeRootProvider,
+    browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
+    publishOperation,
+    supervisor: runtimeSupervisor,
+  });
+  registerIpc({ logger, stateStore });
+  const trayAvailable = createTray(logger);
+  if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
+  const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
+  if (!launcherSmokeTest) {
+    void browserHost.refreshAuthentication().catch((error) => {
+      logger.warn("browser.session_refresh_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  await loadRenderer(mainWindow);
+  if (launcherSmokeTest) {
+    const smokeRuntimeRoot = runtimeRootProvider();
+    if (app.isPackaged && !smokeRuntimeRoot) {
+      throw new Error("Packaged launcher smoke test could not install its durable runtime");
+    }
+    const versionInvocation = runtimeSupervisor.runtimeCommand(["--version"]);
+    const versionResult = spawnSync(versionInvocation.executable, versionInvocation.args, {
+      cwd: versionInvocation.cwd,
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    if (versionResult.error) throw versionResult.error;
+    if (versionResult.status !== 0 || versionResult.stdout.trim() !== app.getVersion()) {
+      throw new Error(
+        `Installed launcher runtime is not executable`
+        + ` (status=${versionResult.status ?? "unknown"}, stdout=${JSON.stringify(versionResult.stdout.trim())},`
+        + ` stderr=${JSON.stringify(versionResult.stderr.trim())})`,
+      );
+    }
+    const markerPath = process.env.CODEX_WEB_GPT_SMOKE_FILE?.trim();
+    if (!markerPath || !path.isAbsolute(markerPath)) {
+      throw new Error("Packaged launcher smoke test requires an absolute CODEX_WEB_GPT_SMOKE_FILE");
+    }
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    fs.writeFileSync(markerPath, `${JSON.stringify({
+      ok: true,
+      version: app.getVersion(),
+      platform: process.platform,
+      packaged: app.isPackaged,
+      runtimeVerified: true,
+    })}\n`);
+    browserHost.destroy();
+    await browserControl.close();
+    mainWindow.destroy();
+    app.quit();
+    return;
+  }
+  void runtimeSupervisor.startIfConfigured().then((runtime) => {
+    if (runtime.status === "ready") {
+      const config = runtimeSupervisor.readConfig();
+      const current = stateStore.read();
+      const patch = {
+        mcpRuntimeInstalled: config.mode === "full",
+        ...(config.mode === "browser-only" ? {
+          mcpSetupComplete: false,
+          mcpGuideStep: 0,
+        } : {}),
+      };
+      if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+        const state = stateStore.update(patch);
+        send("launcher:state-changed", state);
+      }
+      startCatalogVerificationMonitor({ logger, stateStore });
+      return;
+    }
+    if (runtime.status === "not-configured") {
+      const current = stateStore.read();
+      if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
+        const state = stateStore.update({
+          coreSetupComplete: false,
+          codexCatalogVerified: false,
+          mcpRuntimeInstalled: false,
+          mcpSetupComplete: false,
+          mcpGuideStep: 0,
+        });
+        send("launcher:state-changed", state);
+      }
+      return;
+    }
+    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
+    send("launcher:state-changed", state);
+    if (runtime.status === "external" || runtime.status === "needs-setup") {
+      publishOperation({
+        name: "runtime-start",
+        status: "failed",
+        message: runtime.detail || (
+          runtime.status === "external"
+            ? "Another process owns the configured Codex Web GPT runtime"
+            : "The installed runtime configuration must be repaired from Setup"
+        ),
+      });
+    }
+  }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("runtime.startup_failed", { message });
+    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
+    send("launcher:state-changed", state);
+    publishOperation({ name: "runtime-start", status: "failed", message });
+  });
+
+  app.on("activate", () => showMainWindow());
+  app.on("before-quit", (event) => {
+    if (exitCommitted) return;
+    event.preventDefault();
+    void requestQuit();
+  });
+  process.once("SIGINT", () => { void requestQuit(); });
+  process.once("SIGTERM", () => { void requestQuit(); });
+}
+
+void start().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
+  } catch {}
+  try {
+    dialog.showErrorBox("Codex Web GPT could not start", message);
+  } catch {}
+  console.error(error);
+  app.exit(1);
+});

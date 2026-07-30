@@ -4,10 +4,10 @@
 Codex app / CLI
       │ Responses API on loopback
       ▼
-codex-chatgpt-web daemon
+launcher-owned codex-chatgpt-web daemon
   ├─ official /models passthrough + fixed ChatGPT Web models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
-  ├─ ChatGPT browser worker (one Chrome process, one turn at a time)
+  ├─ ChatGPT browser worker (embedded Electron surface, one turn at a time)
   ├─ capability broker (full mode only)
   └─ stdio MCP server
             ▲
@@ -37,15 +37,16 @@ codex-chatgpt-web daemon
 
 ## Browser lifecycle
 
-Playwright CLI is a development/debugging tool and is not part of the runtime. The daemon owns one
-long-lived Chrome process. A Codex turn gets a fresh Temporary Chat page; the preceding page is
-closed. This prevents transcript leakage without creating a new Chrome window per tool call.
+The desktop launcher owns one persistent Electron partition and one visible browser surface.
+Playwright attaches to that exact surface through a launcher-owned loopback CDP endpoint; it does
+not launch another browser or copy authentication state. A Codex turn navigates the owned surface
+to a fresh Temporary Chat, and the surface returns to an inert local page after completion. The
+login persists locally while browser conversations are not reused between tasks.
 
-Contexts through 40,000 serialized characters remain an inline JSON envelope. Larger contexts
-become one in-memory JSONL attachment with a manifest, ordered system/message records, and image
-references. Nothing is written to a temporary context file, and the complete attachment remains
-included in conservative usage accounting. File acceptance and send readiness are verified before
-the turn begins.
+The complete serialized Codex task is inserted as one inline JSON envelope. Image bytes stay out of
+the JSON and are attached natively with stable references. The runtime does not create a context
+JSONL file, upload a synthetic context document, include prompt hashes, or truncate the envelope.
+Attachment acceptance and send readiness are verified before the turn begins.
 
 ChatGPT owns context compaction inside that browser response. The appended models intentionally
 advertise no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
@@ -56,19 +57,28 @@ rows becomes native Codex commentary.
 
 ## Installation and service lifecycle
 
-The release artifact is a versioned runtime bundle containing a pinned Bun executable and the
-bundled application. It contains the Responses bridge, Playwright client code, MCP server, setup,
-doctor, and launchd management; it uses the user's installed Google Chrome and does not download a
-second browser. Full mode separately downloads the official pinned `openai/tunnel-client` release
-and verifies it against that release's published SHA-256 manifest.
+Each native desktop package contains Electron, a platform-matched pinned Bun executable, the
+Responses bridge, Playwright client code, MCP server, setup, doctor, and the browser helper.
+Browser-only mode downloads no browser and requires no system Node/Bun. Full mode separately
+downloads the official pinned `openai/tunnel-client` build for the current OS/architecture and
+verifies it against the release SHA-256 manifest.
 
-Setup creates a user launchd service for the Responses proxy. Full mode also creates a separate
-launchd service that runs `tunnel-client` directly from its generated profile. Both use `RunAtLoad`
-and `KeepAlive`; no shell, terminal, tmux session, or manual post-login command owns production
-lifecycle. Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url` after
-required services report healthy and ready. The daemon forwards the authenticated official model
-catalog and appends only the routed models owned by the `chatgpt-web/` namespace; no static catalog
-is installed.
+On first launch, the embedded runtime is identity-checked and copied atomically into a private
+versioned directory under the application home. Daemon and MCP commands use that durable copy,
+which is required because Linux AppImage mount paths are temporary and must never be persisted in
+Codex or tunnel configuration.
+
+The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the optional
+tunnel first, waits for healthy/ready evidence, starts the Responses daemon, and then waits for its
+versioned health payload. Native login items or an owner-local XDG autostart file launch the app
+hidden after sign-in. A marker containing only launcher-owned PIDs lets doctor distinguish the
+launcher runtime from a stale or external process. Legacy macOS launchd services are drained and
+removed during an explicit launcher migration; launchd remains only for the advanced terminal-only
+mode.
+
+Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
+forwards the authenticated official model catalog and appends only the routed models owned by the
+`chatgpt-web/` namespace; no static catalog is installed.
 
 The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
 HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky
@@ -81,8 +91,12 @@ reports two independent counters:
 - active Responses HTTP requests, including native compaction passthrough;
 - active ChatGPT browser sessions, including time spent waiting for local Codex tool results.
 
-The lifecycle operation proceeds only when both counters are zero. If the contract is unavailable,
-malformed, or non-idle, the operation fails closed and resumes the old daemon when possible.
+The lifecycle operation proceeds only when both counters are zero. The launcher then stops the
+tunnel through its runtime command and asks the daemon to flush state and exit through an
+authenticated shutdown endpoint. If the contract is unavailable, malformed, non-idle, or cannot
+be completed, the operation fails closed and restores the drained runtime when possible. An
+unexpected child exit is recovered with a bounded restart budget; a crash loop becomes an explicit
+launcher error.
 
 ## Security invariants
 
