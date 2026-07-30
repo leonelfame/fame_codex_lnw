@@ -567,13 +567,16 @@ export class ChatGptBrowserWorker {
   private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt): Promise<void> {
     const files = chatGptPromptFilePayloads(prompt);
     if (files.length === 0) return;
-    const removeButtons = page.locator('button[aria-label^="Remove file "]');
-    const existing = await removeButtons.count();
+    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    const composerForm = composer.locator("xpath=ancestor::form[1]");
     const input = page.locator('input[data-testid="upload-photos-input"]');
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
-      await removeButtons.nth(existing + files.length - 1).waitFor({ state: "visible", timeout: 60_000 });
+      await Promise.all(files.map(file => (
+        composerForm.getByRole("group", { name: file.name, exact: true })
+          .waitFor({ state: "visible", timeout: 60_000 })
+      )));
     } catch {
       const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
         .map(text => text.replace(/\s+/g, " ").trim())
@@ -583,7 +586,7 @@ export class ChatGptBrowserWorker {
         + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
       );
     }
-    const send = page.getByTestId("send-button");
+    const send = composerForm.getByTestId("send-button");
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       if (await send.isEnabled().catch(() => false)) return;

@@ -110,6 +110,73 @@ test("tool-capable prompts type the mention trigger and accept the exact connect
   ]);
 });
 
+test("image attachment readiness uses exact file tiles and not localized remove-button text", async () => {
+  const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const calls: Array<[string, string?]> = [];
+  const send = {
+    isEnabled: async () => {
+      calls.push(["sendEnabled"]);
+      return true;
+    },
+  };
+  const composerForm = {
+    getByRole: (role: string, options: { name: string; exact: boolean }) => {
+      expect(role).toBe("group");
+      expect(options).toEqual({ name: "codex-input-image-1.png", exact: true });
+      return {
+        waitFor: async (state: { state: string; timeout: number }) => {
+          expect(state).toEqual({ state: "visible", timeout: 60_000 });
+          calls.push(["fileTile", options.name]);
+        },
+      };
+    },
+    getByTestId: (testId: string) => {
+      expect(testId).toBe("send-button");
+      return send;
+    },
+  };
+  const composer = {
+    locator: (selector: string) => {
+      expect(selector).toBe("xpath=ancestor::form[1]");
+      return composerForm;
+    },
+  };
+  const input = {
+    waitFor: async (state: { state: string; timeout: number }) => {
+      expect(state).toEqual({ state: "attached", timeout: 20_000 });
+      calls.push(["inputReady"]);
+    },
+    setInputFiles: async (files: Array<{ name: string }>) => {
+      calls.push(["setFiles", files.map(file => file.name).join(",")]);
+    },
+  };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === 'input[data-testid="upload-photos-input"]') return input;
+      if (selector === '[role="alert"]') {
+        return { allInnerTexts: async () => [] };
+      }
+      return { last: () => composer };
+    },
+  };
+  const attachFiles = (ChatGptBrowserWorker.prototype as unknown as {
+    attachFiles(page: unknown, prompt: unknown): Promise<void>;
+  }).attachFiles;
+
+  await attachFiles.call({}, page, {
+    images: [{ ref: "codex-input-image-1", imageUrl }],
+  });
+
+  expect(calls).toEqual([
+    ["inputReady"],
+    ["setFiles", "codex-input-image-1.png"],
+    ["fileTile", "codex-input-image-1.png"],
+    ["sendEnabled"],
+  ]);
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).not.toContain('aria-label^="Remove file "');
+});
+
 test("effort selection uses structural menu indices instead of localized labels", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
