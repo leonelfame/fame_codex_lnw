@@ -77,6 +77,13 @@ test("Windows chrome uses the available left edge and the branded application ic
   assert.match(electronMain, /icon:\s*APP_ICON_PATH/);
 });
 
+test("closing the launcher exits on Windows and Linux instead of silently hiding in the tray", () => {
+  assert.match(
+    electronMain,
+    /if \(process\.platform === "darwin" && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
+  );
+});
+
 test("settings use a dark custom language menu and quiet native scrollbars", () => {
   assert.doesNotMatch(appSource, /<select/);
   assert.match(appSource, /className="language-menu-panel"/);
@@ -90,4 +97,13 @@ test("completed social actions preserve their service icon without the blue acti
   assert.match(appSource, /<span><Icon name=\{icon\} \/><\/span>/);
   assert.doesNotMatch(appSource, /complete \? "check" : icon/);
   assert.match(styles, /\.welcome-option\.is-social\.is-complete > span:first-child\s*\{[^}]*color:\s*var\(--color-icon-secondary\)/s);
+});
+
+test("MCP wizard remains locked while a local or supervisor operation is active", () => {
+  assert.match(appSource, /<McpSurface[\s\S]*?operation=\{operation\}/);
+  assert.match(appSource, /const busy = localBusy \|\| operation\?\.status === "running"/);
+  assert.match(appSource, /const safeMove = async \(next: number\) => \{\s*if \(busy\) return;/);
+  assert.match(appSource, /disabled=\{busy \|\| index > step\}/);
+  assert.match(appSource, /disabled=\{busy\} onClick=\{\(\) => void safeMove\(1\)\}/);
+  assert.match(appSource, /disabled=\{busy \|\| !doctor\?\.ok\}/);
 });

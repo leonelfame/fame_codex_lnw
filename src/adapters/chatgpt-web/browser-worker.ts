@@ -11,12 +11,15 @@ import { estimateCompiledChatGptWebInputTokens } from "./usage";
 import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
+  CHATGPT_ASSISTANT_TURN_SELECTOR,
+  CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_TEMPORARY_CHAT_URL,
+  CHATGPT_USER_TURN_SELECTOR,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
@@ -37,8 +40,9 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 }
 
 export const DEFAULT_CHATGPT_TURN_TIMEOUT_MS = 40 * 60_000;
-export const CHATGPT_RESPONSE_DOM_GRACE_MS = 30_000;
+export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
+export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 
 const browserStageTimeouts = {
   browserPage: 60_000,
@@ -82,6 +86,7 @@ export function chatGptTurnIsComplete(state: {
   responsePresent: boolean;
   running: boolean;
   currentText: string;
+  currentHtml?: string;
   completionActionVisible: boolean;
 }): boolean {
   return state.responsePresent
@@ -93,14 +98,14 @@ export function chatGptTurnIsComplete(state: {
 export class ChatGptCompletionTracker {
   private candidate?: { signature: string; since: number };
 
-  constructor(private readonly stableMs = 750) {}
+  constructor(private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS) {}
 
   update(state: Parameters<typeof chatGptTurnIsComplete>[0], now = Date.now()): boolean {
     if (!chatGptTurnIsComplete(state)) {
       this.candidate = undefined;
       return false;
     }
-    const signature = state.currentText;
+    const signature = `${state.currentText}\0${state.currentHtml ?? state.currentText}`;
     if (this.candidate?.signature !== signature) {
       this.candidate = { signature, since: now };
       return false;
@@ -450,7 +455,9 @@ export class ChatGptBrowserWorker {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
-    if (!await effortMenu.isVisible().catch(() => false)) await currentEffort.click();
+    const menuVisible = await effortMenu.isVisible().catch(() => false);
+    const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
+    if (!menuVisible && menuExpanded !== "true") await currentEffort.click();
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
     try {
@@ -475,7 +482,8 @@ export class ChatGptBrowserWorker {
     let confirmed: string | null = null;
     while (Date.now() < deadline) {
       if (!await effortMenu.isVisible().catch(() => false)) {
-        await currentEffort.click();
+        const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
+        if (expanded !== "true") await currentEffort.click();
         await effortChoice.waitFor({
           state: "visible",
           timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),
@@ -592,7 +600,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async responseDomSnapshot(responseTurn: Locator): Promise<ChatGptResponseDomSnapshot> {
-    const snapshot = await responseTurn.evaluate(element => {
+    const snapshot = await responseTurn.evaluate((element, completionActionSelector) => {
       const root = element as HTMLElement;
       const visible = (candidate: HTMLElement): boolean => {
         const style = getComputedStyle(candidate);
@@ -606,14 +614,13 @@ export class ChatGptBrowserWorker {
 
       const rendered = [...root.querySelectorAll<HTMLElement>(".markdown")].at(-1);
       const renderedChildren = rendered ? [...rendered.children] : [];
-      const completionActions = rendered
-        ? [...root.querySelectorAll<HTMLElement>("button")]
+      const completionAction = rendered
+        ? [...root.querySelectorAll<HTMLElement>(completionActionSelector)]
           .filter(visible)
-          .filter(candidate => !rendered.contains(candidate))
-          .filter(candidate => Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
-        : [];
-      const completionAction = completionActions.at(-1);
-      const completionActionSet = new Set(completionActions);
+          .find(candidate => !rendered.contains(candidate)
+            && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
+        : undefined;
+      const completionActionSet = new Set(completionAction ? [completionAction] : []);
       const candidates = new Map<HTMLElement, "markdown" | "status">();
       root.querySelectorAll<HTMLElement>(".markdown").forEach(candidate => candidates.set(candidate, "markdown"));
       root.querySelectorAll<HTMLElement>(
@@ -646,7 +653,7 @@ export class ChatGptBrowserWorker {
         completionActionVisible: completionAction !== undefined,
         traceBlocks,
       };
-    }, undefined, { timeout: 2_000 }).catch(() => absentResponseDomSnapshot());
+    }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(() => absentResponseDomSnapshot());
     snapshot.traceBlocks = snapshot.traceBlocks.filter(block => !isChatGptTraceControl(block));
     return snapshot;
   }
@@ -768,10 +775,18 @@ export class ChatGptBrowserWorker {
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
         this.attachFiles(page, prepared)
       ));
-      const responseTurns = page.locator('section[data-testid^="conversation-turn-"][data-turn="assistant"]');
+      const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
       const initialResponseTurnCount = await responseTurns.count();
       const responseTurn = responseTurns.nth(initialResponseTurnCount);
-      await this.runStage(turn.traceId, "send", browserStageTimeouts.send, () => page.getByTestId("send-button").click());
+      const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
+      const initialUserTurnCount = await userTurns.count();
+      await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async () => {
+        await page.getByTestId("send-button").click();
+        await userTurns.nth(initialUserTurnCount).waitFor({
+          state: "visible",
+          timeout: browserStageTimeouts.send,
+        });
+      });
 
       let lastHeartbeat = 0;
       let finalText = "";
@@ -825,6 +840,7 @@ export class ChatGptBrowserWorker {
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
+            currentHtml: snapshot.fullHtml,
             completionActionVisible: snapshot.completionActionVisible,
           })) {
             if (snapshot.visibleText === "api_tool unavailable") {

@@ -422,12 +422,15 @@ describe("ChatGPT outer-native harness v3", () => {
       currentText: "final answer",
       completionActionVisible: true,
     };
-    const tracker = new ChatGptCompletionTracker(750);
+    const tracker = new ChatGptCompletionTracker(2_000);
     expect(tracker.update(state, 1_000)).toBe(false);
-    expect(tracker.update(state, 1_500)).toBe(false);
-    expect(tracker.update(state, 1_750)).toBe(true);
-    expect(tracker.update({ ...state, currentText: "final answer updated" }, 1_800)).toBe(false);
-    expect(tracker.update({ ...state, running: true }, 3_000)).toBe(false);
+    expect(tracker.update(state, 2_999)).toBe(false);
+    expect(tracker.update(state, 3_000)).toBe(true);
+    expect(tracker.update({ ...state, currentText: "final answer updated" }, 3_100)).toBe(false);
+    expect(tracker.update({ ...state, currentHtml: "<p>final answer</p>" }, 4_000)).toBe(false);
+    expect(tracker.update({ ...state, currentHtml: "<p>final answer</p><p>hydrated</p>" }, 6_000)).toBe(false);
+    expect(tracker.update({ ...state, currentHtml: "<p>final answer</p><p>hydrated</p>" }, 8_000)).toBe(true);
+    expect(tracker.update({ ...state, running: true }, 8_100)).toBe(false);
   });
 
   test("preserves GFM formatting and streams only a stable rendered prefix", () => {

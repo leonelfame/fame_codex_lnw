@@ -11,24 +11,26 @@ async function withWebContentsDebugger(debuggerClient, action) {
   }
 }
 
-async function dispatchTrustedClick({ debuggerClient, point }) {
-  if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
-    throw new Error("CDP click point is invalid");
+async function dispatchTrustedKey({ debuggerClient, key }) {
+  if (key !== "Enter") {
+    throw new Error(`Unsupported CDP key: ${String(key)}`);
   }
-  const base = {
-    x: point.x,
-    y: point.y,
-    button: "left",
-    clickCount: 1,
+  const event = {
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13,
   };
   await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
-    await sendCommand("Input.dispatchMouseEvent", {
-      ...base,
-      type: "mousePressed",
+    await sendCommand("Input.dispatchKeyEvent", {
+      ...event,
+      type: "keyDown",
+      text: "\r",
+      unmodifiedText: "\r",
     });
-    await sendCommand("Input.dispatchMouseEvent", {
-      ...base,
-      type: "mouseReleased",
+    await sendCommand("Input.dispatchKeyEvent", {
+      ...event,
+      type: "keyUp",
     });
   });
 }
@@ -54,7 +56,7 @@ async function evaluatePage({ debuggerClient, expression }) {
 }
 
 module.exports = {
-  dispatchTrustedClick,
+  dispatchTrustedKey,
   evaluatePage,
   withWebContentsDebugger,
 };

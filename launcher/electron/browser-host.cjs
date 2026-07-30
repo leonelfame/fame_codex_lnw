@@ -4,7 +4,7 @@ const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { dispatchTrustedClick, evaluatePage } = require("./cdp-input.cjs");
+const { dispatchTrustedKey, evaluatePage } = require("./cdp-input.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -17,6 +17,9 @@ const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "about:blank#codex-web-gpt-browser-host";
 const SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const SMOKE_EXPECTED = "CODEX WEB GPT READY";
+const SMOKE_SUBMISSION_TIMEOUT_MS = 15_000;
+const SMOKE_RESPONSE_TIMEOUT_MS = 120_000;
+const SMOKE_COMPLETION_SETTLE_MS = 1_500;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const CHATGPT_PARTITION = "persist:codex-web-gpt-chatgpt";
 const COMPOSER_SELECTOR = [
@@ -25,6 +28,22 @@ const COMPOSER_SELECTOR = [
   '[contenteditable="true"][data-lexical-editor="true"]',
   '[contenteditable="true"][role="textbox"]',
   "textarea",
+].join(", ");
+const EFFORT_MENU_SELECTOR = [
+  '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"])',
+  '[role="menu"]:has([role="menuitemradio"])',
+  '[role="group"]:has([role="menuitemradio"])',
+].join(", ");
+const COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
+const ASSISTANT_TURN_SELECTOR = [
+  '[data-testid^="conversation-turn-"][data-turn="assistant"]',
+  '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
+  '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+].join(", ");
+const USER_TURN_SELECTOR = [
+  '[data-testid^="conversation-turn-"][data-turn="user"]',
+  '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
+  '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
 ].join(", ");
 const CHATGPT_VIEWPORT_CSS = `
   html,
@@ -100,7 +119,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
-    this.dispatchTrustedClick = dispatchTrustedClick;
+    this.dispatchTrustedKey = dispatchTrustedKey;
     this.evaluatePage = evaluatePage;
     this.surfaceId = randomBytes(24).toString("base64url");
     this.visible = false;
@@ -296,7 +315,7 @@ class BrowserHost {
     return contents;
   }
 
-  closeAuthView(authView, closeContents) {
+  closeAuthView(authView, closeContents, refreshMain = true) {
     if (!authView || this.authView !== authView) return;
     this.authView = null;
     try { this.window.contentView.removeChildView(authView); } catch {}
@@ -305,7 +324,7 @@ class BrowserHost {
     }
     this.syncViewVisibility();
     this.logger.info("browser.auth_surface_closed");
-    if (this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
+    if (refreshMain && this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
       void this.view.webContents.loadURL(TEMPORARY_CHAT_URL).catch((error) => {
         this.logger.error("browser.auth_refresh_failed", {
           message: error instanceof Error ? error.message : String(error),
@@ -481,7 +500,7 @@ class BrowserHost {
 
   async probeAuthentication() {
     if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
-    const url = this.view.webContents.getURL();
+    let url = this.view.webContents.getURL();
     if (url === IDLE_BROWSER_URL) {
       this.setState({
         status: this.state.authenticated ? "ready" : "signed-out",
@@ -502,8 +521,11 @@ class BrowserHost {
     if (!result.composer && this.authView && !this.authView.webContents.isDestroyed()) {
       const authResult = await probe(this.authView.webContents);
       if (authResult.composer) {
-        result = authResult;
-        this.closeAuthView(this.authView, true);
+        const completedAuthView = this.authView;
+        this.closeAuthView(completedAuthView, true, false);
+        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        url = this.view.webContents.getURL();
+        result = await probe(this.view.webContents);
       }
     }
     if (result.composer) {
@@ -553,35 +575,57 @@ class BrowserHost {
 
     const effortResult = await this.selectHighEffort();
     this.logger.info("smoke.effort_selected", effortResult);
-    const beforeCount = await this.assistantTurnCount();
-    const focused = await this.view.webContents.executeJavaScript(`(() => {
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      if (!composer) return false;
-      composer.focus();
-      if ('value' in composer) composer.value = '';
-      else composer.textContent = '';
-      composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
-      return true;
-    })()`, true);
-    if (!focused) throw new Error("ChatGPT composer was not available for the smoke test");
+    const beforeAssistantCount = await this.assistantTurnCount();
+    const beforeUserCount = await this.userTurnCount();
+    if (!await this.focusComposer()) {
+      throw new Error("ChatGPT composer was not available for the smoke test");
+    }
+    await this.clearFocusedComposer();
     this.view.webContents.focus();
     this.view.webContents.insertText(SMOKE_TEXT);
-    const send = await this.waitForSmokeSendButton();
-    await this.clickBrowserPoint(send.point);
+    await this.waitForComposerText(SMOKE_TEXT);
+    await this.waitForSmokeSendButton();
+    await this.pressTrustedBrowserKey("Enter");
+    const submitted = await this.waitForSmokeSubmissionAccepted(beforeUserCount);
+    this.logger.info("smoke.submitted", submitted);
 
-    const deadline = Date.now() + 240_000;
+    const deadline = Date.now() + SMOKE_RESPONSE_TIMEOUT_MS;
+    let completionCandidate = null;
     while (Date.now() < deadline) {
       const outcome = await this.view.webContents.executeJavaScript(`(() => {
-        const turns = Array.from(document.querySelectorAll('section[data-testid^="conversation-turn-"][data-turn="assistant"]'));
+        const turns = Array.from(document.querySelectorAll(${JSON.stringify(ASSISTANT_TURN_SELECTOR)}));
         const latest = turns.at(-1);
-        const text = latest ? (latest.innerText || latest.textContent || '') : '';
+        const rendered = latest?.querySelector('.markdown');
+        const text = rendered ? (rendered.innerText || rendered.textContent || '').trim() : '';
+        const completionActionVisible = latest
+          ? Array.from(latest.querySelectorAll(${JSON.stringify(COMPLETION_ACTION_SELECTOR)})).some((button) => {
+              const style = getComputedStyle(button);
+              const rect = button.getBoundingClientRect();
+              return style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && rect.width > 0
+                && rect.height > 0;
+            })
+          : false;
         const stopVisible = Array.from(document.querySelectorAll('[data-testid="stop-button"]')).some((button) => {
+          const style = getComputedStyle(button);
           const rect = button.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0;
         });
-        return { count: turns.length, text, stopVisible };
+        return { count: turns.length, text, stopVisible, completionActionVisible };
       })()`, true);
-      if (outcome.count > beforeCount && outcome.text.includes(SMOKE_EXPECTED) && !outcome.stopVisible) {
+      const complete = outcome.count > beforeAssistantCount
+        && outcome.text === SMOKE_EXPECTED
+        && !outcome.stopVisible
+        && outcome.completionActionVisible;
+      if (!complete) {
+        completionCandidate = null;
+      } else if (completionCandidate?.text !== outcome.text) {
+        completionCandidate = { text: outcome.text, since: Date.now() };
+      } else if (Date.now() - completionCandidate.since >= SMOKE_COMPLETION_SETTLE_MS) {
         this.logger.info("smoke.completed", { responseChars: outcome.text.length });
         this.setState({ status: "ready", message: "Smoke test passed", authenticated: true });
         return { ok: true, effort: effortResult.effort, response: SMOKE_EXPECTED };
@@ -593,16 +637,15 @@ class BrowserHost {
     throw new Error("ChatGPT smoke test timed out before the expected answer appeared");
   }
 
-  async clickBrowserPoint(point) {
-    const contents = this.view.webContents;
+  async pressTrustedBrowserKey(key) {
     try {
-      await this.dispatchTrustedClick({
-        debuggerClient: contents.debugger,
-        point,
+      await this.dispatchTrustedKey({
+        debuggerClient: this.view.webContents.debugger,
+        key,
       });
     } catch (error) {
       throw new Error(
-        `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
+        `ChatGPT trusted browser key failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -627,6 +670,52 @@ class BrowserHost {
     contents.sendInputEvent({ type: "keyUp", keyCode });
   }
 
+  pressBrowserShortcut(keyCode, modifiers) {
+    const contents = this.view.webContents;
+    contents.sendInputEvent({ type: "keyDown", keyCode, modifiers });
+    contents.sendInputEvent({ type: "keyUp", keyCode, modifiers });
+  }
+
+  async focusComposer() {
+    return await this.view.webContents.executeJavaScript(`(() => {
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      if (!composer) return false;
+      composer.focus({ preventScroll: true });
+      return document.activeElement === composer || composer.contains(document.activeElement);
+    })()`, true);
+  }
+
+  async readComposerText() {
+    return await this.view.webContents.executeJavaScript(`(() => {
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      if (!composer) return null;
+      const text = String('value' in composer ? composer.value : composer.innerText || composer.textContent || '')
+        .replace(/\\r\\n/g, '\\n');
+      return /^\\s*$/.test(text) ? '' : text;
+    })()`, true);
+  }
+
+  async waitForComposerText(expected, timeoutMs = 10_000, pollMs = 50) {
+    const deadline = Date.now() + timeoutMs;
+    let actual = null;
+    do {
+      actual = await this.readComposerText();
+      if (actual === expected) return;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT composer did not preserve the expected text`
+      + ` (expectedChars=${expected.length}; actualChars=${typeof actual === "string" ? actual.length : "missing"})`,
+    );
+  }
+
+  async clearFocusedComposer() {
+    this.view.webContents.focus();
+    this.pressBrowserShortcut("A", [process.platform === "darwin" ? "meta" : "control"]);
+    this.pressBrowserKey("Backspace");
+    await this.waitForComposerText("");
+  }
+
   async readSmokeSendButton() {
     return await this.evaluateBrowserPage(`(() => {
       /* smoke-send-button-read */
@@ -635,11 +724,7 @@ class BrowserHost {
       if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
         return { ready: false, reason: 'disabled' };
       }
-      const rect = button.getBoundingClientRect();
-      return {
-        ready: true,
-        point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-      };
+      return { ready: true };
     })()`);
   }
 
@@ -654,6 +739,42 @@ class BrowserHost {
     throw new Error(
       `ChatGPT send button did not become available for the smoke test`
       + ` (state=${state?.reason || "unknown"})`,
+    );
+  }
+
+  async readSmokeSubmissionState(beforeUserCount) {
+    return await this.evaluateBrowserPage(`(() => {
+      /* smoke-submission-read */
+      const beforeUserCount = ${beforeUserCount};
+      const userTurnCount = document.querySelectorAll(${JSON.stringify(USER_TURN_SELECTOR)}).length;
+      const stopVisible = Array.from(document.querySelectorAll('[data-testid="stop-button"]')).some((button) => {
+        const rect = button.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      return {
+        accepted: userTurnCount > beforeUserCount,
+        userTurnCount,
+        stopVisible,
+      };
+    })()`);
+  }
+
+  async waitForSmokeSubmissionAccepted(
+    beforeUserCount,
+    timeoutMs = SMOKE_SUBMISSION_TIMEOUT_MS,
+    pollMs = 100,
+  ) {
+    const deadline = Date.now() + timeoutMs;
+    let state;
+    do {
+      state = await this.readSmokeSubmissionState(beforeUserCount);
+      if (state.accepted) return state;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT did not accept the smoke-test message after trusted Enter`
+      + ` (userTurnsBefore=${beforeUserCount}; userTurnsNow=${state?.userTurnCount ?? "unknown"};`
+      + ` stopVisible=${state?.stopVisible === true})`,
     );
   }
 
@@ -681,16 +802,35 @@ class BrowserHost {
           url: location.href,
         };
       }
-      const rect = control.getBoundingClientRect();
       return {
         found: true,
         label: normalize(control.innerText || control.textContent),
-        point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+        expanded: control.getAttribute('aria-expanded'),
         composer: Boolean(composer),
         form: true,
         readyState: document.readyState,
         url: location.href,
       };
+    })()`);
+  }
+
+  async focusEffortControl() {
+    return await this.evaluateBrowserPage(`(() => {
+      /* effort-control-focus */
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      const form = composer?.closest('form');
+      const controls = Array.from(form?.querySelectorAll(
+        'button[aria-haspopup="menu"][data-tone="neutral"]'
+      ) || []).filter(visible);
+      const control = controls.at(-1);
+      if (!control) return false;
+      control.focus({ preventScroll: true });
+      return document.activeElement === control;
     })()`);
   }
 
@@ -720,28 +860,86 @@ class BrowserHost {
           const rect = element.getBoundingClientRect();
           return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
-        const candidates = Array.from(document.querySelectorAll(
-          '[data-testid="composer-intelligence-picker-content"][role="group"]'
-        )).filter(visible).map((menu) => ({
+        const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+        const control = Array.from(composer?.closest('form')?.querySelectorAll(
+          'button[aria-haspopup="menu"][data-tone="neutral"]'
+        ) || []).filter(visible).at(-1);
+        const controlledId = control?.getAttribute('aria-controls');
+        const controlled = controlledId ? document.getElementById(controlledId) : null;
+        const roots = [
+          ...(controlled ? [controlled] : []),
+          ...Array.from(document.querySelectorAll(${JSON.stringify(EFFORT_MENU_SELECTOR)})),
+        ];
+        const candidates = [...new Set(roots)].filter(visible).map((menu) => ({
           menu,
           items: Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible),
-        }));
-        const candidate = candidates.at(-1);
+        })).filter(candidate => candidate.items.length > 0)
+          .sort((left, right) => right.items.length - left.items.length);
+        const candidate = candidates[0];
         const target = candidate?.items[targetIndex];
         if (!candidate || !target) {
           return { open: Boolean(candidate), count: candidate?.items.length || 0, target: null };
         }
-        const rect = target.getBoundingClientRect();
         return {
           open: true,
           count: candidate.items.length,
           target: {
             label: normalize(target.innerText || target.textContent),
             checked: target.getAttribute('aria-checked'),
-            point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
           },
         };
       })()`);
+  }
+
+  async focusEffortMenuItem(targetIndex) {
+    return await this.evaluateBrowserPage(`(() => {
+      /* effort-menu-focus */
+      const targetIndex = ${targetIndex};
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      const control = Array.from(composer?.closest('form')?.querySelectorAll(
+        'button[aria-haspopup="menu"][data-tone="neutral"]'
+      ) || []).filter(visible).at(-1);
+      const controlledId = control?.getAttribute('aria-controls');
+      const controlled = controlledId ? document.getElementById(controlledId) : null;
+      const roots = [
+        ...(controlled ? [controlled] : []),
+        ...Array.from(document.querySelectorAll(${JSON.stringify(EFFORT_MENU_SELECTOR)})),
+      ];
+      const candidates = [...new Set(roots)].filter(visible).map((menu) => (
+        Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible)
+      )).filter(items => items.length > 0)
+        .sort((left, right) => right.length - left.length);
+      const target = candidates[0]?.[targetIndex];
+      if (!target) return false;
+      target.focus({ preventScroll: true });
+      return document.activeElement === target;
+    })()`);
+  }
+
+  async openEffortMenu(targetIndex, timeoutMs, pollMs, knownControl) {
+    const control = knownControl?.found ? knownControl : await this.readEffortControl();
+    if (!control.found) {
+      throw new Error("ChatGPT effort control disappeared before its menu could open");
+    }
+    if (control.expanded !== "true") {
+      if (!await this.focusEffortControl()) {
+        throw new Error("ChatGPT effort control could not receive focus");
+      }
+      await this.pressTrustedBrowserKey("Enter");
+    }
+    return await this.waitForEffortMenu(targetIndex, timeoutMs, pollMs);
+  }
+
+  async chooseEffortMenuItem(targetIndex) {
+    if (!await this.focusEffortMenuItem(targetIndex)) {
+      throw new Error(`ChatGPT effort item index ${targetIndex} could not receive focus`);
+    }
+    await this.pressTrustedBrowserKey("Enter");
   }
 
   async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
@@ -768,8 +966,9 @@ class BrowserHost {
     const control = await this.waitForEffortControl(readyTimeoutMs, pollMs);
     let menu = await this.readEffortMenu(targetIndex);
     if (!menu.target) {
-      await this.clickBrowserPoint(control.point);
-      menu = await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs);
+      menu = menu.open || control.expanded === "true"
+        ? await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs)
+        : await this.openEffortMenu(targetIndex, optionTimeoutMs, pollMs, control);
     }
     if (menu.target.checked !== "true" && menu.target.checked !== "false") {
       throw new Error(`ChatGPT effort item index ${targetIndex} has no semantic checked state`);
@@ -778,7 +977,7 @@ class BrowserHost {
       this.pressBrowserKey("Escape");
       return { effort: "High", changed: false };
     }
-    await this.clickBrowserPoint(menu.target.point);
+    await this.chooseEffortMenuItem(targetIndex);
 
     const deadline = Date.now() + confirmTimeoutMs;
     let confirmed = menu;
@@ -787,11 +986,11 @@ class BrowserHost {
       if (!confirmed.target) {
         const current = await this.readEffortControl();
         if (current.found) {
-          await this.clickBrowserPoint(current.point);
-          confirmed = await this.waitForEffortMenu(
+          confirmed = await this.openEffortMenu(
             targetIndex,
             Math.max(1, Math.min(5_000, deadline - Date.now())),
             pollMs,
+            current,
           );
         }
       }
@@ -811,7 +1010,17 @@ class BrowserHost {
   }
 
   async assistantTurnCount() {
-    return this.view.webContents.executeJavaScript("document.querySelectorAll('section[data-testid^=\"conversation-turn-\"][data-turn=\"assistant\"]').length", true);
+    return this.view.webContents.executeJavaScript(
+      `document.querySelectorAll(${JSON.stringify(ASSISTANT_TURN_SELECTOR)}).length`,
+      true,
+    );
+  }
+
+  async userTurnCount() {
+    return this.view.webContents.executeJavaScript(
+      `document.querySelectorAll(${JSON.stringify(USER_TURN_SELECTOR)}).length`,
+      true,
+    );
   }
 
   async verifyConnector(appName) {
@@ -825,16 +1034,10 @@ class BrowserHost {
     await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
     await this.waitForAuthenticated(60_000);
     await this.selectHighEffort();
-    const composerReady = await this.view.webContents.executeJavaScript(`(() => {
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      if (!composer) return false;
-      composer.focus();
-      if ('value' in composer) composer.value = '';
-      else composer.textContent = '';
-      composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
-      return true;
-    })()`, true);
-    if (!composerReady) throw new Error("ChatGPT composer was not available for the connector check");
+    if (!await this.focusComposer()) {
+      throw new Error("ChatGPT composer was not available for the connector check");
+    }
+    await this.clearFocusedComposer();
     this.view.webContents.insertText(`@${appName.trim()}`);
     const deadline = Date.now() + 25_000;
     while (Date.now() < deadline) {
@@ -846,15 +1049,9 @@ class BrowserHost {
         });
       })()`, true).catch(() => false);
       if (found) {
-        await this.view.webContents.executeJavaScript(`(() => {
-          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-          const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-          if (composer) {
-            if ('value' in composer) composer.value = '';
-            else composer.textContent = '';
-            composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
-          }
-        })()`, true).catch(() => {});
+        this.pressBrowserKey("Escape");
+        await this.focusComposer();
+        await this.clearFocusedComposer();
         this.logger.info("connector.verified", { appName: appName.trim() });
         this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
         return { ok: true, appName: appName.trim() };
@@ -887,8 +1084,9 @@ class BrowserHost {
       const control = await this.waitForEffortControl(30_000, 200);
       let menu = await this.readEffortMenu(0);
       if (!menu.target) {
-        await this.clickBrowserPoint(control.point);
-        menu = await this.waitForEffortMenu(0, 70_000, 200);
+        menu = menu.open || control.expanded === "true"
+          ? await this.waitForEffortMenu(0, 70_000, 200)
+          : await this.openEffortMenu(0, 70_000, 200, control);
       }
       proAvailable = menu.count >= 5;
       this.pressBrowserKey("Escape");

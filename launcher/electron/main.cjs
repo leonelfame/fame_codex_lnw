@@ -275,7 +275,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   window.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
-    if (tray) window.hide();
+    if (process.platform === "darwin" && tray) window.hide();
     else void requestQuit();
   });
   window.on("closed", () => {

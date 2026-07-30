@@ -229,10 +229,15 @@ export type LauncherTurnActivity =
       message?: string;
     };
 
+export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
+export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
+
 export async function notifyLauncherTurn(
   descriptorPath: string,
   activity: LauncherTurnActivity,
-  timeoutMs = 3_000,
+  timeoutMs = activity.phase === "end"
+    ? LAUNCHER_TURN_END_TIMEOUT_MS
+    : LAUNCHER_TURN_START_TIMEOUT_MS,
 ): Promise<void> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();

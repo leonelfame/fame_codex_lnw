@@ -4,8 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { unzipSync } from "fflate";
 import type { AppConfig, TunnelConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
-import { processRunning, runCommand, runChecked } from "./process";
-import { getTunnelServiceStatus } from "./tunnel-service";
+import { runCommand, runChecked } from "./process";
 
 const TUNNEL_VERSION = "0.0.10";
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
@@ -200,7 +199,7 @@ function tunnel(config: AppConfig): TunnelConfig {
 export function connectTunnel(config: AppConfig): void {
   const settings = tunnel(config);
   mkdirSync(settings.profileDir, { recursive: true, mode: 0o700 });
-  const result = runChecked(settings.binaryPath, [
+  const result = runCommand(settings.binaryPath, [
     "runtimes", "connect",
     "--alias", settings.alias,
     "--profile", settings.profileName,
@@ -211,7 +210,16 @@ export function connectTunnel(config: AppConfig): void {
     "--mcp-command", mcpCommand(config),
     "--json",
   ], { timeout: TUNNEL_READY_TIMEOUT_MS });
-  const launchError = tunnelConnectLaunchError(result.stdout);
+  const structuredOutput = result.stdout.trim();
+  const launchError = structuredOutput
+    ? tunnelConnectLaunchError(structuredOutput)
+    : undefined;
+  if (result.status !== 0) {
+    const detail = launchError && launchError !== "tunnel-client returned non-JSON connect output"
+      ? launchError
+      : safeTunnelDetail(tunnelCommandOutput(result) || `exit ${result.status}`);
+    throw new Error(`Tunnel managed startup failed: ${detail}`);
+  }
   if (launchError) throw new Error(`Tunnel runtime exited during launch: ${launchError}`);
 }
 
@@ -222,7 +230,10 @@ export function stopTunnel(config: AppConfig): void {
     ["runtimes", "stop", settings.alias, "--json"],
     { timeout: 15_000 },
   );
-  if (result.status !== 0 && !/not found|not running|unknown alias/i.test(`${result.stdout}\n${result.stderr}`)) {
+  if (result.status !== 0
+    && !/not found|not running|unknown alias|\balias\b[^\r\n]{0,160}\bis not known\b/i.test(
+      `${result.stdout}\n${result.stderr}`,
+    )) {
     throw new Error(`Failed to stop tunnel runtime: ${result.stderr.trim() || result.stdout.trim()}`);
   }
 }
@@ -301,26 +312,6 @@ export function tunnelConnectLaunchError(output: string): string | undefined {
   ].join("; "));
 }
 
-function launcherTunnelProcessRunning(): boolean {
-  const path = join(getConfigDir(), "runtime", "launcher-supervisor.json");
-  if (!existsSync(path)) return false;
-  try {
-    const state = JSON.parse(readFileSync(path, "utf8")) as {
-      version?: unknown;
-      ownerPid?: unknown;
-      tunnelPid?: unknown;
-    };
-    if (state.version !== 1
-      || !Number.isInteger(state.ownerPid)
-      || (state.ownerPid as number) <= 0
-      || !Number.isInteger(state.tunnelPid)
-      || (state.tunnelPid as number) <= 0) return false;
-    return processRunning(state.ownerPid) && processRunning(state.tunnelPid);
-  } catch {
-    return false;
-  }
-}
-
 export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntimeStatus {
   if (exitStatus !== 0) {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: safeTunnelDetail(output) };
@@ -366,19 +357,7 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
     ["runtimes", "status", settings.alias, "--json"],
     { timeout: 10_000 },
   );
-  let output = tunnelCommandOutput(result);
-  const service = getTunnelServiceStatus();
-  if (result.status === 0 && (service.running || launcherTunnelProcessRunning())) {
-    try {
-      const parsed = JSON.parse(output) as Record<string, unknown>;
-      parsed.process_running = true;
-      if (parsed.healthy === true && parsed.ready === true) parsed.runtime_state = "ready";
-      output = JSON.stringify(parsed);
-    } catch {
-      // parseTunnelStatus owns the diagnostic for malformed output.
-    }
-  }
-  return parseTunnelStatus(output, result.status);
+  return parseTunnelStatus(tunnelCommandOutput(result), result.status);
 }
 
 export async function waitForTunnelReady(

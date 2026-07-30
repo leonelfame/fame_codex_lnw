@@ -7,9 +7,24 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = 'button[aria-haspopup="menu"][data-tone="neutral"]';
-export const CHATGPT_EFFORT_MENU_SELECTOR = '[data-testid="composer-intelligence-picker-content"][role="group"]';
+export const CHATGPT_EFFORT_MENU_SELECTOR = [
+  '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"])',
+  '[role="menu"]:has([role="menuitemradio"])',
+  '[role="group"]:has([role="menuitemradio"])',
+].join(", ");
 export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
+export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
+export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
+  '[data-testid^="conversation-turn-"][data-turn="assistant"]',
+  '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
+  '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+].join(", ");
+export const CHATGPT_USER_TURN_SELECTOR = [
+  '[data-testid^="conversation-turn-"][data-turn="user"]',
+  '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
+  '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
+].join(", ");
 
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
@@ -42,7 +57,9 @@ export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
   await effortButton.waitFor({ state: "visible", timeout: 30_000 });
   const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
-  if (!await menu.isVisible().catch(() => false)) await effortButton.click();
+  const menuVisible = await menu.isVisible().catch(() => false);
+  const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
+  if (!menuVisible && menuExpanded !== "true") await effortButton.click();
   try {
     const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     await efforts.first().waitFor({ state: "visible", timeout: 70_000 });

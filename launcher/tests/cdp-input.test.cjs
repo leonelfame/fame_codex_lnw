@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  dispatchTrustedClick,
+  dispatchTrustedKey,
   evaluatePage,
 } = require("../electron/cdp-input.cjs");
 
@@ -28,37 +28,6 @@ function createDebugger(responses = []) {
   };
 }
 
-test("trusted clicks are dispatched through the owned Electron WebContents target", async () => {
-  const { client, commands, detached } = createDebugger();
-  await dispatchTrustedClick({
-    debuggerClient: client,
-    point: { x: 123.5, y: 456.25 },
-  });
-  assert.deepEqual(commands, [
-    {
-      method: "Input.dispatchMouseEvent",
-      params: {
-        type: "mousePressed",
-        x: 123.5,
-        y: 456.25,
-        button: "left",
-        clickCount: 1,
-      },
-    },
-    {
-      method: "Input.dispatchMouseEvent",
-      params: {
-        type: "mouseReleased",
-        x: 123.5,
-        y: 456.25,
-        button: "left",
-        clickCount: 1,
-      },
-    },
-  ]);
-  assert.equal(detached(), true);
-});
-
 test("page evaluation reads from the owned Electron WebContents target", async () => {
   const { client, commands, detached } = createDebugger([{
     result: {
@@ -82,6 +51,39 @@ test("page evaluation reads from the owned Electron WebContents target", async (
   assert.equal(detached(), true);
 });
 
+test("trusted Enter is dispatched through the owned Electron WebContents target", async () => {
+  const { client, commands, detached } = createDebugger();
+  await dispatchTrustedKey({
+    debuggerClient: client,
+    key: "Enter",
+  });
+  assert.deepEqual(commands, [
+    {
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        text: "\r",
+        unmodifiedText: "\r",
+      },
+    },
+    {
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      },
+    },
+  ]);
+  assert.equal(detached(), true);
+});
+
 test("pre-attached WebContents debugger ownership is preserved", async () => {
   const { client, detached } = createDebugger([{
     result: { type: "number", value: 5 },
@@ -97,9 +99,9 @@ test("pre-attached WebContents debugger ownership is preserved", async () => {
 
 test("WebContents CDP commands fail closed without an owned debugger", async () => {
   await assert.rejects(
-    dispatchTrustedClick({
+    dispatchTrustedKey({
       debuggerClient: null,
-      point: { x: 10, y: 20 },
+      key: "Enter",
     }),
     /WebContents debugger is unavailable/,
   );

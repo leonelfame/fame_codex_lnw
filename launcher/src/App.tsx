@@ -489,6 +489,7 @@ function LauncherShell({
               <McpSurface
                 copy={copy}
                 onDone={() => setSurface("browser")}
+                operation={operation}
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -776,12 +777,14 @@ function SetupSurface({
 function McpSurface({
   copy,
   onDone,
+  operation,
   setError,
   snapshot,
   updateState,
 }: {
   copy: Copy;
   onDone: () => void;
+  operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -789,7 +792,8 @@ function McpSurface({
   const [step, setStep] = useState(Math.min(2, Math.max(0, snapshot.state.mcpGuideStep || 0)));
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [localBusy, setLocalBusy] = useState(false);
+  const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [connectorOpened, setConnectorOpened] = useState(false);
   const steps = useMemo(() => [
@@ -803,6 +807,7 @@ function McpSurface({
     updateState(await api!.setMcpStep(next));
   };
   const safeMove = async (next: number) => {
+    if (busy) return;
     setError(null);
     try {
       await move(next);
@@ -819,7 +824,8 @@ function McpSurface({
     }
   };
   const install = async () => {
-    setBusy(true);
+    if (busy) return;
+    setLocalBusy(true);
     setError(null);
     try {
       await api!.setupMcp({ tunnelId, runtimeKey });
@@ -829,11 +835,12 @@ function McpSurface({
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      setLocalBusy(false);
     }
   };
   const verify = async () => {
-    setBusy(true);
+    if (busy) return;
+    setLocalBusy(true);
     setError(null);
     try {
       setDoctor(await api!.verifyMcp());
@@ -841,7 +848,7 @@ function McpSurface({
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      setLocalBusy(false);
     }
   };
 
@@ -855,7 +862,7 @@ function McpSurface({
         {steps.map((item, index) => (
           <button
             className={`${index === step ? "is-active" : ""}${index < step ? " is-complete" : ""}`}
-            disabled={index > step}
+            disabled={busy || index > step}
             key={item.title}
             onClick={() => void safeMove(index)}
             type="button"
@@ -961,14 +968,14 @@ function McpSurface({
         <button className="text-button" disabled={step === 0 || busy} onClick={() => void safeMove(step - 1)} type="button">
           {copy.previous}
         </button>
-        {step === 0 ? <PrimaryButton onClick={() => void safeMove(1)}>{copy.next}</PrimaryButton> : null}
+        {step === 0 ? <PrimaryButton disabled={busy} onClick={() => void safeMove(1)}>{copy.next}</PrimaryButton> : null}
         {step === 1 ? (
           <PrimaryButton disabled={busy || !tunnelId || !runtimeKey || !snapshot.state.codexCatalogVerified} onClick={() => void install()}>
             {busy ? copy.running : copy.connect}
           </PrimaryButton>
         ) : null}
         {step === 2 ? (
-          <PrimaryButton disabled={!doctor?.ok} onClick={onDone}>
+          <PrimaryButton disabled={busy || !doctor?.ok} onClick={onDone}>
             {doctor?.ok ? copy.done : copy.verifyRuntime}
           </PrimaryButton>
         ) : null}

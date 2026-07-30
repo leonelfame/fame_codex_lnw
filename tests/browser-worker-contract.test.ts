@@ -48,11 +48,13 @@ test("effort selection uses structural menu indices instead of localized labels"
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
   expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
   expect(workerSource).toContain('timeout: 70_000');
-  expect(sessionSource).toContain('[data-testid="composer-intelligence-picker-content"][role="group"]');
+  expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"])');
+  expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"])');
   expect(sessionSource).toContain('[role="menuitemradio"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
   expect(workerSource).toContain('getAttribute("aria-checked")');
+  expect(workerSource).toContain('getAttribute("aria-expanded")');
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
@@ -157,6 +159,22 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   };
   expect(empty.update(terminal, 1_000)).toBeUndefined();
   expect(empty.update(terminal, 1_500)).toContain("completed without a final answer");
+});
+
+test("browser completion requires ChatGPT's response-scoped copy action", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
+  expect(sessionSource).toContain('button[data-testid="copy-turn-action-button"]');
+  expect(workerSource).toContain("CHATGPT_COMPLETION_ACTION_SELECTOR");
+  expect(workerSource).not.toContain('root.querySelectorAll<HTMLElement>("button")');
+});
+
+test("browser send is accepted only after ChatGPT creates a new user turn", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
+  expect(sessionSource).toContain("CHATGPT_USER_TURN_SELECTOR");
+  expect(workerSource).toContain("initialUserTurnCount");
+  expect(workerSource).toContain("userTurns.nth(initialUserTurnCount).waitFor");
 });
 
 test("visible reasoning keeps the browser turn healthy before final assistant markdown exists", () => {
