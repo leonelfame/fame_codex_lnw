@@ -551,13 +551,16 @@ export class ChatGptBrowserWorker {
     if (await appResult.count() !== 1) {
       throw new Error(`ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`);
     }
-    await composer.press("Enter");
-    const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const selectedConnector = composerForm.getByTestId("composer-footer-actions")
-      .getByRole("button", { name: this.config.appName });
+    // The composer keeps its own keyboard highlight, which is not guaranteed to follow the
+    // exact connector row resolved above. Pressing Enter on the composer can therefore activate
+    // "Add photos & files" and open the operating-system file picker. Dispatch the activation to
+    // the resolved row itself; this also avoids viewport-coordinate differences in embedded
+    // Chromium across macOS, Windows, and Linux.
+    await appResult.dispatchEvent("click");
+    const selectedConnector = composer.getByRole("link", { name: this.config.appName, exact: true });
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
     if (await selectedConnector.count() !== 1) {
-      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector badge`);
+      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector pill`);
     }
     return composer;
   }

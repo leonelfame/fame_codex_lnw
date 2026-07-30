@@ -16,6 +16,9 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource.match(/this\.selectConnector\(page\)/g)?.length).toBe(2);
   expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
+  expect(workerSource).toContain('appResult.dispatchEvent("click")');
+  expect(workerSource).not.toContain('composer.press("Enter")');
+  expect(workerSource).not.toContain('getByTestId("composer-footer-actions")');
 });
 
 test("read-only multiline context is inserted atomically before exact verification", async () => {
@@ -54,6 +57,11 @@ test("the shared Playwright selector types the mention and accepts one exact con
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
+    dispatchEvent: async (event: string) => {
+      expect(event).toBe("click");
+      connectorSelected = true;
+      calls.push(["dispatchResult", event]);
+    },
   };
   const selectedConnector = {
     waitFor: async () => {
@@ -62,19 +70,6 @@ test("the shared Playwright selector types the mention and accepts one exact con
     },
     count: async () => 1,
   };
-  const footerActions = {
-    getByRole: (role: string, options: { name: string }) => {
-      expect(role).toBe("button");
-      expect(options).toEqual({ name: "Codex Native" });
-      return selectedConnector;
-    },
-  };
-  const composerForm = {
-    getByTestId: (testId: string) => {
-      expect(testId).toBe("composer-footer-actions");
-      return footerActions;
-    },
-  };
   const composer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
@@ -82,13 +77,10 @@ test("the shared Playwright selector types the mention and accepts one exact con
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
     },
-    press: async (value: string) => {
-      if (value === "Enter") connectorSelected = true;
-      calls.push(["composerPress", value]);
-    },
-    locator: (selector: string) => {
-      expect(selector).toBe("xpath=ancestor::form[1]");
-      return composerForm;
+    getByRole: (role: string, options: { name: string; exact: boolean }) => {
+      expect(role).toBe("link");
+      expect(options).toEqual({ name: "Codex Native", exact: true });
+      return selectedConnector;
     },
   };
   const page = {
@@ -126,7 +118,7 @@ test("the shared Playwright selector types the mention and accepts one exact con
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["composerPress", "Enter"],
+    ["dispatchResult", "click"],
     ["waitForSelectedConnector"],
   ]);
 });

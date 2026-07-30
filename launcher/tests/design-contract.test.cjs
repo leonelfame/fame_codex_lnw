@@ -66,7 +66,7 @@ test("launcher keeps browser chrome flush and MCP instructions below the video",
   assert.match(styles, /\.mcp-stage\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s);
   assert.match(
     styles,
-    /\.guide-media\s*\{[^}]*width:\s*min\(90%,\s*511px\)[^}]*aspect-ratio:\s*16\s*\/\s*9[^}]*overflow:\s*hidden/s,
+    /\.guide-media\s*\{[^}]*width:\s*min\(90%,\s*clamp\(511px,\s*44vw,\s*620px\)\)[^}]*aspect-ratio:\s*16\s*\/\s*9[^}]*overflow:\s*hidden/s,
   );
   assert.match(styles, /\.guide-media img\s*\{[^}]*object-fit:\s*contain/s);
   assert.doesNotMatch(styles, /\.wizard-stepper\s*\{[^}]*border-(?:top|bottom)/s);

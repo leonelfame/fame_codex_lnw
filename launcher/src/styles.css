@@ -1130,7 +1130,7 @@ code {
 }
 
 .guide-media {
-  width: min(90%, 511px);
+  width: min(90%, clamp(511px, 44vw, 620px));
   height: auto;
   aspect-ratio: 16 / 9;
   align-self: center;
