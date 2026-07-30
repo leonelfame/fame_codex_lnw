@@ -23,7 +23,16 @@ interface RunMessage {
   };
 }
 
-type InputMessage = RunMessage | { type: "abort"; id: string } | { type: "shutdown" };
+interface VerifyMessage {
+  type: "verify";
+  id: string;
+  config: {
+    appName: string;
+    browserHostDescriptorPath: string;
+  };
+}
+
+type InputMessage = RunMessage | VerifyMessage | { type: "abort"; id: string } | { type: "shutdown" };
 
 const writeProtocol = (message: unknown): void => {
   stdout.write(`${JSON.stringify(message)}\n`);
@@ -111,6 +120,37 @@ async function run(message: RunMessage): Promise<void> {
   }
 }
 
+async function verify(message: VerifyMessage): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id)) {
+    throw new Error("Browser helper verification identity is invalid");
+  }
+  const appName = message.config.appName?.trim();
+  const browserHostDescriptorPath = message.config.browserHostDescriptorPath?.trim();
+  if (!appName || appName.length > 80 || !browserHostDescriptorPath) {
+    throw new Error("Browser helper verification config is invalid");
+  }
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: "https://chatgpt.com",
+    chatgptWeb: {
+      appName,
+      browserHost: "launcher",
+      browserHostDescriptorPath,
+    },
+  };
+  try {
+    const selected = await ChatGptBrowserWorker.forProvider(provider).verifyConnector();
+    writeProtocol({ type: "result", id: message.id, text: selected });
+  } catch (error) {
+    writeProtocol({
+      type: "error",
+      id: message.id,
+      name: error instanceof Error ? error.name : "Error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 const input = createInterface({ input: stdin, crlfDelay: Infinity });
 input.on("line", line => {
   if (shuttingDown) return;
@@ -123,6 +163,12 @@ input.on("line", line => {
   if (message.type === "abort") abortControllers.get(message.id)?.abort();
   else if (message.type === "shutdown") {
     void requestShutdown();
+  } else if (message.type === "verify") {
+    void verify(message).catch(error => writeProtocol({
+      type: "error",
+      id: message.id,
+      message: error instanceof Error ? error.message : String(error),
+    }));
   } else {
     void run(message).catch(error => writeProtocol({
       type: "error",

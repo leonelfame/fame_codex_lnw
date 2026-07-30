@@ -1,9 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  dispatchTrustedClick,
   dispatchTrustedKey,
-  dispatchTrustedText,
   evaluatePage,
 } = require("../electron/cdp-input.cjs");
 
@@ -86,174 +84,6 @@ test("trusted Enter is dispatched through the owned Electron WebContents target"
   assert.equal(detached(), true);
 });
 
-test("trusted connector mention is typed as discrete keyboard events", async () => {
-  const { client, commands, detached } = createDebugger();
-  await dispatchTrustedText({
-    debuggerClient: client,
-    text: "@C",
-  });
-  assert.deepEqual(commands, [
-    {
-      method: "Input.dispatchKeyEvent",
-      params: {
-        type: "keyDown",
-        key: "@",
-        code: "Digit2",
-        windowsVirtualKeyCode: 50,
-        nativeVirtualKeyCode: 50,
-        modifiers: 8,
-        text: "@",
-        unmodifiedText: "@",
-      },
-    },
-    {
-      method: "Input.dispatchKeyEvent",
-      params: {
-        type: "keyUp",
-        key: "@",
-        code: "Digit2",
-        windowsVirtualKeyCode: 50,
-        nativeVirtualKeyCode: 50,
-        modifiers: 8,
-      },
-    },
-    {
-      method: "Input.dispatchKeyEvent",
-      params: {
-        type: "keyDown",
-        key: "C",
-        code: "KeyC",
-        windowsVirtualKeyCode: 67,
-        nativeVirtualKeyCode: 67,
-        text: "C",
-        unmodifiedText: "C",
-      },
-    },
-    {
-      method: "Input.dispatchKeyEvent",
-      params: {
-        type: "keyUp",
-        key: "C",
-        code: "KeyC",
-        windowsVirtualKeyCode: 67,
-        nativeVirtualKeyCode: 67,
-      },
-    },
-  ]);
-  assert.equal(detached(), true);
-});
-
-test("trusted connector typing focuses the current composer before every key", async () => {
-  const { client, commands, detached } = createDebugger([
-    {},
-    { result: { type: "boolean", value: true } },
-    {},
-    {},
-    { result: { type: "boolean", value: true } },
-    {},
-    {},
-    {},
-  ]);
-  await dispatchTrustedText({
-    debuggerClient: client,
-    text: "@c",
-    focusExpression: "focusCurrentComposer()",
-  });
-  assert.deepEqual(
-    commands.filter(({ method }) => method === "Runtime.evaluate"),
-    [
-      {
-        method: "Runtime.evaluate",
-        params: {
-          expression: "focusCurrentComposer()",
-          returnByValue: true,
-          awaitPromise: true,
-        },
-      },
-      {
-        method: "Runtime.evaluate",
-        params: {
-          expression: "focusCurrentComposer()",
-          returnByValue: true,
-          awaitPromise: true,
-        },
-      },
-    ],
-  );
-  assert.deepEqual(
-    commands.filter(({ method }) => method === "Emulation.setFocusEmulationEnabled"),
-    [
-      {
-        method: "Emulation.setFocusEmulationEnabled",
-        params: { enabled: true },
-      },
-      {
-        method: "Emulation.setFocusEmulationEnabled",
-        params: { enabled: false },
-      },
-    ],
-  );
-  assert.equal(detached(), true);
-});
-
-test("trusted connector typing fails closed when the live composer cannot be focused", async () => {
-  const { client, commands, detached } = createDebugger([
-    {},
-    { result: { type: "boolean", value: false } },
-    {},
-  ]);
-  await assert.rejects(
-    dispatchTrustedText({
-      debuggerClient: client,
-      text: "@c",
-      focusExpression: "focusCurrentComposer()",
-    }),
-    /could not focus the live composer/,
-  );
-  assert.deepEqual(commands.at(-1), {
-    method: "Emulation.setFocusEmulationEnabled",
-    params: { enabled: false },
-  });
-  assert.equal(detached(), true);
-});
-
-test("trusted connector selection clicks one exact DOM-derived point", async () => {
-  const { client, commands, detached } = createDebugger();
-  await dispatchTrustedClick({
-    debuggerClient: client,
-    point: { x: 320.5, y: 240.25 },
-  });
-  assert.deepEqual(commands, [
-    {
-      method: "Input.dispatchMouseEvent",
-      params: { type: "mouseMoved", x: 320.5, y: 240.25 },
-    },
-    {
-      method: "Input.dispatchMouseEvent",
-      params: {
-        type: "mousePressed",
-        x: 320.5,
-        y: 240.25,
-        button: "left",
-        buttons: 1,
-        clickCount: 1,
-      },
-    },
-    {
-      method: "Input.dispatchMouseEvent",
-      params: {
-        type: "mouseReleased",
-        x: 320.5,
-        y: 240.25,
-        button: "left",
-        buttons: 0,
-        clickCount: 1,
-      },
-    },
-  ]);
-  assert.equal(detached(), true);
-});
-
 test("pre-attached WebContents debugger ownership is preserved", async () => {
   const { client, detached } = createDebugger([{
     result: { type: "number", value: 5 },
@@ -272,13 +102,6 @@ test("WebContents CDP commands fail closed without an owned debugger", async () 
     dispatchTrustedKey({
       debuggerClient: null,
       key: "Enter",
-    }),
-    /WebContents debugger is unavailable/,
-  );
-  await assert.rejects(
-    dispatchTrustedText({
-      debuggerClient: null,
-      text: "@Codex Native",
     }),
     /WebContents debugger is unavailable/,
   );

@@ -339,6 +339,12 @@ export class ChatGptBrowserWorker {
     return run;
   }
 
+  verifyConnector(): Promise<string> {
+    const verification = this.tail.then(() => this.verifyConnectorExclusive());
+    this.tail = verification.then(() => undefined, () => undefined);
+    return verification;
+  }
+
   async close(): Promise<void> {
     if (this.launcherHelper) {
       const helper = this.launcherHelper;
@@ -533,18 +539,8 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  private async attachPrompt(page: Page, prompt: string, localTools: boolean): Promise<void> {
+  private async selectConnector(page: Page): Promise<Locator> {
     const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
-    if (!localTools) {
-      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-      // then transport the complete text in one CDP Input.insertText command.
-      await composer.fill("");
-      await composer.focus();
-      await page.keyboard.insertText(prompt);
-      await this.assertPromptAttached(page, prompt);
-      return;
-    }
     await composer.fill("");
     await composer.focus();
     await composer.pressSequentially("@c", { delay: 25 });
@@ -558,10 +554,43 @@ export class ChatGptBrowserWorker {
     await appResult.click();
     const selectedPlugin = composer.getByRole("link", { name: this.config.appName, exact: true });
     await selectedPlugin.waitFor({ state: "visible", timeout: 10_000 });
-    await composer.focus();
+    return composer;
+  }
+
+  private async attachPrompt(page: Page, prompt: string, localTools: boolean): Promise<void> {
+    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    if (!localTools) {
+      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
+      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
+      // then transport the complete text in one CDP Input.insertText command.
+      await composer.fill("");
+      await composer.focus();
+      await page.keyboard.insertText(prompt);
+      await this.assertPromptAttached(page, prompt);
+      return;
+    }
+    const selectedComposer = await this.selectConnector(page);
+    await selectedComposer.focus();
     await page.keyboard.press("End");
     await page.keyboard.insertText(` ${prompt}`);
     await this.assertPromptAttached(page, prompt);
+  }
+
+  private async verifyConnectorExclusive(): Promise<string> {
+    const page = await this.ensurePage();
+    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
+      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    }
+    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
+    try {
+      await composer.waitFor({ state: "visible", timeout: 30_000 });
+    } catch {
+      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
+    }
+    await assertAuthenticatedChatGptPage(page);
+    await assertTemporaryChatPage(page);
+    await this.selectConnector(page);
+    return this.config.appName;
   }
 
   private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt): Promise<void> {

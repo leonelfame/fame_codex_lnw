@@ -11,6 +11,13 @@ test("Codex context uses the owned CDP composer transport, never the operating-s
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
 });
 
+test("connector verification and real tool turns share one Playwright selector", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource.match(/this\.selectConnector\(page\)/g)?.length).toBe(2);
+  expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
+  expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
+});
+
 test("read-only multiline context is inserted atomically before exact verification", async () => {
   const prompt = `Act as the model backend for the Codex task encoded below.\n${"x".repeat(44_550)}`;
   const calls: Array<[string, string?]> = [];
@@ -41,7 +48,7 @@ test("read-only multiline context is inserted atomically before exact verificati
   expect(asserted).toBe(prompt);
 });
 
-test("tool-capable prompts type the mention trigger and accept the exact connector before inserting context", async () => {
+test("the shared Playwright selector types the mention and accepts one exact connector", async () => {
   const calls: Array<[string, string?]> = [];
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
@@ -87,14 +94,13 @@ test("tool-capable prompts type the mention trigger and accept the exact connect
       press: async (value: string) => { calls.push(["press", value]); },
     },
   };
-  const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
-  }).attachPrompt;
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
 
-  await attachPrompt.call({
+  await selectConnector.call({
     config: { appName: "Codex Native" },
-    assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
-  }, page, "context", true);
+  }, page);
 
   expect(calls).toEqual([
     ["fill", ""],
@@ -103,6 +109,35 @@ test("tool-capable prompts type the mention trigger and accept the exact connect
     ["waitForResult"],
     ["clickResult"],
     ["waitForPill"],
+  ]);
+});
+
+test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
+  const calls: Array<[string, string?]> = [];
+  const composer = {
+    focus: async () => { calls.push(["focus"]); },
+  };
+  const page = {
+    locator: () => ({ last: () => composer }),
+    keyboard: {
+      insertText: async (value: string) => { calls.push(["insertText", value]); },
+      press: async (value: string) => { calls.push(["press", value]); },
+    },
+  };
+  const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
+  }).attachPrompt;
+
+  await attachPrompt.call({
+    selectConnector: async () => {
+      calls.push(["selectConnector"]);
+      return composer;
+    },
+    assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
+  }, page, "context", true);
+
+  expect(calls).toEqual([
+    ["selectConnector"],
     ["focus"],
     ["press", "End"],
     ["insertText", " context"],

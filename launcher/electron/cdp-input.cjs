@@ -35,112 +35,6 @@ async function dispatchTrustedKey({ debuggerClient, key }) {
   });
 }
 
-function printableKeyDescription(character) {
-  if (/^[a-z]$/i.test(character)) {
-    return {
-      code: `Key${character.toUpperCase()}`,
-      keyCode: character.toUpperCase().charCodeAt(0),
-    };
-  }
-  if (/^[0-9]$/.test(character)) {
-    return { code: `Digit${character}`, keyCode: character.charCodeAt(0) };
-  }
-  if (character === "@") return { code: "Digit2", keyCode: 50, modifiers: 8 };
-  if (character === " ") return { code: "Space", keyCode: 32 };
-  throw new Error(`Trusted CDP typing does not support character ${JSON.stringify(character)}`);
-}
-
-async function dispatchTrustedText({ debuggerClient, text, delayMs = 0, focusExpression }) {
-  if (typeof text !== "string" || text.length === 0) {
-    throw new Error("Trusted CDP text requires a non-empty string");
-  }
-  if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 1_000) {
-    throw new Error("Trusted CDP text delay must be between 0 and 1000 milliseconds");
-  }
-  if (focusExpression !== undefined && (typeof focusExpression !== "string" || !focusExpression.trim())) {
-    throw new Error("Trusted CDP text focus expression must be a non-empty string");
-  }
-  const characters = Array.from(text);
-  await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
-    let focusEmulationEnabled = false;
-    try {
-      if (focusExpression) {
-        await sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
-        focusEmulationEnabled = true;
-      }
-      for (const [index, character] of characters.entries()) {
-        if (focusExpression) {
-          const focused = await sendCommand("Runtime.evaluate", {
-            expression: focusExpression,
-            returnByValue: true,
-            awaitPromise: true,
-          });
-          if (focused?.exceptionDetails || focused?.result?.value !== true) {
-            throw new Error("Trusted CDP text could not focus the live composer");
-          }
-        }
-        const description = printableKeyDescription(character);
-        await sendCommand("Input.dispatchKeyEvent", {
-          type: "keyDown",
-          key: character,
-          code: description.code,
-          windowsVirtualKeyCode: description.keyCode,
-          nativeVirtualKeyCode: description.keyCode,
-          ...(description.modifiers ? { modifiers: description.modifiers } : {}),
-          text: character,
-          unmodifiedText: character,
-        });
-        await sendCommand("Input.dispatchKeyEvent", {
-          type: "keyUp",
-          key: character,
-          code: description.code,
-          windowsVirtualKeyCode: description.keyCode,
-          nativeVirtualKeyCode: description.keyCode,
-          ...(description.modifiers ? { modifiers: description.modifiers } : {}),
-        });
-        if (delayMs > 0 && index < characters.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-      }
-    } finally {
-      if (focusEmulationEnabled) {
-        await sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false });
-      }
-    }
-  });
-}
-
-async function dispatchTrustedClick({ debuggerClient, point }) {
-  const x = point?.x;
-  const y = point?.y;
-  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
-    throw new Error("Trusted CDP click requires a finite non-negative point");
-  }
-  await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
-    await sendCommand("Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x,
-      y,
-    });
-    await sendCommand("Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x,
-      y,
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    await sendCommand("Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x,
-      y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
-  });
-}
-
 async function evaluatePage({ debuggerClient, expression }) {
   if (typeof expression !== "string" || !expression.trim()) {
     throw new Error("CDP evaluation expression is required");
@@ -162,9 +56,7 @@ async function evaluatePage({ debuggerClient, expression }) {
 }
 
 module.exports = {
-  dispatchTrustedClick,
   dispatchTrustedKey,
-  dispatchTrustedText,
   evaluatePage,
   withWebContentsDebugger,
 };

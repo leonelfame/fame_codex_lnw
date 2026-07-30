@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -572,6 +574,8 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
 test("connector verification is effort-independent and works while the browser surface is hidden", async () => {
   const calls = [];
   const fixture = {
+    helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
+    descriptorPath: "/runtime/launcher-browser.json",
     logger: { info: (event, detail) => calls.push(["log", event, detail]) },
     setState: (patch) => calls.push(["state", patch]),
     show: () => calls.push(["show"]),
@@ -579,10 +583,10 @@ test("connector verification is effort-independent and works while the browser s
     selectHighEffort: async () => {
       throw new Error("connector verification must not select an effort");
     },
-    selectConnector: async (name) => calls.push(["select", name]),
-    focusComposer: async () => true,
-    clearFocusedComposer: async () => calls.push(["clear"]),
-    pressBrowserKey: (key) => calls.push(["key", key]),
+    verifyConnectorWithBrowserHelper: async (options) => {
+      calls.push(["helper", options]);
+      return { ok: true, appName: options.appName };
+    },
     view: {
       webContents: {
         getURL: () => "about:blank",
@@ -596,165 +600,23 @@ test("connector verification is effort-independent and works while the browser s
   assert.deepEqual(result, { ok: true, appName: "Codex Native" });
   assert.equal(calls.some(([type]) => type === "show"), false);
   assert.deepEqual(
-    calls.filter(([type]) => ["load", "select"].includes(type)),
+    calls.filter(([type]) => ["load", "helper"].includes(type)),
     [
       ["load", "https://chatgpt.com/?temporary-chat=true"],
-      ["select", "Codex Native"],
+      ["helper", {
+        helper: fixture.helper,
+        descriptorPath: fixture.descriptorPath,
+        appName: "Codex Native",
+        logger: fixture.logger,
+      }],
     ],
   );
 });
 
-test("trusted connector typing focuses the current composer at the CDP input boundary", async () => {
-  let request;
-  const fixture = {
-    dispatchTrustedText: async (value) => { request = value; },
-    view: {
-      webContents: {
-        debugger: {},
-      },
-    },
-  };
-
-  await BrowserHost.prototype.typeTrustedBrowserText.call(fixture, "@c");
-
-  assert.equal(request.text, "@c");
-  assert.equal(request.delayMs, 25);
-  assert.match(request.focusExpression, /prompt-textarea/);
-  assert.match(request.focusExpression, /composer\.focus/);
-});
-
-test("connector marker detection uses selected plugin attributes instead of rendered icon text", async () => {
-  let expression;
-  const fixture = {
-    evaluateBrowserPage: async (value) => {
-      expression = value;
-      return true;
-    },
-  };
-
-  assert.equal(
-    await BrowserHost.prototype.connectorSelected.call(fixture, "Codex Native"),
-    true,
-  );
-  assert.match(expression, /data-inline-selection-pill/);
-  assert.match(expression, /data-symbol="ecosystemMention"/);
-  assert.match(expression, /data-keyword/);
-  assert.match(expression, /plugin-icon-wrapper/);
-  assert.doesNotMatch(expression, /innerText|textContent/);
-});
-
-test("connector menu readiness uses a visible plugin row instead of localized copy", async () => {
-  let expression;
-  const fixture = {
-    evaluateBrowserPage: async (value) => {
-      expression = value;
-      return true;
-    },
-  };
-
-  assert.equal(
-    await BrowserHost.prototype.connectorMenuOpen.call(fixture),
-    true,
-  );
-  assert.match(expression, /__menu-item/);
-  assert.match(expression, /plugin-icon-wrapper/);
-  assert.doesNotMatch(expression, /Plugins|Type to search/);
-});
-
-test("connector selection waits for the mention menu before typing its filter", async () => {
-  const calls = [];
-  let focused = false;
-  let mentionMenuReady = false;
-  let connectorVisible = false;
-  const fixture = {
-    connectorSelected: async (name) => {
-      calls.push(["marker", name]);
-      return connectorVisible;
-    },
-    focusComposer: async () => {
-      focused = true;
-      calls.push(["focus"]);
-      return true;
-    },
-    clearFocusedComposer: async () => {
-      calls.push(["clear"]);
-      focused = false;
-    },
-    waitForConnectorInput: async (name, text) => {
-      calls.push(["input", `${name}:${text}`]);
-      return "mention";
-    },
-    waitForConnectorMenu: async () => {
-      calls.push(["menu"]);
-      mentionMenuReady = true;
-    },
-    waitForConnectorSuggestion: async (name) => {
-      calls.push(["suggestion", name]);
-      return { x: 320, y: 240 };
-    },
-    typeTrustedBrowserText: async (text) => {
-      assert.equal(focused, true, "composer focus must be reacquired after clearing");
-      if (text === "c") {
-        assert.equal(mentionMenuReady, true, "connector filter must wait for the mention menu");
-      }
-      calls.push(["type", text]);
-    },
-    clickTrustedBrowserPoint: async (point) => {
-      calls.push(["click", JSON.stringify(point)]);
-      connectorVisible = true;
-    },
-    waitForConnectorSelected: async (name) => {
-      assert.equal(connectorVisible, true);
-      calls.push(["selected", name]);
-    },
-  };
-
-  await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
-
-  assert.deepEqual(calls, [
-    ["marker", "Codex Native"],
-    ["focus"],
-    ["clear"],
-    ["focus"],
-    ["type", "@"],
-    ["input", "Codex Native:@"],
-    ["menu"],
-    ["type", "c"],
-    ["input", "Codex Native:@c"],
-    ["suggestion", "Codex Native"],
-    ["click", "{\"x\":320,\"y\":240}"],
-    ["selected", "Codex Native"],
-  ]);
-});
-
-test("connector selection accepts an existing connector marker without clearing or typing", async () => {
-  const fixture = {
-    connectorSelected: async (name) => {
-      assert.equal(name, "Codex Native");
-      return true;
-    },
-    focusComposer: async () => {
-      throw new Error("existing connector marker must short-circuit input");
-    },
-  };
-
-  await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
-});
-
-test("connector input accepts the final marker even when mention text is no longer present", async () => {
-  let reads = 0;
-  const fixture = {
-    connectorSelected: async () => {
-      reads += 1;
-      return reads === 2;
-    },
-    readComposerText: async () => "",
-  };
-
-  assert.equal(
-    await BrowserHost.prototype.waitForConnectorInput.call(fixture, "Codex Native", "@c", 100, 1),
-    "connector",
-  );
+test("connector verification has no independent CDP typing or coordinate-click path", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/browser-host.cjs"), "utf8");
+  assert.match(source, /verifyConnectorWithBrowserHelper/);
+  assert.doesNotMatch(source, /typeTrustedBrowserText|clickTrustedBrowserPoint|connectorMenuOpen|waitForConnectorSuggestion/);
 });
 
 test("connector verification preserves an already hydrated Temporary Chat page", async () => {
@@ -763,7 +625,9 @@ test("connector verification preserves an already hydrated Temporary Chat page",
     logger: { info() {} },
     setState() {},
     waitForAuthenticated: async () => {},
-    selectConnector: async () => {},
+    helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
+    descriptorPath: "/runtime/launcher-browser.json",
+    verifyConnectorWithBrowserHelper: async ({ appName }) => ({ ok: true, appName }),
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
