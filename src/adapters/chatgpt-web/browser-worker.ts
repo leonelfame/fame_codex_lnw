@@ -561,7 +561,7 @@ export class ChatGptBrowserWorker {
     const selected = this.selectedConnectorControl(composer);
     const count = await selected.count();
     if (count === 0) return false;
-    if (count !== 1 || await selected.getAttribute("title") !== this.config.appName) {
+    if (count !== 1) {
       throw new Error(`ChatGPT composer exposed an ambiguous ${JSON.stringify(this.config.appName)} connector control`);
     }
     return true;
