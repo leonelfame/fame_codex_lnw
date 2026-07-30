@@ -551,8 +551,27 @@ export class ChatGptBrowserWorker {
     );
   }
 
+  private selectedConnectorControl(composer: Locator): Locator {
+    return composer.locator("xpath=ancestor::form[1]")
+      .locator('button.__composer-pill[data-tone="accent"]')
+      .filter({ hasText: this.config.appName, visible: true });
+  }
+
+  private async connectorIsSelected(composer: Locator): Promise<boolean> {
+    const selected = this.selectedConnectorControl(composer);
+    const count = await selected.count();
+    if (count === 0) return false;
+    if (count !== 1 || await selected.getAttribute("title") !== this.config.appName) {
+      throw new Error(`ChatGPT composer exposed an ambiguous ${JSON.stringify(this.config.appName)} connector control`);
+    }
+    return true;
+  }
+
   private async selectConnector(page: Page): Promise<Locator> {
-    const composer = await this.activeComposer(page);
+    let composer = await this.activeComposer(page);
+    await composer.fill("");
+    if (await this.connectorIsSelected(composer)) return composer;
+
     const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
@@ -560,6 +579,7 @@ export class ChatGptBrowserWorker {
     let triggerAttempts = 0;
     for (;;) {
       triggerAttempts += 1;
+      composer = await this.activeComposer(page);
       await composer.fill("");
       await composer.focus();
       await composer.pressSequentially("@c", { delay: 25 });
@@ -591,13 +611,10 @@ export class ChatGptBrowserWorker {
     // again instead of returning the pre-selection locator, otherwise the real turn can focus a
     // detached/hidden editor even though verification just succeeded.
     const selectedComposer = await this.activeComposer(page);
-    const selectedConnector = selectedComposer.getByRole("link", {
-      name: this.config.appName,
-      exact: true,
-    });
+    const selectedConnector = this.selectedConnectorControl(selectedComposer);
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
-    if (await selectedConnector.count() !== 1) {
-      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector`);
+    if (!await this.connectorIsSelected(selectedComposer)) {
+      throw new Error(`ChatGPT composer did not select ${JSON.stringify(this.config.appName)} connector`);
     }
     return selectedComposer;
   }
