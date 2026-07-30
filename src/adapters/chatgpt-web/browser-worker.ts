@@ -552,8 +552,10 @@ export class ChatGptBrowserWorker {
       throw new Error(`ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`);
     }
     await composer.press("Enter");
-    const selectedPlugin = composer.getByRole("link", { name: this.config.appName, exact: true });
-    await selectedPlugin.waitFor({ state: "visible", timeout: 10_000 });
+    const selectedConnector = composer.getByText(this.config.appName, { exact: true })
+      .filter({ visible: true })
+      .first();
+    await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
     return composer;
   }
 

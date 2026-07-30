@@ -55,10 +55,16 @@ test("the shared Playwright selector types the mention and accepts one exact con
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
   };
-  const selectedPlugin = {
+  const selectedConnector = {
     waitFor: async () => {
       expect(connectorSelected).toBeTrue();
-      calls.push(["waitForPill"]);
+      calls.push(["waitForSelectedConnector"]);
+    },
+  };
+  const selectedConnectorCandidates = {
+    filter: (options: { visible: boolean }) => {
+      expect(options).toEqual({ visible: true });
+      return { first: () => selectedConnector };
     },
   };
   const composer = {
@@ -72,10 +78,10 @@ test("the shared Playwright selector types the mention and accepts one exact con
       if (value === "Enter") connectorSelected = true;
       calls.push(["composerPress", value]);
     },
-    getByRole: (role: string, options: { name: string; exact: boolean }) => {
-      expect(role).toBe("link");
-      expect(options).toEqual({ name: "Codex Native", exact: true });
-      return selectedPlugin;
+    getByText: (text: string, options: { exact: boolean }) => {
+      expect(text).toBe("Codex Native");
+      expect(options).toEqual({ exact: true });
+      return selectedConnectorCandidates;
     },
   };
   const page = {
@@ -114,7 +120,7 @@ test("the shared Playwright selector types the mention and accepts one exact con
     ["pressSequentially", "@c"],
     ["waitForResult"],
     ["composerPress", "Enter"],
-    ["waitForPill"],
+    ["waitForSelectedConnector"],
   ]);
 });
 
