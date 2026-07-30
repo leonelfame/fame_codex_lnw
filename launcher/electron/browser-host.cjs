@@ -1076,6 +1076,31 @@ class BrowserHost {
     return await this.withManualOperation("connector verification", () => this.runConnectorVerification(appName));
   }
 
+  async connectorMenuOpen() {
+    return await this.evaluateBrowserPage(`(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      return Array.from(document.querySelectorAll('.__menu-item[tabindex="0"]')).some((row) => (
+        visible(row) && Boolean(row.querySelector('[data-testid="plugin-icon-wrapper"]'))
+      ));
+    })()`);
+  }
+
+  async waitForConnectorMenu(timeoutMs = 10_000, pollMs = 50) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (await this.connectorMenuOpen()) return;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error("ChatGPT did not open the connector menu after the mention trigger");
+  }
+
   async readConnectorSuggestion(appName) {
     return await this.evaluateBrowserPage(`(() => {
       const expected = ${JSON.stringify(appName)};
@@ -1168,9 +1193,11 @@ class BrowserHost {
     if (!await this.focusComposer()) {
       throw new Error("ChatGPT composer lost focus while preparing connector selection");
     }
-    const mention = "@c";
-    await this.typeTrustedBrowserText(mention);
-    if (await this.waitForConnectorInput(appName, mention) === "connector") return;
+    await this.typeTrustedBrowserText("@");
+    if (await this.waitForConnectorInput(appName, "@") === "connector") return;
+    await this.waitForConnectorMenu();
+    await this.typeTrustedBrowserText("c");
+    if (await this.waitForConnectorInput(appName, "@c") === "connector") return;
     const point = await this.waitForConnectorSuggestion(appName);
     await this.clickTrustedBrowserPoint(point);
     await this.waitForConnectorSelected(appName);

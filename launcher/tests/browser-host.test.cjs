@@ -643,9 +643,28 @@ test("connector marker detection uses selected plugin attributes instead of rend
   assert.doesNotMatch(expression, /innerText|textContent/);
 });
 
-test("connector selection reacquires focus, types the mention trigger, and confirms the exact marker", async () => {
+test("connector menu readiness uses a visible plugin row instead of localized copy", async () => {
+  let expression;
+  const fixture = {
+    evaluateBrowserPage: async (value) => {
+      expression = value;
+      return true;
+    },
+  };
+
+  assert.equal(
+    await BrowserHost.prototype.connectorMenuOpen.call(fixture),
+    true,
+  );
+  assert.match(expression, /__menu-item/);
+  assert.match(expression, /plugin-icon-wrapper/);
+  assert.doesNotMatch(expression, /Plugins|Type to search/);
+});
+
+test("connector selection waits for the mention menu before typing its filter", async () => {
   const calls = [];
   let focused = false;
+  let mentionMenuReady = false;
   let connectorVisible = false;
   const fixture = {
     connectorSelected: async (name) => {
@@ -665,12 +684,19 @@ test("connector selection reacquires focus, types the mention trigger, and confi
       calls.push(["input", `${name}:${text}`]);
       return "mention";
     },
+    waitForConnectorMenu: async () => {
+      calls.push(["menu"]);
+      mentionMenuReady = true;
+    },
     waitForConnectorSuggestion: async (name) => {
       calls.push(["suggestion", name]);
       return { x: 320, y: 240 };
     },
     typeTrustedBrowserText: async (text) => {
       assert.equal(focused, true, "composer focus must be reacquired after clearing");
+      if (text === "c") {
+        assert.equal(mentionMenuReady, true, "connector filter must wait for the mention menu");
+      }
       calls.push(["type", text]);
     },
     clickTrustedBrowserPoint: async (point) => {
@@ -690,7 +716,10 @@ test("connector selection reacquires focus, types the mention trigger, and confi
     ["focus"],
     ["clear"],
     ["focus"],
-    ["type", "@c"],
+    ["type", "@"],
+    ["input", "Codex Native:@"],
+    ["menu"],
+    ["type", "c"],
     ["input", "Codex Native:@c"],
     ["suggestion", "Codex Native"],
     ["click", "{\"x\":320,\"y\":240}"],
