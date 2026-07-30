@@ -101,6 +101,7 @@ test("trusted connector mention is typed as discrete keyboard events", async () 
         code: "Digit2",
         windowsVirtualKeyCode: 50,
         nativeVirtualKeyCode: 50,
+        modifiers: 8,
         text: "@",
         unmodifiedText: "@",
       },
@@ -113,6 +114,7 @@ test("trusted connector mention is typed as discrete keyboard events", async () 
         code: "Digit2",
         windowsVirtualKeyCode: 50,
         nativeVirtualKeyCode: 50,
+        modifiers: 8,
       },
     },
     {

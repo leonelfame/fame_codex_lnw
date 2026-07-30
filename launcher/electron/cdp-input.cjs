@@ -45,7 +45,7 @@ function printableKeyDescription(character) {
   if (/^[0-9]$/.test(character)) {
     return { code: `Digit${character}`, keyCode: character.charCodeAt(0) };
   }
-  if (character === "@") return { code: "Digit2", keyCode: 50 };
+  if (character === "@") return { code: "Digit2", keyCode: 50, modifiers: 8 };
   if (character === " ") return { code: "Space", keyCode: 32 };
   throw new Error(`Trusted CDP typing does not support character ${JSON.stringify(character)}`);
 }
@@ -86,6 +86,7 @@ async function dispatchTrustedText({ debuggerClient, text, delayMs = 0, focusExp
           code: description.code,
           windowsVirtualKeyCode: description.keyCode,
           nativeVirtualKeyCode: description.keyCode,
+          ...(description.modifiers ? { modifiers: description.modifiers } : {}),
           text: character,
           unmodifiedText: character,
         });
@@ -95,6 +96,7 @@ async function dispatchTrustedText({ debuggerClient, text, delayMs = 0, focusExp
           code: description.code,
           windowsVirtualKeyCode: description.keyCode,
           nativeVirtualKeyCode: description.keyCode,
+          ...(description.modifiers ? { modifiers: description.modifiers } : {}),
         });
         if (delayMs > 0 && index < characters.length - 1) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
