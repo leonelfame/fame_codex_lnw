@@ -562,25 +562,9 @@ export class ChatGptBrowserWorker {
     return await selected.count() > 0;
   }
 
-  private async focusComposerAtEnd(composer: Locator): Promise<void> {
-    await composer.evaluate(element => {
-      const editable = element as HTMLElement;
-      editable.focus({ preventScroll: true });
-      if (document.activeElement !== editable && !editable.contains(document.activeElement)) {
-        throw new Error("ChatGPT composer did not accept focus");
-      }
-      const selection = document.getSelection();
-      if (!selection) throw new Error("ChatGPT composer selection is unavailable");
-      const range = document.createRange();
-      range.selectNodeContents(editable);
-      range.collapse(false);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    });
-  }
-
   private async selectConnector(page: Page): Promise<Locator> {
     let composer = await this.activeComposer(page);
+    await composer.fill("");
     if (await this.connectorIsSelected(composer)) return composer;
 
     const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
@@ -637,13 +621,14 @@ export class ChatGptBrowserWorker {
       // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
       // then transport the complete text in one CDP Input.insertText command.
       await composer.fill("");
-      await this.focusComposerAtEnd(composer);
+      await composer.focus();
       await page.keyboard.insertText(prompt);
       await this.assertPromptAttached(page, prompt);
       return;
     }
     const selectedComposer = await this.selectConnector(page);
-    await this.focusComposerAtEnd(selectedComposer);
+    await selectedComposer.focus();
+    await page.keyboard.press("End");
     await page.keyboard.insertText(` ${prompt}`);
     await this.assertPromptAttached(page, prompt);
   }
@@ -890,7 +875,7 @@ export class ChatGptBrowserWorker {
       const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
       const initialUserTurnCount = await userTurns.count();
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async () => {
-        await page.getByTestId("send-button").press("Enter");
+        await page.getByTestId("send-button").dispatchEvent("click");
         await userTurns.nth(initialUserTurnCount).waitFor({
           state: "visible",
           timeout: browserStageTimeouts.send,
