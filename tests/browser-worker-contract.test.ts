@@ -135,6 +135,63 @@ test("the shared Playwright selector types the mention and accepts one exact con
   ]);
 });
 
+test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
+  const calls: string[] = [];
+  let menuAttempt = 0;
+  let selected = false;
+  const timeout = new Error("menu not hydrated");
+  timeout.name = "TimeoutError";
+  const selectedConnector = {
+    waitFor: async () => {
+      expect(selected).toBeTrue();
+      calls.push("selected");
+    },
+    count: async () => 1,
+  };
+  const appResult = {
+    waitFor: async () => {
+      menuAttempt += 1;
+      calls.push(`menu:${menuAttempt}`);
+      if (menuAttempt === 1) throw timeout;
+    },
+    count: async () => 1,
+    dispatchEvent: async () => {
+      selected = true;
+      calls.push("activate");
+    },
+  };
+  const composer = {
+    fill: async () => { calls.push("clear"); },
+    focus: async () => { calls.push("focus"); },
+    pressSequentially: async (value: string) => {
+      expect(value).toBe("@c");
+      calls.push("type");
+    },
+    locator: () => ({
+      getByTestId: () => ({
+        getByRole: () => selectedConnector,
+      }),
+    }),
+  };
+  const page = {
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => selector.includes("__menu-item")
+      ? { filter: () => appResult }
+      : { last: () => composer },
+  };
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  await selectConnector.call({ config: { appName: "Codex Native" } }, page);
+
+  expect(calls).toEqual([
+    "clear", "focus", "type", "menu:1",
+    "clear", "focus", "type", "menu:2",
+    "activate", "selected",
+  ]);
+});
+
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
   const calls: Array<[string, string?]> = [];
   const composer = {

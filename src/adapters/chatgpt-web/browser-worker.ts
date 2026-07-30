@@ -541,13 +541,31 @@ export class ChatGptBrowserWorker {
 
   private async selectConnector(page: Page): Promise<Locator> {
     const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
-    await composer.fill("");
-    await composer.focus();
-    await composer.pressSequentially("@c", { delay: 25 });
     const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
-    await appResult.waitFor({ state: "visible", timeout: 20_000 });
+    const menuDeadline = Date.now() + 20_000;
+    let triggerAttempts = 0;
+    for (;;) {
+      triggerAttempts += 1;
+      await composer.fill("");
+      await composer.focus();
+      await composer.pressSequentially("@c", { delay: 25 });
+      try {
+        await appResult.waitFor({
+          state: "visible",
+          timeout: Math.min(2_500, Math.max(1, menuDeadline - Date.now())),
+        });
+        break;
+      } catch (error) {
+        if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+        if (Date.now() >= menuDeadline) {
+          throw new Error(
+            `ChatGPT connector menu did not open after ${triggerAttempts} complete mention trigger attempt(s)`,
+          );
+        }
+      }
+    }
     if (await appResult.count() !== 1) {
       throw new Error(`ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`);
     }
