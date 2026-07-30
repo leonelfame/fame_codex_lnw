@@ -30,13 +30,18 @@ export class HttpTurnCounter {
     return this.active;
   }
 
-  async track(run: () => Promise<Response>): Promise<Response> {
+  async track(run: () => Promise<Response>, signal?: AbortSignal): Promise<Response> {
     this.active += 1;
     let released = false;
+    let abortListener: (() => void) | undefined;
     const release = () => {
       if (released) return;
       released = true;
       this.active -= 1;
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+        abortListener = undefined;
+      }
     };
 
     try {
@@ -46,6 +51,19 @@ export class HttpTurnCounter {
         return response;
       }
       const reader = response.body.getReader();
+      // A client that disconnects mid-stream stops draining the body without cancelling it, so the
+      // stream callbacks never run and the turn would stay counted forever. The request signal is
+      // the only evidence that the peer is gone.
+      if (signal?.aborted) {
+        void reader.cancel(signal.reason).catch(() => {});
+        release();
+      } else if (signal) {
+        abortListener = () => {
+          void reader.cancel(signal.reason).catch(() => {});
+          release();
+        };
+        signal.addEventListener("abort", abortListener, { once: true });
+      }
       const body = new ReadableStream<Uint8Array>({
         async pull(controller) {
           try {
@@ -359,7 +377,7 @@ export function startServer(
             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
           }
           return response;
-        });
+        }, req.signal);
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
@@ -369,11 +387,11 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => responseRequest(req, config));
+        return httpTurns.track(() => responseRequest(req, config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => compactRequest(req, config));
+        return httpTurns.track(() => compactRequest(req, config), req.signal);
       }
       return new Response("Not found", { status: 404 });
     },

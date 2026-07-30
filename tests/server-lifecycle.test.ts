@@ -31,6 +31,36 @@ test("HTTP turn tracking releases a cancelled response stream", async () => {
   expect(turns.count()).toBe(0);
 });
 
+test("HTTP turn tracking releases a stream whose client disconnected without cancelling", async () => {
+  const turns = new HttpTurnCounter();
+  const client = new AbortController();
+  let cancelled = false;
+  const response = await turns.track(
+    async () => new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    })),
+    client.signal,
+  );
+
+  expect(turns.count()).toBe(1);
+  client.abort();
+  await Bun.sleep(0);
+  expect(turns.count()).toBe(0);
+  expect(cancelled).toBe(true);
+  expect(response.body).not.toBeNull();
+});
+
+test("HTTP turn tracking releases a stream requested by an already disconnected client", async () => {
+  const turns = new HttpTurnCounter();
+  const client = new AbortController();
+  client.abort();
+  await turns.track(async () => new Response(new ReadableStream<Uint8Array>()), client.signal);
+
+  expect(turns.count()).toBe(0);
+});
+
 test("authenticated lifecycle control cancels orphaned browser turns", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const server = startServer(config);
