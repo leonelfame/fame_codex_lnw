@@ -604,16 +604,27 @@ test("connector verification is effort-independent and works while the browser s
   );
 });
 
-test("connector selection types the full mention, accepts it, and confirms the pill", async () => {
+test("connector selection reacquires focus, types the mention trigger, and confirms the exact pill", async () => {
   const calls = [];
+  let focused = false;
   const fixture = {
-    focusComposer: async () => true,
-    clearFocusedComposer: async () => calls.push(["clear"]),
+    focusComposer: async () => {
+      focused = true;
+      calls.push(["focus"]);
+      return true;
+    },
+    clearFocusedComposer: async () => {
+      calls.push(["clear"]);
+      focused = false;
+    },
     waitForComposerText: async (text) => calls.push(["composer", text]),
     waitForConnectorSuggestion: async (name) => {
       calls.push(["suggestion", name]);
     },
-    typeTrustedBrowserText: async (text) => calls.push(["type", text]),
+    typeTrustedBrowserText: async (text) => {
+      assert.equal(focused, true, "composer focus must be reacquired after clearing");
+      calls.push(["type", text]);
+    },
     pressTrustedBrowserKey: async (key) => calls.push(["key", key]),
     waitForConnectorSelected: async (name) => calls.push(["selected", name]),
   };
@@ -621,9 +632,11 @@ test("connector selection types the full mention, accepts it, and confirms the p
   await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
 
   assert.deepEqual(calls, [
+    ["focus"],
     ["clear"],
-    ["type", "@Codex Native"],
-    ["composer", "@Codex Native"],
+    ["focus"],
+    ["type", "@c"],
+    ["composer", "@c"],
     ["suggestion", "Codex Native"],
     ["key", "Enter"],
     ["selected", "Codex Native"],

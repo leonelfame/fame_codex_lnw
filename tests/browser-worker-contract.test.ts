@@ -41,7 +41,7 @@ test("read-only multiline context is inserted atomically before exact verificati
   expect(asserted).toBe(prompt);
 });
 
-test("tool-capable prompts type and accept the exact connector before inserting context", async () => {
+test("tool-capable prompts type the mention trigger and accept the exact connector before inserting context", async () => {
   const calls: Array<[string, string?]> = [];
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
@@ -89,7 +89,7 @@ test("tool-capable prompts type and accept the exact connector before inserting 
   expect(calls).toEqual([
     ["fill", ""],
     ["focus"],
-    ["pressSequentially", "@Codex Native"],
+    ["pressSequentially", "@c"],
     ["waitForResult"],
     ["composerPress", "Enter"],
     ["waitForPill"],

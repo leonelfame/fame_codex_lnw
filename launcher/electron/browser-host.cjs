@@ -1115,7 +1115,10 @@ class BrowserHost {
       throw new Error("ChatGPT composer was not available for connector selection");
     }
     await this.clearFocusedComposer();
-    const mention = `@${appName}`;
+    if (!await this.focusComposer()) {
+      throw new Error("ChatGPT composer lost focus while preparing connector selection");
+    }
+    const mention = "@c";
     await this.typeTrustedBrowserText(mention);
     await this.waitForComposerText(mention);
     await this.waitForConnectorSuggestion(appName);

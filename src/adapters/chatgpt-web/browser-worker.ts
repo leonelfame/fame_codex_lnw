@@ -547,7 +547,7 @@ export class ChatGptBrowserWorker {
     }
     await composer.fill("");
     await composer.focus();
-    await composer.pressSequentially(`@${this.config.appName}`, { delay: 25 });
+    await composer.pressSequentially("@c", { delay: 25 });
     const appResult = page.getByRole("group").filter({ hasText: this.config.appName }).last();
     await appResult.waitFor({ state: "visible", timeout: 20_000 });
     await composer.press("Enter");
