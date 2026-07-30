@@ -604,6 +604,45 @@ test("connector verification is effort-independent and works while the browser s
   );
 });
 
+test("trusted connector typing focuses the current composer at the CDP input boundary", async () => {
+  let request;
+  const fixture = {
+    dispatchTrustedText: async (value) => { request = value; },
+    view: {
+      webContents: {
+        debugger: {},
+      },
+    },
+  };
+
+  await BrowserHost.prototype.typeTrustedBrowserText.call(fixture, "@c");
+
+  assert.equal(request.text, "@c");
+  assert.equal(request.delayMs, 25);
+  assert.match(request.focusExpression, /prompt-textarea/);
+  assert.match(request.focusExpression, /composer\.focus/);
+});
+
+test("connector marker detection uses selected plugin attributes instead of rendered icon text", async () => {
+  let expression;
+  const fixture = {
+    evaluateBrowserPage: async (value) => {
+      expression = value;
+      return true;
+    },
+  };
+
+  assert.equal(
+    await BrowserHost.prototype.connectorSelected.call(fixture, "Codex Native"),
+    true,
+  );
+  assert.match(expression, /data-inline-selection-pill/);
+  assert.match(expression, /data-symbol="ecosystemMention"/);
+  assert.match(expression, /data-keyword/);
+  assert.match(expression, /plugin-icon-wrapper/);
+  assert.doesNotMatch(expression, /innerText|textContent/);
+});
+
 test("connector selection reacquires focus, types the mention trigger, and confirms the exact marker", async () => {
   const calls = [];
   let focused = false;

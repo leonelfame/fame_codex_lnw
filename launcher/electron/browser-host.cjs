@@ -672,6 +672,12 @@ class BrowserHost {
         debuggerClient: this.view.webContents.debugger,
         text,
         delayMs: 25,
+        focusExpression: `(() => {
+          const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+          if (!composer) return false;
+          composer.focus({ preventScroll: true });
+          return document.activeElement === composer || composer.contains(document.activeElement);
+        })()`,
       });
     } catch (error) {
       throw new Error(
@@ -1117,12 +1123,15 @@ class BrowserHost {
   async connectorSelected(appName) {
     return await this.evaluateBrowserPage(`(() => {
       const expected = ${JSON.stringify(appName)};
-      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
       if (!composer) return false;
       return Array.from(composer.querySelectorAll(
-        'a, [contenteditable="false"], [data-inline-selection-pill], [data-inline-selection-pill-cursor-target]'
-      )).some((element) => normalize(element.innerText || element.textContent) === expected);
+        '[data-inline-selection-pill][data-symbol="ecosystemMention"]'
+      )).some((marker) => (
+        marker.getAttribute('data-keyword') === expected
+        && String(marker.getAttribute('data-id') || '').startsWith('plugin:')
+        && Boolean(marker.querySelector('[data-testid="plugin-icon-wrapper"]'))
+      ));
     })()`);
   }
 

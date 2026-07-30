@@ -141,6 +141,59 @@ test("trusted connector mention is typed as discrete keyboard events", async () 
   assert.equal(detached(), true);
 });
 
+test("trusted connector typing focuses the current composer before every key", async () => {
+  const { client, commands, detached } = createDebugger([
+    { result: { type: "boolean", value: true } },
+    {},
+    {},
+    { result: { type: "boolean", value: true } },
+    {},
+    {},
+  ]);
+  await dispatchTrustedText({
+    debuggerClient: client,
+    text: "@c",
+    focusExpression: "focusCurrentComposer()",
+  });
+  assert.deepEqual(
+    commands.filter(({ method }) => method === "Runtime.evaluate"),
+    [
+      {
+        method: "Runtime.evaluate",
+        params: {
+          expression: "focusCurrentComposer()",
+          returnByValue: true,
+          awaitPromise: true,
+        },
+      },
+      {
+        method: "Runtime.evaluate",
+        params: {
+          expression: "focusCurrentComposer()",
+          returnByValue: true,
+          awaitPromise: true,
+        },
+      },
+    ],
+  );
+  assert.equal(detached(), true);
+});
+
+test("trusted connector typing fails closed when the live composer cannot be focused", async () => {
+  const { client, detached } = createDebugger([{
+    result: { type: "boolean", value: false },
+  }]);
+  await assert.rejects(
+    dispatchTrustedText({
+      debuggerClient: client,
+      text: "@c",
+      focusExpression: "focusCurrentComposer()",
+    }),
+    /could not focus the live composer/,
+  );
+  assert.equal(detached(), true);
+});
+
 test("trusted connector selection clicks one exact DOM-derived point", async () => {
   const { client, commands, detached } = createDebugger();
   await dispatchTrustedClick({

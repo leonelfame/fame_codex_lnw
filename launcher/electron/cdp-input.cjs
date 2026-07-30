@@ -50,16 +50,29 @@ function printableKeyDescription(character) {
   throw new Error(`Trusted CDP typing does not support character ${JSON.stringify(character)}`);
 }
 
-async function dispatchTrustedText({ debuggerClient, text, delayMs = 0 }) {
+async function dispatchTrustedText({ debuggerClient, text, delayMs = 0, focusExpression }) {
   if (typeof text !== "string" || text.length === 0) {
     throw new Error("Trusted CDP text requires a non-empty string");
   }
   if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 1_000) {
     throw new Error("Trusted CDP text delay must be between 0 and 1000 milliseconds");
   }
+  if (focusExpression !== undefined && (typeof focusExpression !== "string" || !focusExpression.trim())) {
+    throw new Error("Trusted CDP text focus expression must be a non-empty string");
+  }
   const characters = Array.from(text);
   await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
     for (const [index, character] of characters.entries()) {
+      if (focusExpression) {
+        const focused = await sendCommand("Runtime.evaluate", {
+          expression: focusExpression,
+          returnByValue: true,
+          awaitPromise: true,
+        });
+        if (focused?.exceptionDetails || focused?.result?.value !== true) {
+          throw new Error("Trusted CDP text could not focus the live composer");
+        }
+      }
       const description = printableKeyDescription(character);
       await sendCommand("Input.dispatchKeyEvent", {
         type: "keyDown",
