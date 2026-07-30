@@ -74,4 +74,7 @@ test("packaged smoke executes the relocated runtime instead of only checking cop
   assert.match(main, /runtimeCommand\(\["--version"\]\)/);
   assert.match(main, /runtimeVerified:\s*true/);
   assert.match(smoke, /marker\.runtimeVerified\s*!==\s*true/);
+  assert.match(smoke, /launcherManifest\.name/);
+  assert.match(smoke, /launcherManifest\.build\.productName/);
+  assert.doesNotMatch(smoke, /"Programs",\s*"Codex Web GPT"/);
 });

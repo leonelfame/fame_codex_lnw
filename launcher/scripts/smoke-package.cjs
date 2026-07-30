@@ -5,9 +5,10 @@ const { spawnSync } = require("node:child_process");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const artifactsDirectory = path.join(launcherRoot, "artifacts");
-const expectedVersion = JSON.parse(
+const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
-).version;
+);
+const expectedVersion = launcherManifest.version;
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-smoke-"));
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
@@ -74,8 +75,8 @@ try {
     executable = path.join(
       process.env.LOCALAPPDATA || "",
       "Programs",
-      "Codex Web GPT",
-      "Codex Web GPT.exe",
+      launcherManifest.name,
+      `${launcherManifest.build.productName}.exe`,
     );
     command = executable;
     args = ["--launcher-smoke-test"];
