@@ -18,7 +18,7 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).toContain('getByTestId("composer-footer-actions")');
+  expect(workerSource).toContain('selectedComposer.getByRole("link"');
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
 });
 
@@ -93,22 +93,11 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     },
     count: async () => 1,
   };
-  const footerActions = {
-    getByRole: (role: string, options: { name: string }) => {
-      expect(role).toBe("button");
-      expect(options).toEqual({ name: "Codex Native" });
-      return selectedConnector;
-    },
-  };
   const selectedComposer = {
-    locator: (selector: string) => {
-      expect(selector).toBe("xpath=ancestor::form[1]");
-      return {
-        getByTestId: (testId: string) => {
-          expect(testId).toBe("composer-footer-actions");
-          return footerActions;
-        },
-      };
+    getByRole: (role: string, options: { name: string; exact: boolean }) => {
+      expect(role).toBe("link");
+      expect(options).toEqual({ name: "Codex Native", exact: true });
+      return selectedConnector;
     },
   };
   const initialComposer = {
@@ -188,11 +177,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     },
   };
   const selectedComposer = {
-    locator: () => ({
-      getByTestId: () => ({
-        getByRole: () => selectedConnector,
-      }),
-    }),
+    getByRole: () => selectedConnector,
   };
   const initialComposer = {
     fill: async () => { calls.push("clear"); },
@@ -248,11 +233,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   };
   const selectedComposer = {
     focus: async () => { calls.push(["selectedFocus"]); },
-    locator: () => ({
-      getByTestId: () => ({
-        getByRole: () => selectedConnector,
-      }),
-    }),
+    getByRole: () => selectedConnector,
   };
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },

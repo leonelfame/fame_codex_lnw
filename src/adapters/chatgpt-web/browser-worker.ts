@@ -591,12 +591,13 @@ export class ChatGptBrowserWorker {
     // again instead of returning the pre-selection locator, otherwise the real turn can focus a
     // detached/hidden editor even though verification just succeeded.
     const selectedComposer = await this.activeComposer(page);
-    const selectedConnector = selectedComposer.locator("xpath=ancestor::form[1]")
-      .getByTestId("composer-footer-actions")
-      .getByRole("button", { name: this.config.appName });
+    const selectedConnector = selectedComposer.getByRole("link", {
+      name: this.config.appName,
+      exact: true,
+    });
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
     if (await selectedConnector.count() !== 1) {
-      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector badge`);
+      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector`);
     }
     return selectedComposer;
   }
