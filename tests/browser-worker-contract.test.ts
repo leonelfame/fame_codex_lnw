@@ -50,13 +50,16 @@ test("read-only multiline context is inserted atomically before exact verificati
 
 test("the shared Playwright selector types the mention and accepts one exact connector", async () => {
   const calls: Array<[string, string?]> = [];
+  let connectorSelected = false;
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    press: async (key: string) => { calls.push(["pressResult", key]); },
   };
   const selectedPlugin = {
-    waitFor: async () => { calls.push(["waitForPill"]); },
+    waitFor: async () => {
+      expect(connectorSelected).toBeTrue();
+      calls.push(["waitForPill"]);
+    },
   };
   const composer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
@@ -65,7 +68,10 @@ test("the shared Playwright selector types the mention and accepts one exact con
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
     },
-    press: async (value: string) => { calls.push(["composerPress", value]); },
+    press: async (value: string) => {
+      if (value === "Enter") connectorSelected = true;
+      calls.push(["composerPress", value]);
+    },
     getByRole: (role: string, options: { name: string; exact: boolean }) => {
       expect(role).toBe("link");
       expect(options).toEqual({ name: "Codex Native", exact: true });
@@ -107,7 +113,7 @@ test("the shared Playwright selector types the mention and accepts one exact con
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["pressResult", "Enter"],
+    ["composerPress", "Enter"],
     ["waitForPill"],
   ]);
 });
