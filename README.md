@@ -84,9 +84,11 @@ Then complete the three checks in the app:
 Pro appears only when the signed-in account exposes it. The separate **MCP** page is optional and
 guides the full-harness setup without terminal commands.
 
-The launcher owns its browser, login profile, Responses proxy, tunnel process, health checks, logs,
-and login-item lifecycle on macOS, Windows, and Linux. A packaged browser-only install needs no
-Google Chrome, model API key, system Node/Bun, OpenCodex, or separate Playwright browser download.
+The launcher is the default path: browser login, model installation, optional MCP guidance, runtime
+health, logs, and updates stay in one UI. It owns its browser, login profile, Responses proxy,
+tunnel process, and login-item lifecycle on macOS, Windows, and Linux. A packaged browser-only
+install needs no Google Chrome, model API key, system Node/Bun, OpenCodex, or separate Playwright
+browser download.
 
 **Run from source**
 
@@ -132,11 +134,14 @@ Full mode connects ChatGPT's tool calls back to the current Codex task through t
 not expose a public IP, open an inbound port, or require router forwarding.
 
 1. Finish the required launcher setup.
-2. Open **MCP** in the launcher. Its guide links to the tunnel and runtime-key pages.
-3. Paste a tunnel id and a runtime key with **Tunnels Read + Use**, then press **Connect harness**.
-4. Attach that tunnel in ChatGPT connector settings and name the connector exactly
-   `Codex Native`.
-5. Scan its tools, choose the intended action permissions, and run **Verify runtime**.
+2. Open **MCP** in the launcher. Create the Tunnel and a regular API key on the same OpenAI account
+   that will use the ChatGPT connector; creating the key is free and does not consume model API
+   credits.
+3. Paste the Tunnel ID and API key, then press **Connect harness**.
+4. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
+   exact Tunnel, set **Authentication** to **None**, and name it exactly `Codex Native`.
+5. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
+   opens the `@c` menu and selects the exact `Codex Native` result.
 
 Write/modify actions require a ChatGPT workspace and admin policy that permit them. OpenAI
 currently documents those actions for Business and Enterprise/Edu workspaces; personal Pro is

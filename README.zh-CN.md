@@ -80,9 +80,10 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 只有已登录账户支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令
 的情况下引导你完成完整 harness 设置。
 
-启动器统一管理内置浏览器、登录 profile、Responses 代理、Tunnel 进程、健康检查、日志以及
-macOS、Windows 和 Linux 的登录启动项。打包后的仅浏览器模式不需要 Google Chrome、模型 API
-密钥、系统级 Node/Bun、OpenCodex 或单独下载 Playwright 浏览器。
+启动器是默认使用方式：浏览器登录、模型安装、可选 MCP 指南、运行状态、日志和更新都集中在同一
+界面。它统一管理内置浏览器、登录 profile、Responses 代理、Tunnel 进程以及 macOS、Windows
+和 Linux 的登录启动项。打包后的仅浏览器模式不需要 Google Chrome、模型 API 密钥、系统级
+Node/Bun、OpenCodex 或单独下载 Playwright 浏览器。
 
 **从源码运行**
 
@@ -128,11 +129,13 @@ ChatGPT Web 条目，因此原生模型、任务历史、审批、沙箱和工�
 也不需要配置路由器端口转发。
 
 1. 完成启动器中的必需设置。
-2. 在启动器中打开 **MCP**；指南会链接到 Tunnel 和运行时密钥页面。
-3. 粘贴 Tunnel ID 和具有 **Tunnels Read + Use** 权限的运行时密钥，然后点击
-   **连接 Harness**。
-4. 在 ChatGPT 连接器设置中连接该 Tunnel，并将连接器准确命名为 `Codex Native`。
-5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。
+2. 在启动器中打开 **MCP**。请在将使用 ChatGPT 连接器的同一个 OpenAI 账户中创建 Tunnel
+   和普通 API 密钥；创建密钥本身免费，也不会消耗模型 API 额度。
+3. 粘贴 Tunnel ID 和 API 密钥，然后点击 **连接 Harness**。
+4. 在 ChatGPT 设置中启用 **开发者模式**。创建连接器时选择 **Tunnel**，选择刚创建的
+   Tunnel，将 **身份验证** 设为 **无**，并将连接器准确命名为 `Codex Native`。
+5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。验证过程会打开 `@c` 菜单并选择
+   精确匹配的 `Codex Native` 项。
 
 写入/修改操作需要 ChatGPT 工作区及管理员政策允许。OpenAI 目前仅为 Business 和
 Enterprise/Edu 工作区说明了这些操作；个人 Pro 账户仅限 read/fetch MCP 权限。请参阅

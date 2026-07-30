@@ -4,7 +4,7 @@ const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { dispatchTrustedKey, evaluatePage } = require("./cdp-input.cjs");
+const { dispatchTrustedClick, dispatchTrustedKey, evaluatePage } = require("./cdp-input.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -119,6 +119,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
+    this.dispatchTrustedClick = dispatchTrustedClick;
     this.dispatchTrustedKey = dispatchTrustedKey;
     this.evaluatePage = evaluatePage;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -498,6 +499,16 @@ class BrowserHost {
     return tracked;
   }
 
+  async refreshAuthentication() {
+    return await this.withManualOperation("session refresh", async () => {
+      this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
+      if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
+        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      }
+      return await this.probeAuthentication();
+    });
+  }
+
   async probeAuthentication() {
     if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
     let url = this.view.webContents.getURL();
@@ -646,6 +657,19 @@ class BrowserHost {
     } catch (error) {
       throw new Error(
         `ChatGPT trusted browser key failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async clickTrustedBrowserPoint(point) {
+    try {
+      await this.dispatchTrustedClick({
+        debuggerClient: this.view.webContents.debugger,
+        point,
+      });
+    } catch (error) {
+      throw new Error(
+        `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -1027,39 +1051,111 @@ class BrowserHost {
     return await this.withManualOperation("connector verification", () => this.runConnectorVerification(appName));
   }
 
+  async readConnectorSuggestion(appName) {
+    return await this.evaluateBrowserPage(`(() => {
+      const expected = ${JSON.stringify(appName)};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const roleCandidates = ['option', 'menuitem', 'group'].flatMap((role) => (
+        Array.from(document.querySelectorAll('[role="' + role + '"]'))
+      ));
+      const matching = roleCandidates.filter(visible).map((element) => {
+        const text = normalize(element.innerText || element.textContent);
+        if (text === expected) return { target: element, score: text.length };
+        const exactChild = Array.from(element.querySelectorAll('span, strong, p, div')).find((child) => (
+          visible(child) && normalize(child.innerText || child.textContent) === expected
+        ));
+        return exactChild ? { target: exactChild, score: text.length } : null;
+      }).filter(Boolean).sort((left, right) => left.score - right.score);
+      const target = matching[0]?.target;
+      if (!target) return { found: false };
+      const rect = target.getBoundingClientRect();
+      return {
+        found: true,
+        point: {
+          x: rect.left + (rect.width / 2),
+          y: rect.top + (rect.height / 2),
+        },
+      };
+    })()`);
+  }
+
+  async waitForConnectorSuggestion(appName, timeoutMs = 25_000, pollMs = 100) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const suggestion = await this.readConnectorSuggestion(appName);
+      if (suggestion?.found
+        && Number.isFinite(suggestion.point?.x)
+        && Number.isFinite(suggestion.point?.y)) {
+        return suggestion;
+      }
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT connector ${JSON.stringify(appName)} was not found in the @c menu;`
+      + ` attach the tunnel and use that exact name`,
+    );
+  }
+
+  async connectorSelected(appName) {
+    return await this.evaluateBrowserPage(`(() => {
+      const expected = ${JSON.stringify(appName)};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      if (!composer) return false;
+      return Array.from(composer.querySelectorAll(
+        'a, [contenteditable="false"], [data-inline-selection-pill], [data-inline-selection-pill-cursor-target]'
+      )).some((element) => normalize(element.innerText || element.textContent) === expected);
+    })()`);
+  }
+
+  async waitForConnectorSelected(appName, timeoutMs = 10_000, pollMs = 100) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (await this.connectorSelected(appName)) return;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(`ChatGPT did not confirm connector ${JSON.stringify(appName)} in the composer`);
+  }
+
+  async selectConnector(appName) {
+    if (!await this.focusComposer()) {
+      throw new Error("ChatGPT composer was not available for connector selection");
+    }
+    await this.clearFocusedComposer();
+    this.view.webContents.focus();
+    this.view.webContents.insertText("@c");
+    await this.waitForComposerText("@c");
+    const suggestion = await this.waitForConnectorSuggestion(appName);
+    await this.clickTrustedBrowserPoint(suggestion.point);
+    await this.waitForConnectorSelected(appName);
+  }
+
   async runConnectorVerification(appName) {
-    if (typeof appName !== "string" || !appName.trim() || appName.length > 80) throw new Error("Connector name is invalid");
+    if (typeof appName !== "string" || !appName.trim() || appName.length > 80) {
+      throw new Error("Connector name is invalid");
+    }
+    const connectorName = appName.trim();
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
     if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
       await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
     }
     await this.waitForAuthenticated(60_000);
+    await this.selectConnector(connectorName);
     if (!await this.focusComposer()) {
-      throw new Error("ChatGPT composer was not available for the connector check");
+      throw new Error("ChatGPT composer lost focus after connector verification");
     }
     await this.clearFocusedComposer();
-    this.view.webContents.insertText(`@${appName.trim()}`);
-    const deadline = Date.now() + 25_000;
-    while (Date.now() < deadline) {
-      const found = await this.view.webContents.executeJavaScript(`(() => {
-        const expected = ${JSON.stringify(appName.trim())};
-        return Array.from(document.querySelectorAll('[role="option"], [role="menuitem"]')).some((element) => {
-          const rect = element.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0 && (element.innerText || element.textContent || '').includes(expected);
-        });
-      })()`, true).catch(() => false);
-      if (found) {
-        this.pressBrowserKey("Escape");
-        await this.focusComposer();
-        await this.clearFocusedComposer();
-        this.logger.info("connector.verified", { appName: appName.trim() });
-        this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
-        return { ok: true, appName: appName.trim() };
-      }
-      await sleep(250);
-    }
-    this.setState({ status: "error", message: "ChatGPT connector was not found", authenticated: true });
-    throw new Error(`ChatGPT connector ${JSON.stringify(appName.trim())} was not found; attach the tunnel and use that exact name`);
+    this.logger.info("connector.verified", { appName: connectorName });
+    this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
+    return { ok: true, appName: connectorName };
   }
 
   async inspectSession(detectPro = false) {

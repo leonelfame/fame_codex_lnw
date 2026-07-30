@@ -265,7 +265,6 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
   assert.match(source, /\[role="group"\]:has\(\[role="menuitemradio"\]\)/);
   assert.match(source, /\[role="menuitemradio"\]/);
   assert.match(cdpSource, /Input\.dispatchKeyEvent/);
-  assert.doesNotMatch(cdpSource, /Input\.dispatchMouseEvent/);
   assert.match(cdpSource, /debuggerClient/);
   assert.doesNotMatch(source, /:popover-open/);
   assert.doesNotMatch(source, /data-radix-collection-item/);
@@ -580,18 +579,14 @@ test("connector verification is effort-independent and works while the browser s
     selectHighEffort: async () => {
       throw new Error("connector verification must not select an effort");
     },
-    focusComposer: async () => {
-      calls.push(["focus"]);
-      return true;
-    },
+    selectConnector: async (name) => calls.push(["select", name]),
+    focusComposer: async () => true,
     clearFocusedComposer: async () => calls.push(["clear"]),
     pressBrowserKey: (key) => calls.push(["key", key]),
     view: {
       webContents: {
         getURL: () => "about:blank",
         loadURL: async (url) => calls.push(["load", url]),
-        insertText: (text) => calls.push(["insert", text]),
-        executeJavaScript: async () => true,
       },
     },
   };
@@ -601,12 +596,45 @@ test("connector verification is effort-independent and works while the browser s
   assert.deepEqual(result, { ok: true, appName: "Codex Native" });
   assert.equal(calls.some(([type]) => type === "show"), false);
   assert.deepEqual(
-    calls.filter(([type]) => ["load", "insert"].includes(type)),
+    calls.filter(([type]) => ["load", "select"].includes(type)),
     [
       ["load", "https://chatgpt.com/?temporary-chat=true"],
-      ["insert", "@Codex Native"],
+      ["select", "Codex Native"],
     ],
   );
+});
+
+test("connector selection types @c, chooses the exact menu result, and confirms the pill", async () => {
+  const calls = [];
+  const fixture = {
+    focusComposer: async () => true,
+    clearFocusedComposer: async () => calls.push(["clear"]),
+    waitForComposerText: async (text) => calls.push(["composer", text]),
+    waitForConnectorSuggestion: async (name) => {
+      calls.push(["suggestion", name]);
+      return { point: { x: 210, y: 130 } };
+    },
+    clickTrustedBrowserPoint: async (point) => calls.push(["click", point]),
+    waitForConnectorSelected: async (name) => calls.push(["selected", name]),
+    view: {
+      webContents: {
+        focus: () => calls.push(["focus"]),
+        insertText: (text) => calls.push(["insert", text]),
+      },
+    },
+  };
+
+  await BrowserHost.prototype.selectConnector.call(fixture, "Codex Native");
+
+  assert.deepEqual(calls, [
+    ["clear"],
+    ["focus"],
+    ["insert", "@c"],
+    ["composer", "@c"],
+    ["suggestion", "Codex Native"],
+    ["click", { x: 210, y: 130 }],
+    ["selected", "Codex Native"],
+  ]);
 });
 
 test("connector verification preserves an already hydrated Temporary Chat page", async () => {
@@ -615,6 +643,7 @@ test("connector verification preserves an already hydrated Temporary Chat page",
     logger: { info() {} },
     setState() {},
     waitForAuthenticated: async () => {},
+    selectConnector: async () => {},
     focusComposer: async () => true,
     clearFocusedComposer: async () => {},
     pressBrowserKey() {},
@@ -622,8 +651,6 @@ test("connector verification preserves an already hydrated Temporary Chat page",
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
         loadURL: async () => { loaded = true; },
-        insertText() {},
-        executeJavaScript: async () => true,
       },
     },
   };
@@ -631,6 +658,39 @@ test("connector verification preserves an already hydrated Temporary Chat page",
   await BrowserHost.prototype.runConnectorVerification.call(fixture, "Codex Native");
 
   assert.equal(loaded, false);
+});
+
+test("launcher session refresh resolves persisted authentication before setup actions", async () => {
+  const calls = [];
+  const fixture = {
+    state: { authenticated: false },
+    snapshot: () => ({ authenticated: true }),
+    setState: (patch) => calls.push(["state", patch]),
+    probeAuthentication: async () => {
+      calls.push(["probe"]);
+      return { authenticated: true };
+    },
+    withManualOperation: async (name, action) => {
+      calls.push(["operation", name]);
+      return await action();
+    },
+    view: {
+      webContents: {
+        getURL: () => "about:blank#codex-web-gpt-browser-host",
+        loadURL: async (url) => calls.push(["load", url]),
+      },
+    },
+  };
+
+  const state = await BrowserHost.prototype.refreshAuthentication.call(fixture);
+
+  assert.deepEqual(state, { authenticated: true });
+  assert.deepEqual(calls, [
+    ["operation", "session refresh"],
+    ["state", { status: "loading", message: "Checking saved ChatGPT session" }],
+    ["load", "https://chatgpt.com/?temporary-chat=true"],
+    ["probe"],
+  ]);
 });
 
 test("manual browser operations disable background throttling until completion", async () => {

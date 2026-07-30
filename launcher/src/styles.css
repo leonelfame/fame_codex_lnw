@@ -1130,8 +1130,10 @@ code {
 }
 
 .guide-media {
-  width: 100%;
-  height: clamp(190px, 34vh, 320px);
+  width: min(100%, 568px);
+  height: auto;
+  aspect-ratio: 16 / 9;
+  align-self: center;
   min-height: 0;
   flex: none;
   overflow: hidden;

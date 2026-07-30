@@ -545,7 +545,9 @@ export class ChatGptBrowserWorker {
       await this.assertPromptAttached(page, prompt);
       return;
     }
-    await composer.fill(`@${this.config.appName}`);
+    await composer.fill("");
+    await composer.focus();
+    await page.keyboard.insertText("@c");
     const appResult = page.getByRole("group").filter({ hasText: this.config.appName }).last();
     await appResult.waitFor({ state: "visible", timeout: 20_000 });
     await appResult.click();

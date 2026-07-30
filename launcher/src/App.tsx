@@ -687,6 +687,7 @@ function SetupSurface({
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy
     || operation?.status === "running"
+    || browser?.status === "loading"
     || browser?.status === "testing"
     || browser?.status === "running";
   const run = async (action: () => Promise<void>) => {
@@ -725,7 +726,9 @@ function SetupSurface({
       <SectionHeading label={copy.coreSetup} />
       <div className="setup-list">
         <SetupRow
-          action={browser?.authenticated ? copy.signedIn : copy.signIn}
+          action={browser?.authenticated
+            ? copy.signedIn
+            : browser?.status === "loading" ? copy.checkingSignIn : copy.signIn}
           complete={browser?.authenticated === true}
           description={copy.stepAccountBody}
           disabled={busy}

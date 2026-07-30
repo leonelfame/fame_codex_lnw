@@ -41,6 +41,61 @@ test("read-only multiline context is inserted atomically before exact verificati
   expect(asserted).toBe(prompt);
 });
 
+test("tool-capable prompts select the exact connector from the @c menu before inserting context", async () => {
+  const calls: Array<[string, string?]> = [];
+  const appResult = {
+    waitFor: async () => { calls.push(["waitForResult"]); },
+    click: async () => { calls.push(["clickResult"]); },
+  };
+  const selectedPlugin = {
+    waitFor: async () => { calls.push(["waitForPill"]); },
+  };
+  const composer = {
+    fill: async (value: string) => { calls.push(["fill", value]); },
+    focus: async () => { calls.push(["focus"]); },
+    getByRole: (role: string, options: { name: string; exact: boolean }) => {
+      expect(role).toBe("link");
+      expect(options).toEqual({ name: "Codex Native", exact: true });
+      return selectedPlugin;
+    },
+  };
+  const page = {
+    locator: () => ({ last: () => composer }),
+    getByRole: (role: string) => ({
+      filter: (options: { hasText: string }) => {
+        expect(role).toBe("group");
+        expect(options).toEqual({ hasText: "Codex Native" });
+        return { last: () => appResult };
+      },
+    }),
+    keyboard: {
+      insertText: async (value: string) => { calls.push(["insertText", value]); },
+      press: async (value: string) => { calls.push(["press", value]); },
+    },
+  };
+  const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
+  }).attachPrompt;
+
+  await attachPrompt.call({
+    config: { appName: "Codex Native" },
+    assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
+  }, page, "context", true);
+
+  expect(calls).toEqual([
+    ["fill", ""],
+    ["focus"],
+    ["insertText", "@c"],
+    ["waitForResult"],
+    ["clickResult"],
+    ["waitForPill"],
+    ["focus"],
+    ["press", "End"],
+    ["insertText", " context"],
+    ["assertPrompt"],
+  ]);
+});
+
 test("effort selection uses structural menu indices instead of localized labels", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");

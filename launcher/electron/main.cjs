@@ -627,8 +627,16 @@ async function start() {
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
+  const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
+  if (!launcherSmokeTest) {
+    void browserHost.refreshAuthentication().catch((error) => {
+      logger.warn("browser.session_refresh_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
   await loadRenderer(mainWindow);
-  if (process.argv.includes("--launcher-smoke-test")) {
+  if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {
       throw new Error("Packaged launcher smoke test could not install its durable runtime");

@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  dispatchTrustedClick,
   dispatchTrustedKey,
   evaluatePage,
 } = require("../electron/cdp-input.cjs");
@@ -84,6 +85,29 @@ test("trusted Enter is dispatched through the owned Electron WebContents target"
   assert.equal(detached(), true);
 });
 
+test("trusted connector selection clicks inside the owned Electron WebContents target", async () => {
+  const { client, commands, detached } = createDebugger();
+  await dispatchTrustedClick({
+    debuggerClient: client,
+    point: { x: 220.5, y: 140.25 },
+  });
+  assert.deepEqual(commands, [
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseMoved", x: 220.5, y: 140.25 },
+    },
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mousePressed", x: 220.5, y: 140.25, button: "left", clickCount: 1 },
+    },
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseReleased", x: 220.5, y: 140.25, button: "left", clickCount: 1 },
+    },
+  ]);
+  assert.equal(detached(), true);
+});
+
 test("pre-attached WebContents debugger ownership is preserved", async () => {
   const { client, detached } = createDebugger([{
     result: { type: "number", value: 5 },
@@ -102,6 +126,13 @@ test("WebContents CDP commands fail closed without an owned debugger", async () 
     dispatchTrustedKey({
       debuggerClient: null,
       key: "Enter",
+    }),
+    /WebContents debugger is unavailable/,
+  );
+  await assert.rejects(
+    dispatchTrustedClick({
+      debuggerClient: null,
+      point: { x: 10, y: 10 },
     }),
     /WebContents debugger is unavailable/,
   );
