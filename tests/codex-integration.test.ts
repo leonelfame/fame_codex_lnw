@@ -200,4 +200,26 @@ describe("reversible native Codex route integration", () => {
     expect(() => uninstallCodexIntegration()).toThrow("changed after setup");
     expect(readFileSync(configPath, "utf8")).toBe(changed);
   });
+
+  test("keeps every user line byte-for-byte when line endings are mixed", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\r\napproval_policy = "never"\n\r\n[features]\ngoals = true\r\n';
+    writeFileSync(configPath, original);
+
+    installCodexIntegration(defaultConfig("browser-only"));
+    const installed = readFileSync(configPath, "utf8");
+    for (const line of [
+      'model = "gpt-5.6-sol"\r\n',
+      'approval_policy = "never"\n',
+      "[features]\n",
+      "goals = true\r\n",
+    ]) {
+      expect(installed).toContain(line);
+    }
+    expect(installed).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
 });

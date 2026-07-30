@@ -240,18 +240,68 @@ function splitLines(text: string): string[] {
   return text.length > 0 ? text.replace(/\r?\n$/, "").split(/\r?\n/) : [];
 }
 
-function renderLines(
-  lines: string[],
-  format: NonNullable<CodexIntegrationJournal["format"]>,
-): string {
-  if (lines.length === 0) return "";
-  const body = lines.join(format.lineEnding);
-  return format.trailingNewline ? `${body}${format.lineEnding}` : body;
+/**
+ * The Codex config belongs to the user. Every edit keeps each untouched line byte-for-byte,
+ * including its own terminator, so a file with mixed line endings is never normalized.
+ */
+interface CodexConfigDocument {
+  lines: string[];
+  endings: string[];
 }
 
-function removeManagedComment(lines: string[]): void {
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (lines[index] === MANAGED_COMMENT) lines.splice(index, 1);
+function parseDocument(text: string): CodexConfigDocument {
+  const lines: string[] = [];
+  const endings: string[] = [];
+  const lineBreak = /\r\n|\n|\r/g;
+  let start = 0;
+  let match: RegExpExecArray | null;
+  while ((match = lineBreak.exec(text)) !== null) {
+    lines.push(text.slice(start, match.index));
+    endings.push(match[0]);
+    start = match.index + match[0].length;
+  }
+  if (start < text.length) {
+    lines.push(text.slice(start));
+    endings.push("");
+  }
+  return { lines, endings };
+}
+
+function renderDocument(document: CodexConfigDocument): string {
+  return document.lines.map((line, index) => `${line}${document.endings[index] ?? ""}`).join("");
+}
+
+function dominantLineEnding(document: CodexConfigDocument): string {
+  return document.endings.find(ending => ending.length > 0) ?? "\n";
+}
+
+function insertDocumentLine(document: CodexConfigDocument, index: number, line: string): void {
+  const position = Math.max(0, Math.min(index, document.lines.length));
+  const ending = dominantLineEnding(document);
+  if (position === document.lines.length) {
+    const lastIndex = document.lines.length - 1;
+    const trailing = lastIndex >= 0 ? document.endings[lastIndex]! : ending;
+    if (lastIndex >= 0) document.endings[lastIndex] = ending;
+    document.lines.push(line);
+    document.endings.push(trailing);
+    return;
+  }
+  document.lines.splice(position, 0, line);
+  document.endings.splice(position, 0, document.endings[position] ?? ending);
+}
+
+function removeDocumentLine(document: CodexConfigDocument, index: number): void {
+  if (index < 0 || index >= document.lines.length) return;
+  const wasLast = index === document.lines.length - 1;
+  const trailing = document.endings[index] ?? "";
+  document.lines.splice(index, 1);
+  document.endings.splice(index, 1);
+  if (wasLast && document.endings.length > 0) document.endings[document.endings.length - 1] = trailing;
+}
+
+function removeManagedComment(document: CodexConfigDocument): void {
+  for (let index = document.lines.length - 1; index >= 0; index -= 1) {
+    if (document.lines[index] === MANAGED_COMMENT) removeDocumentLine(document, index);
   }
 }
 
@@ -260,9 +310,8 @@ function installRoute(
   installedUrl: string,
   replaceExistingRoute: boolean,
 ): { text: string; previous: CodexIntegrationJournal["previous"] } {
-  const format = textFormat(text);
-  const lines = splitLines(text);
-  const previous = assignments(lines);
+  const document = parseDocument(text);
+  const previous = assignments(document.lines);
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([, assignment]) => assignment.present)
     .map(([key, assignment]) => `${key}=${JSON.stringify(assignment.value)}`);
@@ -274,19 +323,19 @@ function installRoute(
   }
 
   for (const key of ["model_provider", "model_catalog_json"] as const) {
-    const location = findTopLevelAssignment(lines, key);
-    if (location.index !== undefined) lines.splice(location.index, 1);
+    const location = findTopLevelAssignment(document.lines, key);
+    if (location.index !== undefined) removeDocumentLine(document, location.index);
   }
-  const currentBaseUrl = findTopLevelAssignment(lines, "openai_base_url");
+  const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   if (currentBaseUrl.index !== undefined) {
-    lines[currentBaseUrl.index] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
+    document.lines[currentBaseUrl.index] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
   } else {
-    lines.splice(firstTableIndex(lines), 0, `openai_base_url = ${JSON.stringify(installedUrl)}`);
+    insertDocumentLine(document, firstTableIndex(document.lines), `openai_base_url = ${JSON.stringify(installedUrl)}`);
   }
-  removeManagedComment(lines);
-  const installedBaseUrl = findTopLevelAssignment(lines, "openai_base_url");
-  lines.splice(installedBaseUrl.index!, 0, MANAGED_COMMENT);
-  return { text: renderLines(lines, format), previous };
+  removeManagedComment(document);
+  const installedBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
+  insertDocumentLine(document, installedBaseUrl.index!, MANAGED_COMMENT);
+  return { text: renderDocument(document), previous };
 }
 
 function verifyInstalledV3(text: string, journal: CodexIntegrationJournal): void {
@@ -305,16 +354,16 @@ function verifyInstalledV3(text: string, journal: CodexIntegrationJournal): void
 
 function restoreV3(text: string, journal: CodexIntegrationJournal): string {
   verifyInstalledV3(text, journal);
-  const lines = splitLines(text);
-  removeManagedComment(lines);
-  const currentBaseUrl = findTopLevelAssignment(lines, "openai_base_url");
+  const document = parseDocument(text);
+  removeManagedComment(document);
+  const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   if (currentBaseUrl.index === undefined) throw new Error("Managed Codex openai_base_url is missing");
   const previousBaseUrl = journal.previous.openai_base_url;
   if (previousBaseUrl.present) {
     if (!previousBaseUrl.rawLine) throw new Error("Codex integration journal is missing the prior openai_base_url line");
-    lines[currentBaseUrl.index] = previousBaseUrl.rawLine;
+    document.lines[currentBaseUrl.index] = previousBaseUrl.rawLine;
   } else {
-    lines.splice(currentBaseUrl.index, 1);
+    removeDocumentLine(document, currentBaseUrl.index);
   }
   const removedAssignments = (["model_provider", "model_catalog_json"] as const)
     .map(key => ({ key, previous: journal.previous[key] }))
@@ -322,10 +371,10 @@ function restoreV3(text: string, journal: CodexIntegrationJournal): string {
     .sort((left, right) => (left.previous.index ?? Number.MAX_SAFE_INTEGER) - (right.previous.index ?? Number.MAX_SAFE_INTEGER));
   for (const item of removedAssignments) {
     if (!item.previous.rawLine) throw new Error(`Codex integration journal is missing the prior ${item.key} line`);
-    const index = Math.min(item.previous.index ?? firstTableIndex(lines), firstTableIndex(lines));
-    lines.splice(index, 0, item.previous.rawLine);
+    const index = Math.min(item.previous.index ?? firstTableIndex(document.lines), firstTableIndex(document.lines));
+    insertDocumentLine(document, index, item.previous.rawLine);
   }
-  return renderLines(lines, journal.format ?? textFormat(text));
+  return renderDocument(document);
 }
 
 function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): string {
@@ -333,29 +382,26 @@ function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): 
     throw new Error("Managed legacy Codex provider block changed after setup; refusing migration");
   }
   const withoutProvider = text.replace(journal.providerBlock, "").replace(/\n{3,}/g, "\n\n");
-  const lines = splitLines(withoutProvider);
+  const document = parseDocument(withoutProvider);
   for (const key of ["model_provider", "model_catalog_json"] as const) {
-    const current = findTopLevelAssignment(lines, key);
+    const current = findTopLevelAssignment(document.lines, key);
     if (current.value !== journal.installed[key] || current.index === undefined) {
       throw new Error(`Managed legacy Codex ${key} changed after setup; refusing migration`);
     }
     const previous = journal.previous[key];
     if (previous.present) {
       if (!previous.rawLine) throw new Error(`Legacy Codex integration journal is missing the prior ${key} line`);
-      lines[current.index] = previous.rawLine;
+      document.lines[current.index] = previous.rawLine;
     } else {
-      lines.splice(current.index, 1);
+      removeDocumentLine(document, current.index);
     }
   }
-  removeManagedComment(lines);
-  const restoredCatalog = findTopLevelAssignment(lines, "model_catalog_json");
+  removeManagedComment(document);
+  const restoredCatalog = findTopLevelAssignment(document.lines, "model_catalog_json");
   if (restoredCatalog.index !== undefined && restoredCatalog.value && !existsSync(resolve(restoredCatalog.value))) {
-    lines.splice(restoredCatalog.index, 1);
+    removeDocumentLine(document, restoredCatalog.index);
   }
-  return renderLines(lines, textFormat(withoutProvider)).replace(/(?:\r?\n){3,}/g, match => {
-    const lineEnding = match.includes("\r\n") ? "\r\n" : "\n";
-    return `${lineEnding}${lineEnding}`;
-  });
+  return renderDocument(document);
 }
 
 function readJournal(): CodexIntegrationJournal | LegacyCodexIntegrationJournal | undefined {
@@ -422,15 +468,15 @@ export function installCodexIntegration(
 
   if (existing?.version === 3) {
     verifyInstalledV3(currentText, existing);
-    const lines = splitLines(currentText);
-    const current = findTopLevelAssignment(lines, "openai_base_url");
-    lines[current.index!] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
+    const document = parseDocument(currentText);
+    const current = findTopLevelAssignment(document.lines, "openai_base_url");
+    document.lines[current.index!] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
     const updated: CodexIntegrationJournal = {
       ...existing,
       installed: { openai_base_url: installedUrl },
     };
     writeFilesWithCompensation([
-      { path: configPath, data: renderLines(lines, textFormat(currentText)) },
+      { path: configPath, data: renderDocument(document) },
       { path: getCodexJournalPath(), data: `${JSON.stringify(updated, null, 2)}\n` },
     ], [getCodexModelsCachePath()]);
     return updated;
