@@ -463,7 +463,7 @@ export class ChatGptBrowserWorker {
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const menuVisible = await effortMenu.isVisible().catch(() => false);
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
-    if (!menuVisible && menuExpanded !== "true") await currentEffort.click();
+    if (!menuVisible && menuExpanded !== "true") await currentEffort.press("Enter");
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
     try {
@@ -482,14 +482,14 @@ export class ChatGptBrowserWorker {
       await page.keyboard.press("Escape");
       return mode;
     }
-    await effortChoice.click();
+    await effortChoice.press("Enter");
 
     const deadline = Date.now() + 40_000;
     let confirmed: string | null = null;
     while (Date.now() < deadline) {
       if (!await effortMenu.isVisible().catch(() => false)) {
         const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
-        if (expanded !== "true") await currentEffort.click();
+        if (expanded !== "true") await currentEffort.press("Enter");
         await effortChoice.waitFor({
           state: "visible",
           timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),
@@ -695,7 +695,7 @@ export class ChatGptBrowserWorker {
     }
     const allowOnce = page.getByRole("button", { name: "Allow once", exact: true }).last();
     await allowOnce.waitFor({ state: "visible", timeout: 10_000 });
-    await allowOnce.click();
+    await allowOnce.press("Enter");
     return true;
   }
 
@@ -880,7 +880,7 @@ export class ChatGptBrowserWorker {
       const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
       const initialUserTurnCount = await userTurns.count();
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async () => {
-        await page.getByTestId("send-button").click();
+        await page.getByTestId("send-button").press("Enter");
         await userTurns.nth(initialUserTurnCount).waitFor({
           state: "visible",
           timeout: browserStageTimeouts.send,
@@ -899,7 +899,7 @@ export class ChatGptBrowserWorker {
       for (;;) {
         if (turn.abortSignal?.aborted) {
           const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-          if (await stop.isVisible().catch(() => false)) await stop.click().catch(() => {});
+          if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
           throw new DOMException("ChatGPT web turn aborted", "AbortError");
         }
         if (Date.now() >= deadline) throw new Error("ChatGPT web turn timed out");
