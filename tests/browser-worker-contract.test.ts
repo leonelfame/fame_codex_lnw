@@ -18,7 +18,7 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).toContain('getByTestId("composer-footer-actions")');
+  expect(workerSource).toContain('[data-inline-selection-pill][data-symbol="ecosystemMention"]');
 });
 
 test("read-only multiline context is inserted atomically before exact verification", async () => {
@@ -69,18 +69,15 @@ test("the shared Playwright selector types the mention and accepts one exact con
       calls.push(["waitForSelectedConnector"]);
     },
     count: async () => 1,
-  };
-  const footerActions = {
-    getByRole: (role: string, options: { name: string }) => {
-      expect(role).toBe("button");
-      expect(options).toEqual({ name: "Codex Native" });
-      return selectedConnector;
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-keyword");
+      return "Codex Native";
     },
   };
-  const composerForm = {
-    getByTestId: (testId: string) => {
-      expect(testId).toBe("composer-footer-actions");
-      return footerActions;
+  const connectorMarkers = {
+    filter: (options: { hasText: string }) => {
+      expect(options).toEqual({ hasText: "Codex Native" });
+      return selectedConnector;
     },
   };
   const composer = {
@@ -91,8 +88,8 @@ test("the shared Playwright selector types the mention and accepts one exact con
       calls.push(["pressSequentially", value]);
     },
     locator: (selector: string) => {
-      expect(selector).toBe("xpath=ancestor::form[1]");
-      return composerForm;
+      expect(selector).toBe('[data-inline-selection-pill][data-symbol="ecosystemMention"]');
+      return connectorMarkers;
     },
   };
   const page = {
@@ -147,6 +144,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       calls.push("selected");
     },
     count: async () => 1,
+    getAttribute: async () => "Codex Native",
   };
   const appResult = {
     waitFor: async () => {
@@ -168,9 +166,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       calls.push("type");
     },
     locator: () => ({
-      getByTestId: () => ({
-        getByRole: () => selectedConnector,
-      }),
+      filter: () => selectedConnector,
     }),
   };
   const page = {
@@ -194,11 +190,36 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
 
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
   const calls: Array<[string, string?]> = [];
+  let selected = false;
+  const selectedConnector = {
+    waitFor: async () => {
+      expect(selected).toBeTrue();
+      calls.push(["selectedConnector"]);
+    },
+    count: async () => 1,
+    getAttribute: async () => "Codex Native",
+  };
+  const appResult = {
+    waitFor: async () => { calls.push(["connectorMenu"]); },
+    count: async () => 1,
+    dispatchEvent: async () => {
+      selected = true;
+      calls.push(["selectConnector"]);
+    },
+  };
   const composer = {
+    fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
+    pressSequentially: async (value: string) => { calls.push(["type", value]); },
+    locator: () => ({
+      filter: () => selectedConnector,
+    }),
   };
   const page = {
-    locator: () => ({ last: () => composer }),
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => selector.includes("__menu-item")
+      ? { filter: () => appResult }
+      : { last: () => composer },
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
       press: async (value: string) => { calls.push(["press", value]); },
@@ -207,17 +228,23 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
     attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
   }).attachPrompt;
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
 
   await attachPrompt.call({
-    selectConnector: async () => {
-      calls.push(["selectConnector"]);
-      return composer;
-    },
+    config: { appName: "Codex Native" },
+    selectConnector,
     assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
   }, page, "context", true);
 
   expect(calls).toEqual([
+    ["fill", ""],
+    ["focus"],
+    ["type", "@c"],
+    ["connectorMenu"],
     ["selectConnector"],
+    ["selectedConnector"],
     ["focus"],
     ["press", "End"],
     ["insertText", " context"],

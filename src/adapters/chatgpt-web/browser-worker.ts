@@ -575,12 +575,13 @@ export class ChatGptBrowserWorker {
     // the resolved row itself; this also avoids viewport-coordinate differences in embedded
     // Chromium across macOS, Windows, and Linux.
     await appResult.dispatchEvent("click");
-    const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const selectedConnector = composerForm.getByTestId("composer-footer-actions")
-      .getByRole("button", { name: this.config.appName });
+    const selectedConnector = composer
+      .locator('[data-inline-selection-pill][data-symbol="ecosystemMention"]')
+      .filter({ hasText: this.config.appName });
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
-    if (await selectedConnector.count() !== 1) {
-      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector badge`);
+    if (await selectedConnector.count() !== 1
+      || await selectedConnector.getAttribute("data-keyword") !== this.config.appName) {
+      throw new Error(`ChatGPT composer did not expose one selected ${JSON.stringify(this.config.appName)} connector marker`);
     }
     return composer;
   }
