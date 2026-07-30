@@ -18,7 +18,8 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).toContain('selectedComposer.getByRole("link"');
+  expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer)");
+  expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
 });
 
@@ -94,10 +95,14 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     count: async () => 1,
   };
   const selectedComposer = {
-    getByRole: (role: string, options: { name: string; exact: boolean }) => {
-      expect(role).toBe("link");
-      expect(options).toEqual({ name: "Codex Native", exact: true });
-      return selectedConnector;
+    locator: (selector: string) => {
+      expect(selector).toBe('[data-id^="plugin:"][data-keyword]');
+      return {
+        filter: (options: { hasText: string; visible: boolean }) => {
+          expect(options).toEqual({ hasText: "Codex Native", visible: true });
+          return selectedConnector;
+        },
+      };
     },
   };
   const initialComposer = {
@@ -133,15 +138,18 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   let activeComposerCalls = 0;
   const resolved = await selectConnector.call({
     config: { appName: "Codex Native" },
+    connectorIsSelected: async () => connectorSelected,
+    selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
       activeComposerCalls += 1;
-      return activeComposerCalls === 1 ? initialComposer : selectedComposer;
+      return connectorSelected ? selectedComposer : initialComposer;
     },
   }, page);
 
   expect(resolved).toBe(selectedComposer);
-  expect(activeComposerCalls).toBe(2);
+  expect(activeComposerCalls).toBe(3);
   expect(calls).toEqual([
+    ["fill", ""],
     ["fill", ""],
     ["focus"],
     ["pressSequentially", "@c"],
@@ -177,7 +185,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     },
   };
   const selectedComposer = {
-    getByRole: () => selectedConnector,
+    locator: () => ({ filter: () => selectedConnector }),
   };
   const initialComposer = {
     fill: async () => { calls.push("clear"); },
@@ -200,13 +208,16 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   let activeComposerCalls = 0;
   await selectConnector.call({
     config: { appName: "Codex Native" },
+    connectorIsSelected: async () => selected,
+    selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
       activeComposerCalls += 1;
-      return activeComposerCalls === 1 ? initialComposer : selectedComposer;
+      return selected ? selectedComposer : initialComposer;
     },
   }, page);
 
   expect(calls).toEqual([
+    "clear",
     "clear", "focus", "type", "menu:1",
     "clear", "focus", "type", "menu:2",
     "activate", "selected",
@@ -233,7 +244,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   };
   const selectedComposer = {
     focus: async () => { calls.push(["selectedFocus"]); },
-    getByRole: () => selectedConnector,
+    locator: () => ({ filter: () => selectedConnector }),
   };
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
@@ -261,14 +272,17 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   await attachPrompt.call({
     config: { appName: "Codex Native" },
     selectConnector,
+    connectorIsSelected: async () => selected,
+    selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
       activeComposerCalls += 1;
-      return activeComposerCalls === 1 ? initialComposer : selectedComposer;
+      return selected ? selectedComposer : initialComposer;
     },
     assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
   }, page, "context", true);
 
   expect(calls).toEqual([
+    ["fill", ""],
     ["fill", ""],
     ["focus"],
     ["type", "@c"],
