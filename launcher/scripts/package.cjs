@@ -27,15 +27,21 @@ if (target !== nativeTarget) {
 
 const env = { ...process.env };
 if (!env.CSC_LINK && !env.CSC_NAME) env.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+const builderArgs = [
+  electronBuilderCli,
+  target,
+  "--publish",
+  "never",
+];
+if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
+  builderArgs.push("--config.mac.identity=-");
+}
 
 const staging = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-"));
 const artifactsDirectory = path.join(root, "artifacts");
 try {
   const result = spawnSync(executable, [
-    electronBuilderCli,
-    target,
-    "--publish",
-    "never",
+    ...builderArgs,
     `--config.directories.output=${staging}`,
   ], {
     cwd: root,

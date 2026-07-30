@@ -600,6 +600,9 @@ class BrowserHost {
     this.view.webContents.insertText(SMOKE_TEXT);
     await this.waitForComposerText(SMOKE_TEXT);
     await this.waitForSmokeSendButton();
+    if (!await this.focusSmokeSendButton()) {
+      throw new Error("ChatGPT send button could not receive focus for the smoke test");
+    }
     await this.pressTrustedBrowserKey("Enter");
     const submitted = await this.waitForSmokeSubmissionAccepted(beforeUserCount);
     this.logger.info("smoke.submitted", submitted);
@@ -757,6 +760,16 @@ class BrowserHost {
     );
   }
 
+  async focusSmokeSendButton() {
+    return await this.evaluateBrowserPage(`(() => {
+      /* smoke-send-button-focus */
+      const button = ${visibleElementScript('[data-testid="send-button"]')};
+      if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+      button.focus({ preventScroll: true });
+      return document.activeElement === button;
+    })()`);
+  }
+
   async readSmokeSubmissionState(beforeUserCount) {
     return await this.evaluateBrowserPage(`(() => {
       /* smoke-submission-read */
@@ -787,7 +800,7 @@ class BrowserHost {
       await sleep(pollMs);
     } while (Date.now() < deadline);
     throw new Error(
-      `ChatGPT did not accept the smoke-test message after trusted Enter`
+      `ChatGPT did not accept the smoke-test message after activating the send button`
       + ` (userTurnsBefore=${beforeUserCount}; userTurnsNow=${state?.userTurnCount ?? "unknown"};`
       + ` stopVisible=${state?.stopVisible === true})`,
     );

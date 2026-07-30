@@ -39,6 +39,14 @@ jobs:
       - name: Verify embedded macOS runtime signature
         if: runner.os == 'macOS'
         run: codesign --verify --deep --strict launcher/build/runtime/runtime/bun
+      - name: Verify packaged macOS application signature
+        if: runner.os == 'macOS'
+        run: |
+          archive="$(find launcher/artifacts -maxdepth 1 -name '*-mac-*.zip' -print -quit)"
+          test -n "$archive"
+          stage="$(mktemp -d)"
+          ditto -x -k "$archive" "$stage"
+          codesign --verify --deep --strict --verbose=2 "$stage/Codex Web GPT.app"
       - name: Archive runtime
         if: runner.os != 'Windows'
         run: tar -czf "${{ matrix.runtime_asset }}" -C launcher/build/runtime .

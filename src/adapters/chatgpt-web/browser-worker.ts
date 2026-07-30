@@ -884,7 +884,15 @@ export class ChatGptBrowserWorker {
       const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
       const initialUserTurnCount = await userTurns.count();
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async () => {
-        await page.getByTestId("send-button").dispatchEvent("click");
+        const composer = await this.activeComposer(page);
+        const sendButton = composer
+          .locator("xpath=ancestor::form[1]")
+          .getByTestId("send-button");
+        await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
+        if (!await sendButton.isEnabled()) {
+          throw new Error("ChatGPT send button is disabled after the complete prompt was attached");
+        }
+        await sendButton.press("Enter");
         await userTurns.nth(initialUserTurnCount).waitFor({
           state: "visible",
           timeout: browserStageTimeouts.send,
