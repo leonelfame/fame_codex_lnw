@@ -571,12 +571,30 @@ export class ChatGptBrowserWorker {
     return exactMatches === 1;
   }
 
+  private async connectorMentionRowTitles(menuRows: Locator): Promise<string[]> {
+    const texts = await menuRows.filter({ visible: true }).allInnerTexts().catch(() => [] as string[]);
+    return texts
+      .map(text => (text.split("\n")[0] ?? "").replace(/\s+/g, " ").trim())
+      .filter(title => title.length > 0);
+  }
+
+  private async connectorMentionFailure(menuRows: Locator, triggerAttempts: number): Promise<string> {
+    const titles = await this.connectorMentionRowTitles(menuRows);
+    if (titles.length === 0) {
+      return `ChatGPT connector menu did not open after ${triggerAttempts} complete mention trigger attempt(s)`;
+    }
+    return `ChatGPT connector menu opened but exposed no row named ${JSON.stringify(this.config.appName)}`
+      + ` after ${triggerAttempts} complete mention trigger attempt(s)`
+      + `; visible rows: ${titles.map(title => JSON.stringify(title)).join(", ")}`;
+  }
+
   private async selectConnector(page: Page): Promise<Locator> {
     let composer = await this.activeComposer(page);
     await composer.fill("");
     if (await this.connectorIsSelected(composer)) return composer;
 
-    const appResult = page.locator('.__menu-item[tabindex="0"]').filter({
+    const menuRows = page.locator('.__menu-item[tabindex="0"]');
+    const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
     const menuDeadline = Date.now() + 20_000;
@@ -596,14 +614,15 @@ export class ChatGptBrowserWorker {
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
         if (Date.now() >= menuDeadline) {
-          throw new Error(
-            `ChatGPT connector menu did not open after ${triggerAttempts} complete mention trigger attempt(s)`,
-          );
+          throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
         }
       }
     }
     if (await appResult.count() !== 1) {
-      throw new Error(`ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`);
+      throw new Error(
+        `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
+        + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
+      );
     }
     // The composer keeps its own keyboard highlight, which is not guaranteed to follow the
     // exact connector row resolved above. Pressing Enter on the composer can therefore activate
