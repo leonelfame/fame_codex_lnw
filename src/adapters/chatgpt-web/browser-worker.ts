@@ -527,7 +527,9 @@ export class ChatGptBrowserWorker {
     const composer = await this.activeComposer(page);
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
-      clone.querySelectorAll("[data-inline-selection-pill], [data-inline-selection-pill-cursor-target]")
+      clone.querySelectorAll(
+        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
+      )
         .forEach(part => part.remove());
       return [...clone.childNodes]
         .map(child => child.textContent ?? "")
@@ -553,7 +555,7 @@ export class ChatGptBrowserWorker {
 
   private selectedConnectorControl(composer: Locator): Locator {
     return composer
-      .locator('[data-inline-selection-pill][data-symbol="ecosystemMention"]')
+      .locator('[data-id^="plugin:"][data-keyword]')
       .filter({ hasText: this.config.appName, visible: true });
   }
 
