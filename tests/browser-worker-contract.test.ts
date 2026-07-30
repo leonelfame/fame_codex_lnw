@@ -18,7 +18,7 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).not.toContain('getByTestId("composer-footer-actions")');
+  expect(workerSource).toContain('getByTestId("composer-footer-actions")');
 });
 
 test("read-only multiline context is inserted atomically before exact verification", async () => {
@@ -70,6 +70,19 @@ test("the shared Playwright selector types the mention and accepts one exact con
     },
     count: async () => 1,
   };
+  const footerActions = {
+    getByRole: (role: string, options: { name: string }) => {
+      expect(role).toBe("button");
+      expect(options).toEqual({ name: "Codex Native" });
+      return selectedConnector;
+    },
+  };
+  const composerForm = {
+    getByTestId: (testId: string) => {
+      expect(testId).toBe("composer-footer-actions");
+      return footerActions;
+    },
+  };
   const composer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
@@ -77,10 +90,9 @@ test("the shared Playwright selector types the mention and accepts one exact con
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
     },
-    getByRole: (role: string, options: { name: string; exact: boolean }) => {
-      expect(role).toBe("link");
-      expect(options).toEqual({ name: "Codex Native", exact: true });
-      return selectedConnector;
+    locator: (selector: string) => {
+      expect(selector).toBe("xpath=ancestor::form[1]");
+      return composerForm;
     },
   };
   const page = {
