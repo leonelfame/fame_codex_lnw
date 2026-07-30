@@ -6,6 +6,12 @@ const path = require("node:path");
 const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
+const repositoryManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
+
+test("the public launcher command uses the Electron bootstrap", () => {
+  assert.equal(repositoryManifest.scripts.launcher, "bun run scripts/start-launcher.ts");
+  assert.equal(repositoryManifest.scripts.launcher, repositoryManifest.scripts.app);
+});
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
   assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
