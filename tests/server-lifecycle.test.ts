@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { closeTurnBrokers } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
 
@@ -126,6 +130,27 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
   } finally {
     chatGptTurnSessions.clear();
     await server.stop(true);
+  }
+});
+
+test("a full-mode runtime exposes its broker endpoint before any turn registers", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-serve-"));
+  const config = {
+    ...defaultConfig("full"),
+    port: 0,
+    brokerSocketPath: join(root, "runtime", "turn-broker.sock"),
+  };
+  const server = startServer(config);
+  try {
+    const deadline = Date.now() + 2_000;
+    while (!existsSync(config.brokerSocketPath) && Date.now() < deadline) await Bun.sleep(5);
+    // An in-flight ChatGPT turn calls the bridge from a separate process; it must reach the broker
+    // itself rather than a missing path.
+    expect(existsSync(config.brokerSocketPath)).toBe(true);
+  } finally {
+    await server.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -123,6 +123,16 @@ export class TurnBroker {
 
   private constructor(readonly socketPath: string) {}
 
+  /**
+   * A ChatGPT turn outlives the request that started it, and its Codex Native calls arrive from a
+   * separate MCP process. Creating the socket only once a turn registers leaves that process
+   * connecting to a path that does not exist yet, so an in-flight turn reports a filesystem error
+   * instead of the broker's own answer. The endpoint belongs to the runtime's lifetime.
+   */
+  async listen(): Promise<void> {
+    await this.start();
+  }
+
   async register(environment: ChatGptTurnEnvironment, ttlMs: number, traceId = "unknown"): Promise<string> {
     await this.start();
     this.prune();
