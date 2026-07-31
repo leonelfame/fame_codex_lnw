@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -498,12 +498,21 @@ test("browser completion requires ChatGPT's response-scoped copy action", () => 
   expect(workerSource).not.toContain('root.querySelectorAll<HTMLElement>("button")');
 });
 
-test("browser send is accepted only after ChatGPT creates a new user turn", () => {
+test("browser send accepts only conclusive ChatGPT submission evidence", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
-  expect(sessionSource).toContain("CHATGPT_USER_TURN_SELECTOR");
-  expect(workerSource).toContain("initialUserTurnCount");
-  expect(workerSource).toContain("userTurns.nth(initialUserTurnCount).waitFor");
+  const idle = {
+    initialUserTurnCount: 1,
+    userTurnCount: 1,
+    initialAssistantTurnCount: 2,
+    assistantTurnCount: 2,
+    generationRunning: false,
+  };
+  expect(chatGptSubmissionEvidence(idle)).toBeUndefined();
+  expect(chatGptSubmissionEvidence({ ...idle, userTurnCount: 2 })).toBe("user_turn");
+  expect(chatGptSubmissionEvidence({ ...idle, assistantTurnCount: 3 })).toBe("assistant_turn");
+  expect(chatGptSubmissionEvidence({ ...idle, generationRunning: true })).toBe("generation_running");
+  expect(workerSource).toContain("waitForSubmissionAccepted");
+  expect(workerSource).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
 });
 
 test("visible reasoning keeps the browser turn healthy before final assistant markdown exists", () => {

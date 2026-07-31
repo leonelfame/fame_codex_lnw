@@ -30,7 +30,7 @@ export class HttpTurnCounter {
     return this.active;
   }
 
-  async track(run: () => Promise<Response>): Promise<Response> {
+  async track(run: () => Promise<Response>, signal?: AbortSignal): Promise<Response> {
     this.active += 1;
     let released = false;
     const release = () => {
@@ -45,31 +45,31 @@ export class HttpTurnCounter {
         release();
         return response;
       }
-      const reader = response.body.getReader();
-      const body = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          try {
-            const chunk = await reader.read();
-            if (chunk.done) {
-              release();
-              controller.close();
-              return;
-            }
-            controller.enqueue(chunk.value);
-          } catch (error) {
-            release();
-            controller.error(error);
+
+      // OpenCodex's Windows-safe Bun#32111 shape: the client gets a native tee branch,
+      // never a JS ReadableStream with async pull(). The second branch is consumed only
+      // to observe completion. req.signal cancels it when the client disconnects, which
+      // lets cancellation reach the original source after both tee branches are gone.
+      const [clientBody, lifecycleBody] = response.body.tee();
+      const reader = lifecycleBody.getReader();
+      const cancelLifecycle = () => {
+        void reader.cancel(signal?.reason).catch(() => {}).finally(release);
+      };
+      if (signal?.aborted) cancelLifecycle();
+      else signal?.addEventListener("abort", cancelLifecycle, { once: true });
+      void (async () => {
+        try {
+          while (!(await reader.read()).done) {
+            // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
-        },
-        async cancel(reason) {
-          try {
-            await reader.cancel(reason);
-          } finally {
-            release();
-          }
-        },
-      });
-      return new Response(body, {
+        } catch {
+          // Stream failure is delivered to the client branch; lifecycle cleanup stays best-effort.
+        } finally {
+          signal?.removeEventListener("abort", cancelLifecycle);
+          release();
+        }
+      })();
+      return new Response(clientBody, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
@@ -359,7 +359,7 @@ export function startServer(
             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
           }
           return response;
-        });
+        }, req.signal);
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
@@ -369,11 +369,11 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => responseRequest(req, config));
+        return httpTurns.track(() => responseRequest(req, config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => compactRequest(req, config));
+        return httpTurns.track(() => compactRequest(req, config), req.signal);
       }
       return new Response("Not found", { status: 404 });
     },

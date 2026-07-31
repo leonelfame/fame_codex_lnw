@@ -797,8 +797,10 @@ export function bridgeToResponsesSSE(
 
       const startStream = () => {
         emit("response.created", { response: responseSnapshot("in_progress", []) });
-        // The default ReadableStream strategy has HWM=1. Once one event's frames fill that
-        // queue, pull stepping pauses; no custom FIFO or queuing strategy is layered on top.
+        // Keep the source push-driven on Windows. Returning a Promise from a ReadableStream
+        // pull() that is served by Bun.serve hits Bun#32111's native async-pull teardown crash.
+        // desiredSize polling preserves the old HWM=1 backpressure without installing a JS
+        // pull callback on the client-facing stream.
         gated = true;
         beat = setInterval(() => {
           if (closed || gated) return;
@@ -836,13 +838,32 @@ export function bridgeToResponsesSSE(
         }, heartbeatMs);
       };
 
+      const waitForCapacity = async () => {
+        while (!closed && (controller.desiredSize ?? 1) <= 0) {
+          await new Promise<void>(resolve => setTimeout(resolve, 5));
+        }
+      };
+
+      const pump = async () => {
+        while (!closed) {
+          await waitForCapacity();
+          if (closed) return;
+          await step();
+        }
+      };
+
   return new ReadableStream<Uint8Array>({
     start(streamController) {
       controller = streamController;
       startStream();
-    },
-    pull() {
-      return step();
+      void pump().catch(error => {
+        if (closed) return;
+        closed = true;
+        if (beat) clearInterval(beat);
+        onCancel?.();
+        returnIterator();
+        try { controller.error(error); } catch { /* already closed */ }
+      });
     },
     cancel() {
       // Client (Codex) disconnected. Stop emitting and let the caller abort the upstream fetch so a
