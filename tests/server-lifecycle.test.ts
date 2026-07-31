@@ -3,6 +3,12 @@ import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/a
 import { defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
 
+async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (turns.count() !== expected && Date.now() < deadline) await Bun.sleep(5);
+  expect(turns.count()).toBe(expected);
+}
+
 test("HTTP turn tracking follows the response stream instead of Bun's global request count", async () => {
   const turns = new HttpTurnCounter();
   let source!: ReadableStreamDefaultController<Uint8Array>;
@@ -19,16 +25,38 @@ test("HTTP turn tracking follows the response stream instead of Bun's global req
   expect(turns.count()).toBe(1);
   source.close();
   expect((await reader.read()).done).toBe(true);
-  expect(turns.count()).toBe(0);
+  await waitForTurnCount(turns, 0);
 });
 
 test("HTTP turn tracking releases a cancelled response stream", async () => {
   const turns = new HttpTurnCounter();
-  const response = await turns.track(async () => new Response(new ReadableStream<Uint8Array>()));
+  const request = new AbortController();
+  const response = await turns.track(
+    async () => new Response(new ReadableStream<Uint8Array>()),
+    request.signal,
+  );
 
   expect(turns.count()).toBe(1);
-  await response.body!.cancel();
-  expect(turns.count()).toBe(0);
+  const cancelled = response.body!.cancel();
+  request.abort("client disconnected");
+  await cancelled;
+  await waitForTurnCount(turns, 0);
+});
+
+test("HTTP turn tracking uses a tee branch instead of an async-pull response wrapper", async () => {
+  const turns = new HttpTurnCounter();
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const original = new ReadableStream<Uint8Array>({
+    start(controller) { source = controller; },
+  });
+  const response = await turns.track(async () => new Response(original));
+  const reader = response.body!.getReader();
+
+  source.enqueue(new TextEncoder().encode("safe"));
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe("safe");
+  source.close();
+  expect((await reader.read()).done).toBe(true);
+  await waitForTurnCount(turns, 0);
 });
 
 test("HTTP turn tracking releases a stream whose client disconnected without cancelling", async () => {

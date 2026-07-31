@@ -50,44 +50,35 @@ export class HttpTurnCounter {
         release();
         return response;
       }
-      const reader = response.body.getReader();
-      // A client that disconnects mid-stream stops draining the body without cancelling it, so the
-      // stream callbacks never run and the turn would stay counted forever. The request signal is
-      // the only evidence that the peer is gone.
       if (signal?.aborted) {
-        void reader.cancel(signal.reason).catch(() => {});
+        void response.body.cancel(signal.reason).catch(() => {});
         release();
-      } else if (signal) {
-        abortListener = () => {
-          void reader.cancel(signal.reason).catch(() => {});
-          release();
-        };
-        signal.addEventListener("abort", abortListener, { once: true });
+        return response;
       }
-      const body = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          try {
-            const chunk = await reader.read();
-            if (chunk.done) {
-              release();
-              controller.close();
-              return;
-            }
-            controller.enqueue(chunk.value);
-          } catch (error) {
-            release();
-            controller.error(error);
+      // OpenCodex's Windows-safe Bun#32111 shape: the client gets a native tee branch,
+      // never a JS ReadableStream with async pull(). The second branch is consumed only
+      // to observe completion. The request signal releases lifecycle ownership immediately
+      // when the client disconnects and cancels the observer branch.
+      const [clientBody, lifecycleBody] = response.body.tee();
+      const reader = lifecycleBody.getReader();
+      abortListener = () => {
+        void reader.cancel(signal?.reason).catch(() => {});
+        void clientBody.cancel(signal?.reason).catch(() => {});
+        release();
+      };
+      signal?.addEventListener("abort", abortListener, { once: true });
+      void (async () => {
+        try {
+          while (!(await reader.read()).done) {
+            // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
-        },
-        async cancel(reason) {
-          try {
-            await reader.cancel(reason);
-          } finally {
-            release();
-          }
-        },
-      });
-      return new Response(body, {
+        } catch {
+          // Stream failure is delivered to the client branch; lifecycle cleanup stays best-effort.
+        } finally {
+          release();
+        }
+      })();
+      return new Response(clientBody, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,

@@ -95,6 +95,21 @@ export function chatGptTurnIsComplete(state: {
     && state.completionActionVisible;
 }
 
+export type ChatGptSubmissionEvidence = "user_turn" | "assistant_turn" | "generation_running";
+
+export function chatGptSubmissionEvidence(state: {
+  initialUserTurnCount: number;
+  userTurnCount: number;
+  initialAssistantTurnCount: number;
+  assistantTurnCount: number;
+  generationRunning: boolean;
+}): ChatGptSubmissionEvidence | undefined {
+  if (state.userTurnCount > state.initialUserTurnCount) return "user_turn";
+  if (state.assistantTurnCount > state.initialAssistantTurnCount) return "assistant_turn";
+  if (state.generationRunning) return "generation_running";
+  return undefined;
+}
+
 export class ChatGptCompletionTracker {
   private candidate?: { signature: string; since: number };
 
@@ -523,6 +538,32 @@ export class ChatGptBrowserWorker {
     throw new Error(`ChatGPT did not expose exactly one visible composer (visibleComposers=${count})`);
   }
 
+  private async waitForSubmissionAccepted(
+    page: Page,
+    userTurns: Locator,
+    responseTurns: Locator,
+    initialUserTurnCount: number,
+    initialResponseTurnCount: number,
+  ): Promise<ChatGptSubmissionEvidence> {
+    const visibleStopButtons = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible: true });
+    for (;;) {
+      const [userTurnCount, assistantTurnCount, visibleStopButtonCount] = await Promise.all([
+        userTurns.count(),
+        responseTurns.count(),
+        visibleStopButtons.count(),
+      ]);
+      const evidence = chatGptSubmissionEvidence({
+        initialUserTurnCount,
+        userTurnCount,
+        initialAssistantTurnCount: initialResponseTurnCount,
+        assistantTurnCount,
+        generationRunning: visibleStopButtonCount > 0,
+      });
+      if (evidence) return evidence;
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+    }
+  }
+
   private async attachedPromptText(page: Page): Promise<string> {
     const composer = await this.activeComposer(page);
     return composer.evaluate(element => {
@@ -912,10 +953,14 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT send button is disabled after the complete prompt was attached");
         }
         await sendButton.press("Enter");
-        await userTurns.nth(initialUserTurnCount).waitFor({
-          state: "visible",
-          timeout: browserStageTimeouts.send,
-        });
+        const evidence = await this.waitForSubmissionAccepted(
+          page,
+          userTurns,
+          responseTurns,
+          initialUserTurnCount,
+          initialResponseTurnCount,
+        );
+        console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
       });
 
       let lastHeartbeat = 0;
