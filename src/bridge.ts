@@ -98,6 +98,8 @@ export function bridgeToResponsesSSE(
     onFirstOutput?: () => void;
     onTerminal?: (status: ResponsesTerminalStatus) => void;
     onCompletedResponse?: (response: Record<string, unknown>, providerState?: CodexProviderContinuationState) => void;
+    /** Test seam for the platform-specific Bun stream transport. */
+    streamPlatform?: NodeJS.Platform;
   },
 ): ReadableStream<Uint8Array> {
   // Freeform/custom tools (apply_patch) carry their body in `input`; the model is given a
@@ -797,10 +799,6 @@ export function bridgeToResponsesSSE(
 
       const startStream = () => {
         emit("response.created", { response: responseSnapshot("in_progress", []) });
-        // Keep the source push-driven on Windows. Returning a Promise from a ReadableStream
-        // pull() that is served by Bun.serve hits Bun#32111's native async-pull teardown crash.
-        // desiredSize polling preserves the old HWM=1 backpressure without installing a JS
-        // pull callback on the client-facing stream.
         gated = true;
         beat = setInterval(() => {
           if (closed || gated) return;
@@ -852,28 +850,46 @@ export function bridgeToResponsesSSE(
         }
       };
 
+  const cancelStream = () => {
+    // Client (Codex) disconnected. Stop emitting and let the caller abort the upstream fetch so a
+    // cancelled turn does not leak the upstream stream or keep draining tokens (RC2).
+    clientCancelled = true;
+    closed = true;
+    if (beat) clearInterval(beat);
+    onCancel?.();
+    returnIterator();
+  };
+
+  if ((options?.streamPlatform ?? process.platform) === "win32") {
+    // Returning a Promise from a ReadableStream pull() served by Bun on Windows hits Bun#32111's
+    // native teardown crash. Keep only Windows push-driven and retain HWM backpressure by polling
+    // desiredSize; Darwin/Linux use the native pull contract below.
+    return new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller = streamController;
+        startStream();
+        void pump().catch(error => {
+          if (closed) return;
+          closed = true;
+          if (beat) clearInterval(beat);
+          onCancel?.();
+          returnIterator();
+          try { controller.error(error); } catch { /* already closed */ }
+        });
+      },
+      cancel: cancelStream,
+    });
+  }
+
   return new ReadableStream<Uint8Array>({
     start(streamController) {
       controller = streamController;
       startStream();
-      void pump().catch(error => {
-        if (closed) return;
-        closed = true;
-        if (beat) clearInterval(beat);
-        onCancel?.();
-        returnIterator();
-        try { controller.error(error); } catch { /* already closed */ }
-      });
     },
-    cancel() {
-      // Client (Codex) disconnected. Stop emitting and let the caller abort the upstream fetch so a
-      // cancelled turn does not leak the upstream stream or keep draining tokens (RC2).
-      clientCancelled = true;
-      closed = true;
-      if (beat) clearInterval(beat);
-      onCancel?.();
-      returnIterator();
+    pull() {
+      return step();
     },
+    cancel: cancelStream,
   });
 }
 

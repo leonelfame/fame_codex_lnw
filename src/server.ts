@@ -30,7 +30,11 @@ export class HttpTurnCounter {
     return this.active;
   }
 
-  async track(run: () => Promise<Response>, signal?: AbortSignal): Promise<Response> {
+  async track(
+    run: () => Promise<Response>,
+    signal?: AbortSignal,
+    platform: NodeJS.Platform = process.platform,
+  ): Promise<Response> {
     this.active += 1;
     let released = false;
     let abortListener: (() => void) | undefined;
@@ -55,6 +59,46 @@ export class HttpTurnCounter {
         release();
         return response;
       }
+
+      if (platform !== "win32") {
+        // Bun's async-pull teardown bug is Windows-only. On Darwin/Linux, preserve the direct
+        // pull chain: it keeps HTTP backpressure native and lets a client body cancellation reach
+        // the original SSE reader without an eagerly drained tee branch racing the socket writer.
+        const reader = response.body.getReader();
+        abortListener = () => {
+          void reader.cancel(signal?.reason).catch(() => {}).finally(release);
+        };
+        signal?.addEventListener("abort", abortListener, { once: true });
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            try {
+              const chunk = await reader.read();
+              if (chunk.done) {
+                release();
+                controller.close();
+                return;
+              }
+              controller.enqueue(chunk.value);
+            } catch (error) {
+              release();
+              controller.error(error);
+            }
+          },
+          async cancel(reason) {
+            try {
+              await reader.cancel(reason);
+            } finally {
+              release();
+            }
+          },
+        });
+        return new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
+
       // OpenCodex's Windows-safe Bun#32111 shape: the client gets a native tee branch,
       // never a JS ReadableStream with async pull(). The second branch is consumed only
       // to observe completion. The request signal releases lifecycle ownership immediately
