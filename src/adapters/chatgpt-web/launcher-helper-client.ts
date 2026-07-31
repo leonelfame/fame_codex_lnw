@@ -185,16 +185,21 @@ export class LauncherBrowserHelperClient {
     output.on("line", line => this.handleLine(child, line));
     const errors = createInterface({ input: child.stderr });
     errors.on("line", line => console.info(`[chatgpt-web-helper] ${line}`));
-    child.once("error", error => {
+    const failChild = (error: Error) => {
+      const owned = this.child === child;
       this.handleExit(child, error);
-      if (Number.isInteger(child.pid) && child.exitCode === null && child.signalCode === null) {
+      if (owned && Number.isInteger(child.pid) && child.exitCode === null && child.signalCode === null) {
         void this.terminateChild(child, 0).catch(cleanupError => {
           console.error(
             `[chatgpt-web-helper] process-error cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
           );
         });
       }
-    });
+    };
+    child.once("error", failChild);
+    child.stdin.once("error", error => failChild(new Error(
+      `Launcher browser helper input failed: ${error instanceof Error ? error.message : String(error)}`,
+    )));
     child.once("exit", (code, signal) => this.handleExit(child, new Error(
       `Launcher browser helper exited ${signal ? `from signal ${signal}` : `with status ${code ?? 1}`}`,
     )));

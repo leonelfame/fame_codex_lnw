@@ -32,3 +32,30 @@ test("launcher verification delegates exact connector selection to the browser h
 
   assert.deepEqual(result, { ok: true, appName: "Codex Native" });
 });
+
+test("launcher verification consumes a helper input EOF after the result", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-browser-helper-eof-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.join(root, "helper.cjs");
+  fs.writeFileSync(script, `
+    const input = require("node:readline").createInterface({ input: process.stdin });
+    const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+    send({ type: "ready" });
+    input.on("line", line => {
+      const message = JSON.parse(line);
+      if (message.type !== "verify") return;
+      send({ type: "result", id: message.id, text: message.config.appName });
+      process.stdin.destroy();
+      setTimeout(() => process.exit(0), 100);
+    });
+  `);
+
+  const result = await verifyConnectorWithBrowserHelper({
+    helper: { executable: process.execPath, script },
+    descriptorPath: "/runtime/launcher-browser.json",
+    appName: "Codex Native",
+    logger: { info() {} },
+  });
+
+  assert.deepEqual(result, { ok: true, appName: "Codex Native" });
+});

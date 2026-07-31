@@ -24,7 +24,10 @@ function waitForExit(child, timeoutMs) {
 }
 
 function writeMessage(child, message) {
-  if (child.stdin.destroyed || child.stdin.writableEnded) {
+  if (child.exitCode !== null
+    || child.signalCode !== null
+    || child.stdin.destroyed
+    || child.stdin.writableEnded) {
     return Promise.reject(new Error("Browser helper verification input is closed"));
   }
   return new Promise((resolve, reject) => {
@@ -76,6 +79,12 @@ async function verifyConnectorWithBrowserHelper({ helper, descriptorPath, appNam
       if (error) reject(error);
       else resolve(value);
     };
+    // A callback on write() does not consume the stream's separate `error` event. On Windows,
+    // closing the helper's read side can therefore surface ERROR_BROKEN_PIPE/EOF as an uncaught
+    // exception in Electron's main process even when the write promise is already handled.
+    child.stdin.on("error", (error) => finish(
+      error instanceof Error ? error : new Error(String(error)),
+    ));
     output.on("line", (line) => {
       let message;
       try { message = JSON.parse(line); }
