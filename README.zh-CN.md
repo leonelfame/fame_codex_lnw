@@ -33,14 +33,17 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
      └──────── native UI, context, images, tracing, and tool lifecycle ──────┘
 ```
 
+Codex 会保留原生任务、上下文生命周期、界面和工具 harness。本地 Responses 桥接程序只会将
+所选模型的轮次转发到全新的 ChatGPT 临时聊天；在完整模式下，MCP 会把 ChatGPT 连接回同一个
+Codex 任务的工具。
+
 ## 亮点
 
 - **精致的跨平台启动器。** 一条命令即可安装原生 macOS、Windows 或 Linux 应用。登录、设置、
   冒烟测试、MCP 指南、运行状态和本地日志都集中在同一处；内置浏览器还能让你实时看到每个
   ChatGPT 轮次的执行过程。
-- **原生 Codex harness。** 使用的仍然是你熟悉的 Codex 模型选择器、任务历史、上下文生命周期、
-  审批、沙箱、流式输出、追踪和工具界面，而不是另一个聊天客户端。与 OpenCodex 类似，
-  它只更换模型后端，同时保留原生工作流。
+- **ChatGPT 就是所选模型。** 它作为 Codex 原生模型运行，而不是由另一个宿主模型调用的工具。
+  原有的模型选择器、任务生命周期、流式输出、追踪和工具界面保持不变。
 - **本地优先的任务会话。** Codex 仍然是电脑上任务历史的真实来源。每个浏览器轮次都会从一个
   全新的 ChatGPT 临时聊天开始，并接收完整的累计 Codex 上下文，因此浏览器聊天不会在任务之间
   复用，也不会加入普通 ChatGPT 历史记录。
@@ -51,8 +54,8 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
   MCP 连接器。它的原生能力（包括网页搜索和研究）仍然可用。你可以先用 Instant 到 Extra High
   收集本地工作区上下文，再切换到 Pro；Pro 会收到完整的累计 Codex 任务，用于更深入的分析。
 - **故障时明确失败，并经过人工测试。** 模型选择、超长内联上下文、图片、流式输出、可见追踪、
-  上下文压缩、原生工具轮次、取消操作和 Pro 均已在 macOS 上完成端到端测试。UI 变化或能力缺失
-  会产生明确错误，而不是静默回退。
+  上下文压缩、原生工具轮次、取消操作和 Pro 均已在 macOS 和 Windows 11 上完成端到端测试。
+  UI 变化或能力缺失会产生明确错误，而不是静默回退。
 
 临时聊天是 ChatGPT 的隐私模式，并不代表匿名或仅在本地推理：提示仍会由 OpenAI 处理，并受账户
 设置及 OpenAI [临时聊天政策](https://help.openai.com/en/articles/8914046-temporary-chat-faq)
@@ -83,10 +86,7 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 只有已登录账户支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令
 的情况下引导你完成完整 harness 设置。
 
-启动器是默认使用方式：浏览器登录、模型安装、可选 MCP 指南、运行状态、日志和更新都集中在同一
-界面。它统一管理内置浏览器、登录 profile、Responses 代理、Tunnel 进程以及 macOS、Windows
-和 Linux 的登录启动项。打包后的仅浏览器模式不需要 Google Chrome、模型 API 密钥、系统级
-Node/Bun、OpenCodex 或单独下载 Playwright 浏览器。
+打包后的仅浏览器模式不需要 Google Chrome、模型 API 密钥、系统级 Node/Bun 或单独下载浏览器。
 
 **从源码运行**
 
@@ -98,18 +98,6 @@ bun run app
 
 源码方式需要 Bun 1.3.11。该命令会安装锁定版本的依赖并打开应用。
 
-<details>
-<summary>高级：仅终端安装</summary>
-
-```bash
-curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh \
-  | sh -s -- --browser-only --acknowledge-unofficial
-```
-
-此旧版 macOS 专用模式使用独立管理的 Chrome 窗口，而不是启动器。
-
-</details>
-
 ## 模式
 
 | 模式 | 模型 | 本地 Codex 工具 | 额外设置 |
@@ -120,9 +108,6 @@ curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/
 模型选择器中的每一项都对应一个固定的 ChatGPT 模式。Codex 仍会显示内置的 Effort 和 Speed
 选项，但更改它们不会在后台静默切换所选的浏览器模型。Pro 会收到 Codex 已经收集的完整上下文，
 但 ChatGPT Pro 无法主动发起本地 MCP/工具调用。
-
-代理保留 Codex 内置的 `openai` provider 和实时模型目录。它会原样转发官方目录，只附加自己的
-ChatGPT Web 条目，因此原生模型、任务历史、审批、沙箱和工具结果仍由 Codex 管理。
 
 ## 完整 harness
 
@@ -148,44 +133,21 @@ Enterprise/Edu 工作区说明了这些操作；个人 Pro 账户仅限 read/fet
 
 ## 日常操作
 
-在 **活动** 页面查看结构化本地日志，在 **设置 → 运行诊断** 中执行端到端健康检查。如果 Codex
-任务已停止，但 ChatGPT 在原生工具轮次之间仍在工作，请使用
-**设置 → 取消残留的浏览器任务**，然后重试操作。删除启动器前，请使用
-**设置 → 移除 Codex 集成**；它会先排空运行时并恢复此前的 Codex 路由。
-
-核心私有状态位于 `~/.codex-chatgpt-web`；ChatGPT 登录保存在启动器的私有 Electron profile
-中。设置会记录此前的 Codex 路由，以便可逆恢复。启动器不会替换无关路由，并且只要 HTTP 任务
-或浏览器/工具任务仍在活动，就会拒绝停止、更新或退出。
-
-<details>
-<summary>高级 CLI 诊断</summary>
-
-```bash
-codex-chatgpt-web doctor
-codex-chatgpt-web service status
-codex-chatgpt-web tunnel status
-codex-chatgpt-web browser check
-codex-chatgpt-web service cancel-turns
-codex-chatgpt-web uninstall --yes       # 仅终端安装
-```
-
-</details>
+在 **活动** 页面查看结构化本地日志，在 **设置 → 运行诊断** 中执行端到端健康检查。如果已停止的
+任务仍让 ChatGPT 继续工作，请使用 **设置 → 取消残留的浏览器任务**。删除启动器前，请使用
+**设置 → 移除 Codex 集成**，以恢复此前的 Codex 路由。
 
 ## 限制和安全性
 
 - 这是非官方浏览器自动化，并非 OpenAI API。ChatGPT UI 变更可能破坏选择器；发生变化时会明确
   失败，而不是静默切换模型或传输方式。
-- 浏览器状态是敏感的登录凭据。切勿共享启动器 profile 或应用数据目录。
-- Responses 监听器只绑定到 loopback，但以同一本地用户身份运行的其他进程仍可访问它。
-  请仅在可信的单用户工作站上使用。
-- 浏览器轮次会串行执行，以保护单一 profile 并防止任务之间复用对话内容。
+- 浏览器状态是敏感的登录凭据，loopback 监听器也可被同一本地用户运行的进程访问。切勿共享
+  启动器 profile，并仅在可信工作站上使用。
 - 发布包目前支持 macOS 13+（arm64/x64）、Windows x64 和 Linux x64。浏览器流程已在 macOS
-  上完成手动端到端测试；核心运行时、测试和原生打包会在 CI 中对三种操作系统进行检查。
+  和 Windows 11 上完成手动端到端测试；核心运行时、测试和原生打包会在 CI 中对三种操作系统
+  进行检查。
 - 在为发布配置平台签名证书之前，macOS Gatekeeper 或 Windows SmartScreen 可能会显示未知发布者
   警告。一键安装脚本会在安装前验证发布的 SHA-256 清单。
-- Codex Desktop 会将 Pro 的 wire effort 固定显示为 **Ultra**，并始终显示 **Standard** speed。
-  这些控件不会改变固定的 ChatGPT Web 模型；重命名它们需要修改已签名的 Codex 应用。
-- 高级的仅终端 Chrome 模式仍仅支持 macOS。
 
 启用完整模式前，请阅读完整的[架构说明](docs/architecture.md)和
 [安全模型](docs/security-model.md)。安全漏洞请通过 [SECURITY.md](SECURITY.md) 报告。
@@ -198,22 +160,12 @@ bun run verify
 bun run app:package
 ```
 
-`app` 会安装锁定版本的根目录和启动器依赖，并打开开发构建。`verify` 会运行依赖审计、严格
-TypeScript 检查、核心与启动器测试、生产 renderer 构建、可重定位运行时冒烟测试，以及 macOS
-上的真实系统 Chrome 无头检查。`app:package` 会为当前操作系统创建原生安装包；由于每个应用
-都会嵌入对应平台的 Bun 运行时，因此拒绝跨平台打包。
-
 - [架构说明](docs/architecture.md)
 - [安全模型](docs/security-model.md)
 - [贡献指南](CONTRIBUTING.md)
 
-## 致谢与免责声明
+## 免责声明
 
-Responses 转换、Codex 目录集成和浏览器 harness 的部分代码依据 MIT 许可证改编自
-[OpenCodex](https://github.com/lidge-jun/opencodex)。详情请参阅
-[第三方声明](LICENSES/NOTICE.md)。
-
-本项目是实验性的独立软件，与 OpenAI 无关联，也未获得 OpenAI 背书。不得使用本项目规避使用限制
-或访问控制。在公开分发前，请查阅 OpenAI 当前的
-[使用条款](https://openai.com/policies/terms-of-use/)和
-[服务协议](https://openai.com/policies/services-agreement/)。
+本项目是独立软件，与 OpenAI 无关联，也未获得 OpenAI 背书。请仅使用自己的账户，并遵守适用的
+[使用条款](https://openai.com/policies/terms-of-use/)和工作区政策；本项目不会绕过身份验证或
+访问控制。

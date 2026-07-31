@@ -33,14 +33,18 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
      └──────── native UI, context, images, tracing, and tool lifecycle ──────┘
 ```
 
+Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
+routes only the selected model turn through a fresh ChatGPT Temporary Chat; in full mode, MCP
+connects ChatGPT back to the tools of that same Codex task.
+
 ## Highlights
 
 - **A polished cross-platform launcher.** One command installs the native macOS, Windows, or Linux
   app. It keeps sign-in, setup, smoke testing, MCP guidance, runtime health, and local logs in one
   place, while the embedded browser lets you watch every ChatGPT turn as it happens.
-- **Native Codex harness.** This is the same model-picker, task history, context lifecycle,
-  approvals, sandbox, streaming, tracing, and tool UI you already use in Codex—not a second chat
-  client. Like OpenCodex, it changes the model backend while preserving the native workflow.
+- **ChatGPT is the selected model.** It runs as a native Codex model, not as a tool called by
+  another host model. The original model picker, task lifecycle, streaming, tracing, and tool UI
+  remain intact.
 - **Local-first task sessions.** Codex remains the source of truth for task history on your
   computer. Every browser turn starts in a fresh ChatGPT Temporary Chat and receives the complete
   accumulated Codex context, so browser chats are not reused across tasks or added to normal
@@ -54,7 +58,8 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
   switch to Pro, and Pro receives the complete accumulated Codex task for deeper analysis.
 - **Fail-closed and manually tested.** Model selection, long inline context, images, streaming,
   visible trace, compaction, native tool rounds, cancellation, and Pro were exercised end-to-end on
-  macOS. UI drift and missing capabilities produce explicit errors rather than silent fallbacks.
+  macOS and Windows 11. UI drift and missing capabilities produce explicit errors rather than
+  silent fallbacks.
 
 Temporary Chat is a ChatGPT privacy mode, not anonymity or local-only inference: prompts are still
 processed by OpenAI and are subject to the account's settings and OpenAI's
@@ -87,10 +92,7 @@ Then complete the three checks in the app:
 Pro appears only when the signed-in account exposes it. The separate **MCP** page is optional and
 guides the full-harness setup without terminal commands.
 
-The launcher is the default path: browser login, model installation, optional MCP guidance, runtime
-health, logs, and updates stay in one UI. It owns its browser, login profile, Responses proxy,
-tunnel process, and login-item lifecycle on macOS, Windows, and Linux. A packaged browser-only
-install needs no Google Chrome, model API key, system Node/Bun, OpenCodex, or separate Playwright
+A packaged browser-only install needs no Google Chrome, model API key, system Node/Bun, or separate
 browser download.
 
 **Run from source**
@@ -103,18 +105,6 @@ bun run app
 
 This source path requires Bun 1.3.11. The command installs locked dependencies and opens the app.
 
-<details>
-<summary>Advanced: terminal-only installation</summary>
-
-```bash
-curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install.sh \
-  | sh -s -- --browser-only --acknowledge-unofficial
-```
-
-This legacy macOS-only mode uses a separately managed Chrome window instead of the launcher.
-
-</details>
-
 ## Modes
 
 | Mode | Models | Local Codex tools | Extra setup |
@@ -125,10 +115,6 @@ This legacy macOS-only mode uses a separately managed Chrome window instead of t
 Every picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and Speed
 rows, but changing them cannot silently change the selected browser model. Pro receives the full
 context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
-
-The proxy keeps Codex's built-in `openai` provider and live model catalog. It forwards the official
-catalog unchanged and appends only its ChatGPT Web entries, so native models, task history,
-approvals, sandboxing, and tool results remain owned by Codex.
 
 ## Full harness
 
@@ -156,49 +142,22 @@ that option clicks **Allow once**, never a permanent grant.
 ## Operations
 
 Use **Activity** for structured local logs and **Settings → Run doctor** for end-to-end health
-checks. If a stopped Codex task leaves ChatGPT working between native tool rounds, use
-**Settings → Cancel retained browser turn**, then retry the operation. Use
-**Settings → Remove Codex integration** before deleting the launcher; it drains the runtime and
-restores the previous Codex route.
-
-Core private state lives under `~/.codex-chatgpt-web`; the ChatGPT login lives in the launcher's
-private Electron profile. Setup journals the previous Codex route so it can be restored
-reversibly. The launcher refuses to replace an unrelated route and refuses to stop, update, or
-quit while either an HTTP turn or browser/tool turn is active.
-
-<details>
-<summary>Advanced CLI diagnostics</summary>
-
-```bash
-codex-chatgpt-web doctor
-codex-chatgpt-web service status
-codex-chatgpt-web tunnel status
-codex-chatgpt-web browser check
-codex-chatgpt-web service cancel-turns
-codex-chatgpt-web uninstall --yes       # terminal-only installation
-```
-
-</details>
+checks. Use **Settings → Cancel retained browser turn** if a stopped task leaves ChatGPT working,
+and **Settings → Remove Codex integration** before deleting the launcher so the previous Codex
+route is restored.
 
 ## Limitations and security
 
 - This is unofficial browser automation, not an OpenAI API. ChatGPT UI changes can break selectors;
   drift fails explicitly instead of silently switching model or transport.
-- Browser state is a sensitive login artifact. Never share the launcher profile or application
-  data directory.
-- The Responses listener is loopback-only, but another process running as the same local user can
-  reach it. Use a trusted single-user workstation.
-- Browser turns are serialized to protect one profile and prevent transcript reuse across tasks.
+- Browser state is a sensitive login artifact, and the loopback listener is reachable by processes
+  running as the same local user. Never share the launcher profile; use a trusted workstation.
 - Release packages currently target macOS 13+ (arm64/x64), Windows x64, and Linux x64. The browser
-  flow is manually exercised end-to-end on macOS; runtime, tests, and native packaging are gated
-  on all three operating systems in CI.
+  flow is manually exercised end-to-end on macOS and Windows 11; runtime, tests, and native
+  packaging are gated on all three operating systems in CI.
 - Until platform signing credentials are configured for a release, macOS Gatekeeper or Windows
   SmartScreen may show an unknown-publisher warning. The one-command installers verify the
   published SHA-256 manifest before installation.
-- Codex Desktop hardcodes Pro's wire effort as **Ultra** and always shows a **Standard** speed row.
-  Those controls do not alter the fixed ChatGPT Web model. Renaming them would require patching the
-  signed Codex app.
-- The advanced terminal-only Chrome mode remains macOS-only.
 
 Read the complete [architecture](docs/architecture.md) and
 [security model](docs/security-model.md) before enabling full mode. Report vulnerabilities through
@@ -212,23 +171,12 @@ bun run verify
 bun run app:package
 ```
 
-`app` installs locked root and launcher dependencies and opens the development build. `verify`
-runs dependency auditing, strict TypeScript checks, core and launcher tests, production renderer
-builds, a relocatable runtime smoke test, and a real headless system-Chrome check on macOS.
-`app:package` creates the native package for the current OS; cross-packaging is rejected because
-each app embeds a native Bun runtime.
-
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security-model.md)
 - [Contributing](CONTRIBUTING.md)
 
-## Credits and disclaimer
+## Disclaimer
 
-Portions of the Responses translation, Codex catalog integration, and browser harness were adapted
-from [OpenCodex](https://github.com/lidge-jun/opencodex) under the MIT license. See
-[third-party notices](LICENSES/NOTICE.md).
-
-This project is experimental, independent software. It is not affiliated with or endorsed by
-OpenAI, and it must not be used to evade usage limits or access controls. Review OpenAI's current
-[Terms of Use](https://openai.com/policies/terms-of-use/) and
-[Services Agreement](https://openai.com/policies/services-agreement/) before public distribution.
+This is independent software and is not affiliated with or endorsed by OpenAI. Use it only with
+your own account and in accordance with applicable [Terms of Use](https://openai.com/policies/terms-of-use/)
+and workspace policies; it does not bypass authentication or access controls.
