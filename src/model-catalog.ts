@@ -103,13 +103,17 @@ export function augmentNativeModelCatalog(
   );
   const template = selectNativeTemplate(nativeModels, config);
   if (contextOverride) {
-    const selected = nativeModels.find(model => slug(model) === contextOverride.model);
-    if (selected) {
-      const model = object(selected, `native ${contextOverride.model} model`);
+    // model_context_window is a single top-level Codex setting, not a per-model one. Binding it to
+    // the model named in the config makes it vanish the moment that line names a ChatGPT Web slug,
+    // leaving the model actually in use clamped to the catalog's smaller window.
+    for (const candidate of nativeModels) {
+      const modelSlug = slug(candidate);
+      if (!modelSlug) continue;
+      const model = object(candidate, `native ${modelSlug} model`);
       const current = model.max_context_window;
       if (current !== undefined && current !== null
         && (typeof current !== "number" || !Number.isSafeInteger(current) || current <= 0)) {
-        throw new Error(`Native ${contextOverride.model} max_context_window must be a positive integer`);
+        throw new Error(`Native ${modelSlug} max_context_window must be a positive integer`);
       }
       if (current === undefined || current === null || current < contextOverride.contextWindow) {
         model.max_context_window = contextOverride.contextWindow;

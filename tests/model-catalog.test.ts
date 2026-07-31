@@ -91,8 +91,10 @@ describe("native /models augmentation", () => {
   test("honors an explicit Codex context override without replacing or reordering native models", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
+    // model_context_window is one top-level Codex setting, so it must not depend on which model
+    // the config's `model` line happens to name - that line can hold a ChatGPT Web slug.
     const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
-      model: "gpt-5.6-sol",
+      model: "chatgpt-web/medium",
       contextWindow: 371_851,
     });
     const models = result.models as Array<Record<string, unknown>>;
@@ -100,11 +102,23 @@ describe("native /models augmentation", () => {
 
     expect(native).toEqual(nativeSnapshot);
     expect(models.slice(0, 3)).toEqual([
-      originalModels[0],
+      { ...originalModels[0], max_context_window: 371_851 },
       { ...originalModels[1], max_context_window: 371_851 },
-      originalModels[2],
+      { ...originalModels[2], max_context_window: 371_851 },
     ]);
     expect(models[1]!.context_window).toBe(300_000);
+  });
+
+  test("never lowers a native window that already exceeds the Codex context override", () => {
+    const native = source();
+    const models = native.models as Array<Record<string, unknown>>;
+    models[0]!.max_context_window = 1_000_000;
+    const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
+      model: "gpt-5.6-sol",
+      contextWindow: 371_851,
+    });
+
+    expect((result.models as Array<Record<string, unknown>>)[0]!.max_context_window).toBe(1_000_000);
   });
 
   test("uses an available compatible official model when an account exposes a smaller catalog", () => {
