@@ -95,6 +95,18 @@ jobs:
           cp scripts/install.sh release-assets/install.sh
           cp scripts/install-launcher.sh release-assets/install-launcher.sh
           cp scripts/install-launcher.ps1 release-assets/install-launcher.ps1
+      - name: Flatten release assets
+        run: |
+          cd release-assets
+          while IFS= read -r -d '' file; do
+            name="$(basename "$file")"
+            if [ -e "$name" ]; then
+              echo "Duplicate release asset name: $name" >&2
+              exit 1
+            fi
+            mv "$file" "$name"
+          done < <(find . -mindepth 2 -type f -print0 | sort -z)
+          find . -mindepth 1 -type d -empty -delete
       - name: Create checksums
         run: |
           cd release-assets
@@ -104,6 +116,21 @@ jobs:
             | xargs -0 sha256sum \
             | sed 's#  \./#  #' > "$checksum_file"
           mv "$checksum_file" checksums.txt
+      - name: Verify every published asset is checksummed
+        run: |
+          cd release-assets
+          missing=""
+          while IFS= read -r -d '' file; do
+            name="${file#./}"
+            if [ "$name" = checksums.txt ]; then continue; fi
+            if ! awk -v asset="$name" '$2 == asset { found = 1 } END { exit found ? 0 : 1 }' checksums.txt; then
+              missing="$missing $name"
+            fi
+          done < <(find . -type f -print0)
+          if [ -n "$missing" ]; then
+            echo "checksums.txt is missing entries for:$missing" >&2
+            exit 1
+          fi
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

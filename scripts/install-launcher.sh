@@ -62,7 +62,11 @@ if [ "$OS" = "Darwin" ]; then
 else
   ACTUAL="$(sha256sum "$TEMP_DIR/$ASSET" | awk '{ print $1}')"
 fi
-if [ -z "$EXPECTED" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+if [ -z "$EXPECTED" ]; then
+  echo "checksums.txt has no entry for $ASSET" >&2
+  exit 1
+fi
+if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "SHA-256 verification failed for $ASSET" >&2
   exit 1
 fi
