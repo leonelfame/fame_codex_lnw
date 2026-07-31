@@ -241,6 +241,10 @@ export class ChatGptTurnSessions {
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
+    // A browser turn carries its own deadline, so one still unsettled past this ceiling can never
+    // finish. Without an upper bound such a session pins the runtime's active-turn count forever
+    // and no lifecycle operation can prove idleness again.
+    private readonly maxActiveMs = 60 * 60_000,
   ) {}
 
   getOrCreate(key: string, start: () => ChatGptTurnRuntime): ChatGptTurnSession {
@@ -271,9 +275,11 @@ export class ChatGptTurnSessions {
   }
 
   private prune(): void {
-    const cutoff = Date.now() - this.ttlMs;
+    const now = Date.now();
+    const idleCutoff = now - this.ttlMs;
+    const stuckCutoff = now - this.maxActiveMs;
     for (const [key, session] of this.entries) {
-      if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
+      if (session.isActive() ? session.createdAt > stuckCutoff : session.lastUsedAt() >= idleCutoff) continue;
       session.cancel();
       this.entries.delete(key);
     }

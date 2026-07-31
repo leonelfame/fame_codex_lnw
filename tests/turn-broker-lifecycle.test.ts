@@ -50,6 +50,23 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   sessions.clear();
 });
 
+test("a browser turn that can no longer finish stops pinning the active-turn count", async () => {
+  const sessions = new ChatGptTurnSessions(60_000, 256, 1);
+  let cancelled = 0;
+  sessions.getOrCreate("stuck-turn", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled += 1; },
+  }));
+
+  expect(sessions.activeCount()).toBe(1);
+  await Bun.sleep(5);
+  expect(sessions.activeCount()).toBe(0);
+  expect(cancelled).toBe(1);
+});
+
 test("settled replay sessions expire from their last use instead of their creation time", async () => {
   const sessions = new ChatGptTurnSessions(50);
   let starts = 0;
