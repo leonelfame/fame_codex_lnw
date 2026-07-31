@@ -66,6 +66,113 @@ test("forwards native Codex compaction requests to the official compact endpoint
   expect(await response.json()).toEqual({ output: [] });
 });
 
+test("removes ChatGPT Web item identities before native Codex compaction", async () => {
+  const body = {
+    model: "gpt-5.6-sol",
+    store: false,
+    previous_response_id: "resp_local_web_turn",
+    input: [
+      {
+        type: "reasoning",
+        id: "rs_2e94d82c29b14b14bb34eae3252fa756",
+        summary: [{ type: "summary_text", text: "Pro thinking" }],
+        content: null,
+        encrypted_content: null,
+      },
+      {
+        type: "reasoning",
+        id: "rs_11111111111111111111111111111111",
+        summary: [{ type: "summary_text", text: "Bridge envelope reasoning" }],
+        encrypted_content: "ocxr1:eyJ0eHQiOiJoaWRkZW4ifQ==",
+      },
+      {
+        type: "message",
+        id: "msg_22222222222222222222222222222222",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Visible answer", annotations: [] }],
+      },
+      {
+        type: "function_call",
+        id: "fc_33333333333333333333333333333333",
+        call_id: "call_keep_linkage",
+        name: "exec_command",
+        arguments: "{}",
+      },
+      { type: "compaction_trigger" },
+    ],
+  };
+  const originalBody = Bun.zstdCompressSync(Buffer.from(JSON.stringify(body)));
+  const encoded = new ArrayBuffer(originalBody.byteLength);
+  new Uint8Array(encoded).set(originalBody);
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer codex-oauth-token",
+      "content-type": "application/json",
+      "content-encoding": "zstd",
+    },
+    body: encoded,
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return new Response("data: native\n\n", { headers: { "content-type": "text/event-stream" } });
+  }, body);
+
+  expect(upstreamRequest!.headers.get("content-encoding")).toBeNull();
+  const forwarded = await upstreamRequest!.json() as typeof body;
+  expect(forwarded).not.toHaveProperty("previous_response_id");
+  expect(forwarded.input.every(item => !("id" in item))).toBe(true);
+  expect(forwarded.input.some(item => "encrypted_content" in item
+    && typeof item.encrypted_content === "string"
+    && item.encrypted_content.startsWith("ocxr1:"))).toBe(false);
+  expect(forwarded.input[0]).toMatchObject({
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "Pro thinking" }],
+  });
+  expect(forwarded.input[2]).toMatchObject({
+    type: "message",
+    role: "assistant",
+  });
+  expect(forwarded.input[3]).toMatchObject({
+    type: "function_call",
+    call_id: "call_keep_linkage",
+  });
+  expect(forwarded.input.at(-1)).toEqual({ type: "compaction_trigger" });
+});
+
+test("keeps native encrypted reasoning requests byte-for-byte intact", async () => {
+  const body = JSON.stringify({
+    model: "gpt-5.6-sol",
+    input: [{
+      type: "reasoning",
+      id: "rs_44444444444444444444444444444444",
+      summary: [],
+      encrypted_content: "gAAAAABnative-opaque-reasoning",
+    }],
+  });
+  const originalBody = Bun.zstdCompressSync(Buffer.from(body));
+  const encoded = new ArrayBuffer(originalBody.byteLength);
+  new Uint8Array(encoded).set(originalBody);
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer codex-oauth-token",
+      "content-type": "application/json",
+      "content-encoding": "zstd",
+    },
+    body: encoded,
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return new Response("data: native\n\n", { headers: { "content-type": "text/event-stream" } });
+  });
+
+  expect(upstreamRequest!.headers.get("content-encoding")).toBe("zstd");
+  expect(Buffer.from(await upstreamRequest!.arrayBuffer())).toEqual(Buffer.from(originalBody));
+});
+
 test("native passthrough fails closed without Codex bearer authentication", async () => {
   const request = new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",

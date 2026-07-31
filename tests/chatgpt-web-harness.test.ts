@@ -448,6 +448,16 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(final.markdown).toBe("## Format Probe\n\n**bold**\n\n- alpha\n- beta");
   });
 
+  test("drops decorative HTML images without removing textual links", () => {
+    const markdown = chatGptHtmlToMarkdown([
+      '<p>Source card: <a href="https://github.com/example/repo"><img alt="GitHub" src="data:image/png;base64,AAAA"></a></p>',
+      '<p><a href="https://github.com/example/repo">Open repository</a></p>',
+    ].join(""));
+    expect(markdown).not.toContain("![");
+    expect(markdown).not.toContain("data:image");
+    expect(markdown).toContain("[Open repository](https://github.com/example/repo)");
+  });
+
   test("replays the complete outer Codex context, including prior reasoning and tool evidence", () => {
     const request = parsed();
     request.context.systemPrompt = ["system-rule", "repo-rule"];
@@ -614,8 +624,8 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(callStart?.name).toBe("exec_command");
       expect(firstEvents.filter(event => event.type === "assistant_boundary")).toHaveLength(2);
       expect(firstEvents.filter(event => event.type === "thinking_delta")).toEqual([
-        { type: "thinking_delta", thinking: "Mapped the repository surface\n" },
-        { type: "thinking_delta", thinking: "Inspected the working directory\n" },
+        { type: "thinking_delta", thinking: "Mapped the repository surface" },
+        { type: "thinking_delta", thinking: "Inspected the working directory" },
       ]);
       const firstDone = firstEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
       expect(firstDone).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
@@ -652,7 +662,7 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(browserStarts).toBe(1);
       expect(secondEvents.find(event => event.type === "thinking_delta")).toEqual({
         type: "thinking_delta",
-        thinking: "Verified the command result\n",
+        thinking: "Verified the command result",
       });
       expect(secondEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
         .map(event => event.text).join(""))
@@ -694,7 +704,8 @@ describe("ChatGPT outer-native harness v3", () => {
         expect(prepared.text).toContain("web search, browsing, research");
         expect(prepared.text).not.toContain("turn_token");
         expect(prepared.text).not.toContain("codex_bind_turn");
-        turn.onReasoningSummary?.("Reviewed the accumulated task evidence");
+        turn.onReasoningSummary?.("Reviewed the accumulated");
+        turn.onReasoningSummary?.(" task evidence", true);
         turn.onCommentary?.("The prepared context contains enough evidence to continue the analysis.");
         turn.onReasoningSummary?.("Synthesized the read-only conclusion");
         turn.onTextDelta("## Pro result");
@@ -750,8 +761,9 @@ describe("ChatGPT outer-native harness v3", () => {
         },
       ]);
       expect(events.filter(event => event.type === "thinking_delta")).toEqual([
-        { type: "thinking_delta", thinking: "Reviewed the accumulated task evidence\n" },
-        { type: "thinking_delta", thinking: "Synthesized the read-only conclusion\n" },
+        { type: "thinking_delta", thinking: "Reviewed the accumulated" },
+        { type: "thinking_delta", thinking: " task evidence" },
+        { type: "thinking_delta", thinking: "Synthesized the read-only conclusion" },
       ]);
       expect(events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer")
         .map(event => event.text).join(""))
@@ -766,7 +778,7 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(warning?.content?.[0]?.text).toContain("web search remain available");
       expect(warning?.content?.[0]?.text).not.toContain("tools/MCP");
       expect(response.output.filter(item => item.type === "message" && item.phase === "commentary")).toHaveLength(2);
-      expect(response.output.some(item => item.type === "reasoning")).toBe(true);
+      expect(response.output.filter(item => item.type === "reasoning")).toHaveLength(2);
 
       const replay: AdapterEvent[] = [];
       await adapter.runTurn!(request, { headers: new Headers() }, event => replay.push(event));

@@ -74,7 +74,7 @@ export interface BrowserTurn {
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
-  onReasoningSummary?: (text: string) => void;
+  onReasoningSummary?: (text: string, continuation?: boolean) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
   onCommentary?: (text: string, continuation?: boolean) => void;
   /** Append-only, structurally stable Markdown chunks. */
@@ -217,8 +217,10 @@ export class ChatGptVisibleTraceTracker {
   private readonly seen = new Set<string>();
   private readonly emittedCommentary = new Map<number, string>();
   private readonly commentaryChangedAt = new Map<number, number>();
+  private readonly emittedReasoning = new Map<number, string>();
+  private readonly reasoningCandidates = new Map<number, { text: string; changedAt: number }>();
 
-  constructor(private readonly commentaryStabilityMs = 1_000) {}
+  constructor(private readonly traceStabilityMs = 1_000) {}
 
   observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
     let lastMarkdown = -1;
@@ -251,7 +253,7 @@ export class ChatGptVisibleTraceTracker {
         const previous = this.emittedCommentary.get(index);
         if (previous === text) {
           const changedAt = this.commentaryChangedAt.get(index) ?? now;
-          if (now - changedAt < this.commentaryStabilityMs) break;
+          if (now - changedAt < this.traceStabilityMs) break;
           continue;
         }
         this.commentaryChangedAt.set(index, now);
@@ -261,6 +263,27 @@ export class ChatGptVisibleTraceTracker {
           break;
         }
         this.emittedCommentary.set(index, text);
+      } else {
+        const candidate = this.reasoningCandidates.get(index);
+        if (!candidate || candidate.text !== text) {
+          this.reasoningCandidates.set(index, { text, changedAt: now });
+          continue;
+        }
+        if (now - candidate.changedAt < this.traceStabilityMs) continue;
+
+        const previous = this.emittedReasoning.get(index);
+        if (previous === text) continue;
+        this.emittedReasoning.set(index, text);
+
+        const key = `${block.kind}\0${text}`;
+        if (this.seen.has(key)) continue;
+        this.seen.add(key);
+        if (previous && text.startsWith(previous)) {
+          output.push({ kind: "reasoning", text: text.slice(previous.length), continuation: true });
+        } else {
+          output.push({ kind: "reasoning", text });
+        }
+        continue;
       }
       const key = `${block.kind}\0${text}`;
       if (this.seen.has(key)) continue;
@@ -1011,7 +1034,7 @@ export class ChatGptBrowserWorker {
         if (snapshot.responsePresent) {
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
-            else turn.onReasoningSummary?.(trace.text);
+            else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,

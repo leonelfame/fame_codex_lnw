@@ -202,7 +202,7 @@ export async function responseRequest(req: Request, config: AppConfig): Promise<
     : undefined;
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses");
+      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -308,7 +308,7 @@ export async function compactRequest(req: Request, _config: AppConfig): Promise<
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses/compact");
+      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }

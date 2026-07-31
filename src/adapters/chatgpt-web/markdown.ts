@@ -12,6 +12,10 @@ const turndown = new TurndownService({
 });
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
+turndown.addRule("removeImages", {
+  filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),
+  replacement: () => "",
+});
 turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",
   replacement: () => "",

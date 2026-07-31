@@ -101,7 +101,13 @@ async function run(message: RunMessage): Promise<void> {
     prepare: async () => ({ ...message.turn.prepared, release: () => {} }),
     abortSignal: abortController.signal,
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
-    onReasoningSummary: text => writeProtocol({ type: "event", id: message.id, event: "reasoning", text }),
+    onReasoningSummary: (text, continuation) => writeProtocol({
+      type: "event",
+      id: message.id,
+      event: "reasoning",
+      text,
+      ...(continuation ? { continuation: true } : {}),
+    }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
   };

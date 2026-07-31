@@ -108,7 +108,7 @@ function emitTraceEvents(trace: ChatGptTraceEvent[], emit: (event: AdapterEvent)
     if (event.kind === "commentary") {
       emit({ type: "text_delta", text: event.text, phase: "commentary" });
     } else {
-      emit({ type: "thinking_delta", thinking: `${event.text}\n` });
+      emit({ type: "thinking_delta", thinking: event.text });
     }
   }
 }
@@ -187,7 +187,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         capabilities,
         prepare: async () => ({ ...compileChatGptWebPrompt(parsed, capabilities), release: () => {} }),
         abortSignal: browserAbort.signal,
-        onReasoningSummary: text => trace.push({ kind: "reasoning", text }),
+        onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
       });
@@ -222,7 +222,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         }
       },
       abortSignal: browserAbort.signal,
-      onReasoningSummary: text => trace.push({ kind: "reasoning", text }),
+      onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
     });

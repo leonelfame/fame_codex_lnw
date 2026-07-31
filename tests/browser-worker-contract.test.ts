@@ -400,20 +400,25 @@ test("browser diagnostics redact context envelopes and capability values", () =>
 
 test("visible DOM trace emits statuses and stable commentary but withholds the final answer", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
-  expect(tracker.observe([
+  const initialBlocks = [
     { kind: "status", text: "Reviewed architecture documentation" },
     { kind: "markdown", text: "The implementation has a concrete state drift." },
-  ], false)).toEqual([{ kind: "reasoning", text: "Reviewed architecture documentation" }]);
+  ] as const;
+  expect(tracker.observe([...initialBlocks], false, 1_000)).toEqual([]);
+  expect(tracker.observe([...initialBlocks], false, 1_100)).toEqual([
+    { kind: "reasoning", text: "Reviewed architecture documentation" },
+  ]);
   const commentaryBlocks = [
     { kind: "status", text: "Reviewed architecture documentation" },
     { kind: "markdown", text: "The implementation has a concrete state drift." },
     { kind: "status", text: "Inspecting runtime evidence" },
     { kind: "markdown", text: "Final answer still streaming" },
   ] as const;
-  expect(tracker.observe([...commentaryBlocks], false, 1_000)).toEqual([
+  expect(tracker.observe([...commentaryBlocks], false, 1_200)).toEqual([
     { kind: "commentary", text: "The implementation has a concrete state drift." },
   ]);
-  expect(tracker.observe([...commentaryBlocks], false, 1_100)).toEqual([
+  expect(tracker.observe([...commentaryBlocks], false, 1_300)).toEqual([]);
+  expect(tracker.observe([...commentaryBlocks], false, 1_400)).toEqual([
     { kind: "reasoning", text: "Inspecting runtime evidence" },
   ]);
   expect(tracker.observe([
@@ -438,9 +443,38 @@ test("visible DOM trace streams a growing commentary block as append-only deltas
     { kind: "commentary", text: " the repository’s mandatory architecture", continuation: true },
   ]);
   expect(tracker.observe([...expanded], false, 1_100)).toEqual([]);
-  expect(tracker.observe([...expanded], false, 1_150)).toEqual([
+  expect(tracker.observe([...expanded], false, 1_150)).toEqual([]);
+  expect(tracker.observe([...expanded], false, 1_250)).toEqual([
     { kind: "reasoning", text: "Read context file contents" },
   ]);
+});
+
+test("visible DOM trace waits out animated Pro fragments and appends genuine growth", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100);
+  expect(tracker.observe([{ kind: "status", text: "I" }], false, 1_000)).toEqual([]);
+  expect(tracker.observe([{ kind: "status", text: "I’m" }], false, 1_025)).toEqual([]);
+  expect(tracker.observe([{ kind: "status", text: "’m seeking" }], false, 1_050)).toEqual([]);
+  expect(tracker.observe([{ kind: "status", text: "a concrete stack" }], false, 1_075)).toEqual([]);
+  expect(tracker.observe([
+    { kind: "status", text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity" },
+  ], false, 1_100)).toEqual([]);
+  expect(tracker.observe([
+    { kind: "status", text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity" },
+  ], false, 1_200)).toEqual([{
+    kind: "reasoning",
+    text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity",
+  }]);
+
+  expect(tracker.observe([
+    { kind: "status", text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity, including validation" },
+  ], false, 1_250)).toEqual([]);
+  expect(tracker.observe([
+    { kind: "status", text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity, including validation" },
+  ], false, 1_350)).toEqual([{
+    kind: "reasoning",
+    text: ", including validation",
+    continuation: true,
+  }]);
 });
 
 test("visible DOM trace translates the explicit ChatGPT compaction marker once", () => {

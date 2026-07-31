@@ -245,7 +245,9 @@ export class LauncherBrowserHelperClient {
     if (!pending) return;
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
-      else if (message.event === "reasoning" && message.text) pending.turn.onReasoningSummary?.(message.text);
+      else if (message.event === "reasoning" && message.text) {
+        pending.turn.onReasoningSummary?.(message.text, message.continuation === true);
+      }
       else if (message.event === "commentary" && message.text) pending.turn.onCommentary?.(message.text, message.continuation === true);
       else if (message.event === "text" && message.text) pending.turn.onTextDelta(message.text);
       return;

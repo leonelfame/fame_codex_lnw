@@ -24,6 +24,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
       if (message.type === "shutdown") process.exit(0);
       if (message.type !== "run") return;
       send({ type: "event", id: message.id, event: "reasoning", text: "Reading project" });
+      send({ type: "event", id: message.id, event: "reasoning", text: " files", continuation: true });
       send({ type: "event", id: message.id, event: "text", text: "done" });
       send({ type: "result", id: message.id, text: "done" });
     });
@@ -54,7 +55,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
     headed: true,
     autoApproveToolCalls: false,
   };
-  const reasoning: string[] = [];
+  const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
@@ -65,11 +66,14 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
       reasoning: "high",
       capabilities: { localToolsEnabled: false, proAvailable: false },
       prepare: async () => ({ text: "inspect", images: [], release: () => { released = true; } }),
-      onReasoningSummary: text => reasoning.push(text),
+      onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
     });
     expect(result).toBe("done");
-    expect(reasoning).toEqual(["Reading project"]);
+    expect(reasoning).toEqual([
+      { text: "Reading project", continuation: false },
+      { text: " files", continuation: true },
+    ]);
     expect(deltas).toEqual(["done"]);
     expect(released).toBe(true);
   } finally {
