@@ -89,6 +89,40 @@ test("assigns prior assistant output to the model and never attributes Codex con
   expect(compiled.text).toContain("do not attribute, quote, summarize, or otherwise mention them");
 });
 
+test("a long task keeps the newest images and drops the overflow instead of failing", () => {
+  const image = (marker: string) => ({
+    type: "image" as const,
+    imageUrl: `data:image/png;base64,${marker}`,
+  });
+  const markers = Array.from({ length: 13 }, (_unused, index) => `IMG${index + 1}`);
+  const replayed: CodexParsedRequest = {
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: {
+      systemPrompt: ["preserve-system"],
+      messages: markers.map((marker, index) => ({
+        role: "user" as const,
+        content: [{ type: "text" as const, text: `step ${index + 1}` }, image(marker)],
+        timestamp: index + 1,
+      })),
+    },
+    stream: true,
+    options: { reasoning: "high" },
+  };
+
+  const compiled = compileChatGptWebPrompt(
+    replayed,
+    { localToolsEnabled: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+
+  expect(compiled.images.map(entry => entry.imageUrl)).toEqual(
+    markers.slice(-10).map(marker => `data:image/png;base64,${marker}`),
+  );
+  expect(compiled.text).toContain("older image not attached");
+  expect(compiled.text).toContain("step 1");
+  expect(compiled.text).toContain("step 13");
+});
+
 test("the replayed context never carries a finished turn's broker handles", () => {
   const staleToken = "turn_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   const staleBinding = "binding_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";

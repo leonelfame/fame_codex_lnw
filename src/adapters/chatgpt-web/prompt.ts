@@ -42,17 +42,50 @@ export function withoutRetiredTurnHandles(contextJson: string): string {
   return contextJson.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`);
 }
 
-function inputContent(content: string | CodexContentPart[], images: ChatGptWebPromptImage[]): unknown {
+/** ChatGPT accepts at most this many attachments on one message. */
+export const CHATGPT_MAX_INPUT_IMAGES = 10;
+
+const DROPPED_IMAGE_NOTE =
+  `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
+
+/**
+ * Every turn opens a fresh Temporary Chat, so ChatGPT keeps nothing from the previous one: an image
+ * the task still reasons about has to be re-attached on each turn or it stops existing for the
+ * model. Carrying the conversation's images forward is therefore the contract, not a leak - the
+ * only bound is ChatGPT's per-message limit, and the overflow is dropped from the oldest end so the
+ * images the task is working on survive.
+ */
+interface ImageBudget {
+  seen: number;
+  dropped: number;
+}
+
+function inputContent(
+  content: string | CodexContentPart[],
+  images: ChatGptWebPromptImage[],
+  budget: ImageBudget,
+): unknown {
   if (typeof content === "string") return content;
   if (!content.some(part => part.type === "image")) {
     return content.filter(part => part.type === "text").map(part => part.text).join("\n");
   }
   return content.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
+    budget.seen += 1;
+    if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
     const ref = `codex-input-image-${images.length + 1}`;
     images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
     return { type: "image_attachment", attachment_ref: ref, ...(part.detail ? { detail: part.detail } : {}) };
   });
+}
+
+export function countChatGptContextImages(messages: readonly CodexMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    if (message.role === "assistant" || typeof message.content === "string") continue;
+    for (const part of message.content) if (part.type === "image") total += 1;
+  }
+  return total;
 }
 
 function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
@@ -63,18 +96,22 @@ function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
   });
 }
 
-function messageEnvelope(message: CodexMessage, images: ChatGptWebPromptImage[]): Record<string, unknown> {
+function messageEnvelope(
+  message: CodexMessage,
+  images: ChatGptWebPromptImage[],
+  budget: ImageBudget,
+): Record<string, unknown> {
   if (message.role === "toolResult") {
     return {
       role: "tool_result",
       tool_call_id: message.toolCallId,
       tool_name: message.toolName,
       is_error: message.isError,
-      content: inputContent(message.content, images),
+      content: inputContent(message.content, images, budget),
     };
   }
   if (message.role === "assistant") return { role: "assistant", content: assistantContent(message.content) };
-  return { role: message.role, content: inputContent(message.content, images) };
+  return { role: message.role, content: inputContent(message.content, images, budget) };
 }
 
 export function chatGptReadOnlyContextWarning(
@@ -107,7 +144,11 @@ export function compileChatGptWebPrompt(
     throw new Error("A read-only ChatGPT Web effort must not receive a local-tool capability token");
   }
   const images: ChatGptWebPromptImage[] = [];
-  const messages = parsed.context.messages.map(message => messageEnvelope(message, images));
+  const budget: ImageBudget = {
+    seen: 0,
+    dropped: Math.max(0, countChatGptContextImages(parsed.context.messages) - CHATGPT_MAX_INPUT_IMAGES),
+  };
+  const messages = parsed.context.messages.map(message => messageEnvelope(message, images, budget));
   const system = parsed.context.systemPrompt ?? [];
   const envelope = {
     version: 3,
