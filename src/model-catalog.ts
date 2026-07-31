@@ -8,6 +8,11 @@ import {
 
 type JsonObject = Record<string, unknown>;
 
+/** ChatGPT Web task history is bounded independently from native Codex model configuration. */
+export const CHATGPT_WEB_CONTEXT_WINDOW = 256_000;
+/** Leave enough room for Codex to submit and receive the checkpoint summary before the hard cap. */
+export const CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CHATGPT_WEB_CONTEXT_WINDOW * 0.9);
+
 function object(value: unknown, label: string): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be a JSON object`);
@@ -73,17 +78,17 @@ export function buildChatGptWebModel(
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
+    context_window: CHATGPT_WEB_CONTEXT_WINDOW,
+    max_context_window: CHATGPT_WEB_CONTEXT_WINDOW,
+    auto_compact_token_limit: CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
     // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],
     default_service_tier: null,
   };
-  // The browser product owns its context and performs its own internal compaction. Advertising the
-  // native template's context boundary makes Codex launch a second remote-compaction turn, which
-  // cannot preserve the in-flight ChatGPT browser/MCP response.
-  delete model.context_window;
-  delete model.max_context_window;
-  delete model.auto_compact_token_limit;
+  // A native template's compaction hash describes OpenAI's native model contract, not this routed
+  // browser model. The explicit Web window above is owned by this adapter and never copied back to
+  // native models or the user's top-level model_context_window setting.
   delete model.comp_hash;
   delete model.availability_nux;
   return model;

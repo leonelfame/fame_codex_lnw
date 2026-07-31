@@ -91,6 +91,17 @@ test("closing the launcher follows the persisted background-runtime preference",
   assert.match(i18nSource, /keepRunningOnClose: "Keep server running when window closes"/);
 });
 
+test("settings expose a persistent fail-closed Codex bridge switch and status indicator", () => {
+  assert.match(appSource, /api!\.setBridgeEnabled\(enabled\)/);
+  assert.match(appSource, /snapshot\.state\.bridgeEnabled \? "success" : "error"/);
+  assert.match(appSource, /body=\{copy\.bridgeRouteBody\} label=\{copy\.bridgeRoute\}/);
+  assert.match(styles, /\.action-dot\.is-success\s*\{[^}]*background:\s*var\(--green-300\)/s);
+  assert.match(styles, /\.action-dot\.is-error\s*\{[^}]*background:\s*var\(--red-300\)/s);
+  assert.match(electronMain, /runtimeHost\.setBridgeEnabled\(enabled === true\)/);
+  assert.match(electronMain, /codexRestartRequired:\s*true/);
+  assert.match(i18nSource, /Turning it off restores your previous model route without deleting setup or saved credentials/);
+});
+
 test("settings use a dark custom language menu and quiet native scrollbars", () => {
   assert.doesNotMatch(appSource, /<select/);
   assert.match(appSource, /className="language-menu-panel"/);

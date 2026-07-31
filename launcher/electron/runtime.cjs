@@ -93,6 +93,28 @@ function regularFileChanged(snapshot, platform = process.platform) {
   return !fs.readFileSync(snapshot.path).equals(snapshot.data);
 }
 
+function parseBridgeRouteResult(stdout, { expectedActive, requireInstalled = false } = {}) {
+  let result;
+  try {
+    result = JSON.parse(stdout);
+  } catch {
+    throw new Error("Codex bridge route command returned invalid JSON");
+  }
+  if (typeof result?.active !== "boolean") {
+    throw new Error("Codex bridge route command did not report its active state");
+  }
+  if (requireInstalled && typeof result.installed !== "boolean") {
+    throw new Error("Codex bridge route status did not report whether the integration is installed");
+  }
+  if (Array.isArray(result.errors) && result.errors.length > 0) {
+    throw new Error(`Codex bridge route is inconsistent: ${result.errors.join("; ")}`);
+  }
+  if (typeof expectedActive === "boolean" && result.active !== expectedActive) {
+    throw new Error(`Codex bridge route remained ${result.active ? "connected" : "disconnected"}`);
+  }
+  return result;
+}
+
 class RuntimeHost {
   constructor({
     app,
@@ -485,6 +507,80 @@ class RuntimeHost {
         ok: false,
         checks: [{ id: "runtime", status: "error", message: error instanceof Error ? error.message : String(error) }],
       };
+    }
+  }
+
+  async bridgeStatus(operationName = "bridge-status") {
+    const result = await this.run(operationName, ["route", "status"], {
+      embedded: true,
+      message: "Checking Codex bridge route",
+      successMessage: "Codex bridge route checked",
+      timeoutMs: 15_000,
+    });
+    return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
+  }
+
+  async setBridgeEnabled(enabled) {
+    const desired = enabled === true;
+    const name = desired ? "bridge-connect" : "bridge-disconnect";
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    this.lifecycleOperation = name;
+    try {
+      const current = await this.bridgeStatus(name);
+      if (!current.installed) throw new Error("Install the Codex integration before changing the bridge route");
+      if (desired) {
+        const runtime = await this.supervisor.startIfConfigured();
+        if (runtime.status !== "ready") {
+          throw new Error(`Local runtime is ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
+        }
+        if (current.active) return current;
+        try {
+          const connected = await this.run(name, ["route", "connect"], {
+            embedded: true,
+            message: "Connecting Codex to the launcher",
+            successMessage: "Codex bridge connected",
+            timeoutMs: 15_000,
+          });
+          return parseBridgeRouteResult(connected.stdout, { expectedActive: true });
+        } catch (error) {
+          let cleanupError;
+          try { await this.supervisor.stopForSetup(); } catch (caught) { cleanupError = caught; }
+          if (!cleanupError) throw error;
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}; stopping the unused runtime also failed:`
+            + ` ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
+        }
+      }
+
+      await this.supervisor.stopForSetup();
+      if (!current.active) return current;
+      try {
+        const disconnected = await this.run(name, ["route", "disconnect"], {
+          embedded: true,
+          message: "Restoring the previous Codex route",
+          successMessage: "Codex bridge disconnected",
+          timeoutMs: 15_000,
+        });
+        return parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
+      } catch (error) {
+        let recoveryError;
+        try {
+          const runtime = await this.supervisor.startIfConfigured();
+          if (runtime.status !== "ready") {
+            throw new Error(`runtime recovery returned ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
+          }
+        } catch (caught) {
+          recoveryError = caught;
+        }
+        if (!recoveryError) throw error;
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; restoring the previous runtime also failed:`
+          + ` ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+        );
+      }
+    } finally {
+      this.lifecycleOperation = null;
     }
   }
 

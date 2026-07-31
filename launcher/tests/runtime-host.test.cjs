@@ -87,6 +87,82 @@ test("mutating launcher operations are serialized before lifecycle changes begin
   assert.equal(fixture.invocation(), undefined);
 });
 
+function bridgeFixture({ active }) {
+  const calls = [];
+  const supervisor = {
+    readConfig: () => ({ mode: "browser-only" }),
+    readSetupConfig: () => ({ mode: "browser-only" }),
+    startIfConfigured: async () => {
+      calls.push("runtime:start");
+      return { status: "ready" };
+    },
+    stopForSetup: async () => {
+      calls.push("runtime:stop");
+      return { status: "stopped" };
+    },
+  };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-bridge-test") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor,
+  });
+  host.run = async (_name, args) => {
+    const action = args.join(" ");
+    calls.push(action);
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: true, active, errors: [] }) };
+    }
+    if (action === "route connect") return { stdout: JSON.stringify({ changed: true, active: true }) };
+    if (action === "route disconnect") return { stdout: JSON.stringify({ changed: true, active: false }) };
+    throw new Error(`Unexpected command: ${action}`);
+  };
+  return { calls, host, supervisor };
+}
+
+test("bridge connection starts a healthy runtime before routing Codex to it", async () => {
+  const fixture = bridgeFixture({ active: false });
+  const result = await fixture.host.setBridgeEnabled(true);
+  assert.equal(result.active, true);
+  assert.deepEqual(fixture.calls, ["route status", "runtime:start", "route connect"]);
+});
+
+test("bridge disconnection proves idleness and stops the runtime before restoring the prior route", async () => {
+  const fixture = bridgeFixture({ active: true });
+  const result = await fixture.host.setBridgeEnabled(false);
+  assert.equal(result.active, false);
+  assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect"]);
+});
+
+test("bridge connection rejects a route command that did not reach the requested state", async () => {
+  const fixture = bridgeFixture({ active: false });
+  fixture.host.run = async (_name, args) => {
+    const action = args.join(" ");
+    fixture.calls.push(action);
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: true, active: false, errors: [] }) };
+    }
+    return { stdout: JSON.stringify({ changed: false, active: false }) };
+  };
+  await assert.rejects(fixture.host.setBridgeEnabled(true), /remained disconnected/);
+  assert.deepEqual(fixture.calls, ["route status", "runtime:start", "route connect", "runtime:stop"]);
+});
+
+test("bridge disconnection restarts the existing runtime if restoring the prior route fails", async () => {
+  const fixture = bridgeFixture({ active: true });
+  fixture.host.run = async (_name, args) => {
+    const action = args.join(" ");
+    fixture.calls.push(action);
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: true, active: true, errors: [] }) };
+    }
+    throw new Error("synthetic route restore failure");
+  };
+  await assert.rejects(fixture.host.setBridgeEnabled(false), /synthetic route restore failure/);
+  assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect", "runtime:start"]);
+});
+
 test("connector verification uses the configured full-mode connector name", () => {
   const full = hostFor({ mode: "full", appName: "My Codex Connector" });
   assert.equal(full.host.mcpConnectorName(), "My Codex Connector");

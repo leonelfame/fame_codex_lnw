@@ -406,6 +406,17 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:doctor", () => runtimeHost.doctor());
   handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
+  handle("launcher:bridge-enabled", async (_event, enabled) => {
+    const result = await runtimeHost.setBridgeEnabled(enabled === true);
+    const state = stateStore.update({
+      bridgeEnabled: result.active,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
+    if (result.active) startCatalogVerificationMonitor({ logger, stateStore });
+    else stopCatalogVerificationMonitor();
+    return state;
+  });
   handle("launcher:uninstall-integration", async () => {
     const language = stateStore.read().language;
     const chinese = language === "zh-CN";
@@ -431,6 +442,7 @@ function registerIpc({ logger, stateStore }) {
     }
     const state = stateStore.update({
       coreSetupComplete: false,
+      bridgeEnabled: false,
       codexCatalogVerified: false,
       mcpSetupComplete: false,
       mcpRuntimeInstalled: false,
@@ -449,6 +461,7 @@ function registerIpc({ logger, stateStore }) {
     }
     const result = await runtimeHost.setupCore();
     stateStore.update({
+      bridgeEnabled: true,
       coreSetupComplete: true,
       codexCatalogVerified: false,
       codexRestartRequired: true,
@@ -678,7 +691,28 @@ async function start() {
     app.quit();
     return;
   }
-  void runtimeSupervisor.startIfConfigured().then((runtime) => {
+  void (async () => {
+    try {
+      const route = await runtimeHost.bridgeStatus();
+      if (route.installed) {
+        const current = stateStore.read();
+        if (current.bridgeEnabled !== route.active) {
+          const state = stateStore.update({ bridgeEnabled: route.active });
+          send("launcher:state-changed", state);
+        }
+        if (!route.active) return { status: "bridge-disabled" };
+      }
+    } catch (error) {
+      logger.warn("bridge.route_status_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return runtimeSupervisor.startIfConfigured();
+  })().then((runtime) => {
+    if (runtime.status === "bridge-disabled") {
+      stopCatalogVerificationMonitor();
+      return;
+    }
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();

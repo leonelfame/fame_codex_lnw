@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
-import { augmentNativeModelCatalog } from "../src/model-catalog";
+import {
+  augmentNativeModelCatalog,
+  CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
+  CHATGPT_WEB_CONTEXT_WINDOW,
+} from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
   return {
@@ -58,13 +62,13 @@ describe("native /models augmentation", () => {
         tool_mode: route.requiresPro ? null : "code_mode_only",
         default_reasoning_level: route.codexEffort,
         supported_reasoning_levels: [{ effort: route.codexEffort, description: route.displayName }],
+        context_window: CHATGPT_WEB_CONTEXT_WINDOW,
+        max_context_window: CHATGPT_WEB_CONTEXT_WINDOW,
+        auto_compact_token_limit: CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
         additional_speed_tiers: [],
         service_tiers: [],
         default_service_tier: null,
       });
-      expect(model).not.toHaveProperty("context_window");
-      expect(model).not.toHaveProperty("max_context_window");
-      expect(model).not.toHaveProperty("auto_compact_token_limit");
       expect(model).not.toHaveProperty("comp_hash");
     }
   });
@@ -107,6 +111,11 @@ describe("native /models augmentation", () => {
       { ...originalModels[2], max_context_window: 371_851 },
     ]);
     expect(models[1]!.context_window).toBe(300_000);
+    for (const model of models.slice(3)) {
+      expect(model.context_window).toBe(CHATGPT_WEB_CONTEXT_WINDOW);
+      expect(model.max_context_window).toBe(CHATGPT_WEB_CONTEXT_WINDOW);
+      expect(model.auto_compact_token_limit).toBe(CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT);
+    }
   });
 
   test("never lowers a native window that already exceeds the Codex context override", () => {

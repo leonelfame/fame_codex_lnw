@@ -454,7 +454,15 @@ function LauncherShell({
             </nav>
 
             <div className="sidebar-footer">
-              <SidebarItem active={surface === "settings"} icon="settings" label={copy.settings} onClick={() => navigateSurface("settings")} />
+              <SidebarItem
+                active={surface === "settings"}
+                badge={snapshot.state.coreSetupComplete
+                  ? <ActionDot tone={snapshot.state.bridgeEnabled ? "success" : "error"} />
+                  : null}
+                icon="settings"
+                label={copy.settings}
+                onClick={() => navigateSurface("settings")}
+              />
             </div>
           </div>
         </div>
@@ -1131,6 +1139,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setBridgeEnabled = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setBridgeEnabled(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const uninstallIntegration = async () => {
     setBusy(true);
     setError(null);
@@ -1157,6 +1176,13 @@ function SettingsSurface({
             onChange={(checked) => void api!.setAutostart(checked)
               .then((result) => updateState(result.state))
               .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.bridgeRouteBody} label={copy.bridgeRoute}>
+          <Switch
+            checked={snapshot.state.bridgeEnabled}
+            disabled={busy || snapshot.state.coreSetupComplete !== true}
+            onChange={(checked) => void setBridgeEnabled(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
@@ -1460,11 +1486,20 @@ function IconButton({
   );
 }
 
-function Switch({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+function Switch({
+  checked,
+  disabled = false,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
   return (
     <button
       aria-checked={checked}
       className={`switch${checked ? " is-on" : ""}`}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       role="switch"
       type="button"
@@ -1535,7 +1570,7 @@ function StateDot({ state }: { state: "idle" | "ready" | "busy" | "error" }) {
   return <i aria-hidden="true" className={`state-dot is-${state}`} />;
 }
 
-function ActionDot({ pulse = false, tone }: { pulse?: boolean; tone: "required" | "optional" | "error" }) {
+function ActionDot({ pulse = false, tone }: { pulse?: boolean; tone: "required" | "optional" | "success" | "error" }) {
   return <i aria-hidden="true" className={`action-dot is-${tone}${pulse ? " is-pulse" : ""}`} />;
 }
 

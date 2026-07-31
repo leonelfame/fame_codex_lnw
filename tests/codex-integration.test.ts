@@ -3,10 +3,13 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  activateCodexIntegration,
+  deactivateCodexIntegration,
   getCodexHome,
   getCodexJournalPath,
   getCodexModelsCachePath,
   installCodexIntegration,
+  inspectCodexIntegration,
   preflightCodexIntegration,
   readCodexModelContextOverride,
   uninstallCodexIntegration,
@@ -59,7 +62,7 @@ describe("reversible native Codex route integration", () => {
 
     const journal = installCodexIntegration(defaultConfig("browser-only"));
     const installed = readFileSync(configPath, "utf8");
-    expect(journal.version).toBe(3);
+    expect(journal.version).toBe(4);
     expect(installed).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
     expect(installed).not.toMatch(/^\s*model_provider\s*=/m);
     expect(installed).not.toMatch(/^\s*model_catalog_json\s*=/m);
@@ -127,6 +130,88 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toContain('openai_base_url = "http://127.0.0.1:17842/v1"');
     uninstallCodexIntegration();
     expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5.6-sol"\n');
+  });
+
+  test("disconnects and reconnects the bridge without losing the prior route or journal", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\napproval_policy = "never"\nopenai_base_url = "https://native.example/v1"\n';
+    writeFileSync(configPath, original);
+
+    installCodexIntegration(defaultConfig("browser-only"), { replaceExistingRoute: true });
+    expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: false });
+    expect(deactivateCodexIntegration()).toEqual({ changed: false, active: false });
+
+    expect(activateCodexIntegration()).toEqual({ changed: true, active: true });
+    const reconnected = readFileSync(configPath, "utf8");
+    expect(reconnected).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
+    expect(reconnected).toContain('approval_policy = "never"');
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: true });
+    expect(activateCodexIntegration()).toEqual({ changed: false, active: true });
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  test("keeps a disconnected bridge disabled across process-style journal reloads", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+    deactivateCodexIntegration();
+
+    expect(JSON.parse(readFileSync(getCodexJournalPath(), "utf8"))).toMatchObject({
+      version: 4,
+      active: false,
+    });
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: false, errors: [] });
+    expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5.6-sol"\n');
+  });
+
+  test("upgrades an existing v3 route journal when it is disconnected for the first time", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+    installCodexIntegration(defaultConfig("browser-only"));
+    const previous = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
+    delete previous.active;
+    previous.version = 3;
+    writeFileSync(getCodexJournalPath(), `${JSON.stringify(previous, null, 2)}\n`);
+
+    expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(JSON.parse(readFileSync(getCodexJournalPath(), "utf8"))).toMatchObject({
+      version: 4,
+      active: false,
+    });
+  });
+
+  test("fails closed when the native route changes while the bridge is disconnected", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+    deactivateCodexIntegration();
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\nopenai_base_url = "https://newer.example/v1"\n');
+
+    expect(() => activateCodexIntegration()).toThrow("changed while the bridge was disconnected");
+    expect(readFileSync(configPath, "utf8")).toContain("https://newer.example/v1");
+  });
+
+  test("uninstalls cleanly while the bridge is disconnected", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+    installCodexIntegration(defaultConfig("browser-only"));
+    deactivateCodexIntegration();
+
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(inspectCodexIntegration()).toMatchObject({ installed: false, active: false });
   });
 
   test("does not apply one application home's journal to a different Codex home", () => {

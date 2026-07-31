@@ -57,6 +57,21 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
 });
 
+test("compaction prompts are isolated summarization turns without local or native tool instructions", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  const compiled = compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, proAvailable: true },
+  );
+
+  expect(compiled.text).toContain("This is a Codex history-compaction checkpoint, not a normal task turn.");
+  expect(compiled.text).toContain("Produce the requested checkpoint summary now without calling tools.");
+  expect(compiled.text).not.toContain("codex_bind_turn");
+  expect(compiled.text).not.toContain("web search, browsing, research");
+  expect(compiled.text).not.toContain("missing local-computer bridge");
+});
+
 test("assigns prior assistant output to the model and never attributes Codex context to the human", () => {
   const attributed = request("max");
   attributed.context.messages = [

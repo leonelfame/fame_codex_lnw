@@ -7,7 +7,12 @@ import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
 import { getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
-import { uninstallCodexIntegration } from "./codex-integration";
+import {
+  activateCodexIntegration,
+  deactivateCodexIntegration,
+  inspectCodexIntegration,
+  uninstallCodexIntegration,
+} from "./codex-integration";
 import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
@@ -27,6 +32,7 @@ Usage:
   codex-chatgpt-web setup --full --tunnel-id ID --runtime-key-file PATH [options]
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
+  codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web browser check
   codex-chatgpt-web serve
   codex-chatgpt-web mcp [--broker-socket PATH]
@@ -179,6 +185,28 @@ async function doctorCommand(args: string[]): Promise<void> {
   if (!report.ok) process.exitCode = 1;
 }
 
+async function routeCommand(args: string[]): Promise<void> {
+  const action = args.shift() ?? "status";
+  assertNoArgs(args);
+  const result = action === "status"
+    ? (() => {
+        const status = inspectCodexIntegration();
+        return {
+          installed: status.installed,
+          active: status.active,
+          ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
+          errors: status.errors,
+        };
+      })()
+    : action === "connect"
+      ? activateCodexIntegration()
+      : action === "disconnect"
+        ? deactivateCodexIntegration()
+        : undefined;
+  if (!result) throw new Error(`Unknown route action: ${action}`);
+  stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
 async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
@@ -312,6 +340,7 @@ async function main(): Promise<void> {
     const result = await loginToChatGpt(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
   } else if (command === "doctor" || command === "status") await doctorCommand(args);
+  else if (command === "route") await routeCommand(args);
   else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);

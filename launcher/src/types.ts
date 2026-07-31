@@ -8,6 +8,7 @@ export interface LauncherState {
   githubOpened: boolean;
   xOpened: boolean;
   autoStart: boolean;
+  bridgeEnabled: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
   sidebarOpen: boolean;
@@ -96,6 +97,7 @@ export interface LauncherApi {
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
+  setBridgeEnabled(enabled: boolean): Promise<LauncherState>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   setupMcp(input: {

@@ -170,7 +170,13 @@ export function compileChatGptWebPrompt(
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
     `If ChatGPT internally compacts this response, immediately emit the exact standalone visible status ${CHATGPT_INTERNAL_COMPACTION_MARKER} once, then continue the same task. Never include that transport marker in the final answer.`,
   ];
-  const transportContract = mode.localTools
+  const transportContract = parsed._compactionRequest
+    ? [
+      "This is a Codex history-compaction checkpoint, not a normal task turn.",
+      "Do not call local or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
+      "Return only the checkpoint summary that the next model needs to resume the task.",
+    ]
+    : mode.localTools
     ? [
       "For local files, commands, processes, images, user interaction, and configured MCP/apps, use the attached Codex Native plugin inside this same response.",
       `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}. This bind is mandatory on every response, even when the request appears not to need a local operation.`,
@@ -189,7 +195,13 @@ export function compileChatGptWebPrompt(
       "Do not claim a new local inspection, command, edit, or verification unless it actually appears in the task history. If the latest request requires fresh local-computer access or a local mutation, state only that exact limitation instead of inventing success.",
       "Otherwise perform the full requested research, analysis, or synthesis with every capability actually available to you; do not stop at a plan or progress report.",
     ];
-  const transportResume = mode.localTools
+  const transportResume = parsed._compactionRequest
+    ? [
+      "<codex_transport_resume>",
+      "The task context is complete. Produce the requested checkpoint summary now without calling tools.",
+      "</codex_transport_resume>",
+    ]
+    : mode.localTools
     ? [
       "<codex_transport_resume>",
       `The task context is complete. Your first action now must be the actual Codex Native codex_bind_turn call with turn_token ${turnToken}; emit no commentary or answer before its real result.`,

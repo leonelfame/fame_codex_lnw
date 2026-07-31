@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
+import { CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT, CHATGPT_WEB_CONTEXT_WINDOW } from "../src/model-catalog";
 import { modelsRequest } from "../src/server";
 
 test("proxies official /models auth and query, then appends the fixed ChatGPT Web models", async () => {
@@ -28,7 +29,14 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   expect(upstream!.headers.get("authorization")).toBe("Bearer codex-oauth-token");
   expect(upstream!.headers.get("if-none-match")).toBeNull();
   expect(response.headers.get("etag")).not.toBe("native-etag");
-  const body = await response.json() as { models: Array<{ slug: string; max_context_window?: number }> };
+  const body = await response.json() as {
+    models: Array<{
+      slug: string;
+      context_window?: number;
+      max_context_window?: number;
+      auto_compact_token_limit?: number;
+    }>;
+  };
   expect(body.models.map(model => model.slug)).toEqual([
     "gpt-5.6-sol",
     "chatgpt-web/light",
@@ -38,4 +46,9 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
     "chatgpt-web/pro",
   ]);
   expect(body.models[0]!.max_context_window).toBe(371_851);
+  for (const model of body.models.slice(1)) {
+    expect(model.context_window).toBe(CHATGPT_WEB_CONTEXT_WINDOW);
+    expect(model.max_context_window).toBe(CHATGPT_WEB_CONTEXT_WINDOW);
+    expect(model.auto_compact_token_limit).toBe(CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT);
+  }
 });

@@ -237,6 +237,9 @@ describe("ChatGPT outer-native harness v3", () => {
       timestamp: Date.now(),
     });
     expect(chatGptTurnExecutionKey(first)).toBe(chatGptTurnExecutionKey(second));
+    const compact = structuredClone(first);
+    compact._compactionRequest = true;
+    expect(chatGptTurnExecutionKey(compact)).not.toBe(chatGptTurnExecutionKey(first));
     expect(() => chatGptTurnExecutionKey(parsed(environmentXml))).toThrow("requires native Codex turn_id metadata");
   });
 

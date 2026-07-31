@@ -457,6 +457,10 @@ code {
   background: var(--red-300);
 }
 
+.action-dot.is-success {
+  background: var(--green-300);
+}
+
 .action-dot.is-pulse {
   animation: statePulse 1.3s ease-in-out infinite;
 }
@@ -1548,6 +1552,11 @@ code {
 
 .switch.is-on span {
   transform: translateX(14px);
+}
+
+.switch:disabled {
+  cursor: default;
+  opacity: 0.42;
 }
 
 .diagnostic-row {

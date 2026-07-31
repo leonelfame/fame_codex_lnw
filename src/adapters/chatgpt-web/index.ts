@@ -281,7 +281,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 events.push(event);
                 emit(event);
               };
-              emitProContextWarning(parsed, capabilities, emitCaptured);
+              if (!parsed._compactionRequest) emitProContextWarning(parsed, capabilities, emitCaptured);
               const trace = session.runtime.trace.drain();
               reasoning = trace.map(event => event.text);
               emitTraceEvents(trace, emitCaptured);
@@ -336,7 +336,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            emitProContextWarning(parsed, capabilities, emitRound);
+            if (!parsed._compactionRequest) emitProContextWarning(parsed, capabilities, emitRound);
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken

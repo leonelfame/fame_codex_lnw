@@ -123,7 +123,11 @@ export type ChatGptTurnRuntime =
 export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
-  const payload = { threadId: identity.threadId, turnId: identity.turnId };
+  const payload = {
+    threadId: identity.threadId,
+    turnId: identity.turnId,
+    purpose: parsed._compactionRequest ? "compaction" : "response",
+  };
   return createHash("sha256").update(JSON.stringify({
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
