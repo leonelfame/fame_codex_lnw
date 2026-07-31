@@ -17,6 +17,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserSmokePassed: false,
       browserSmokeVersion: null,
@@ -27,6 +28,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
     store.update({
       language: "zh-CN",
       onboardingComplete: true,
+      keepRunningOnClose: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
     });
@@ -37,6 +39,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      keepRunningOnClose: false,
       showBrowserDuringTurns: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -84,6 +87,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserSmokePassed: false,
       browserSmokeVersion: null,

@@ -275,7 +275,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   window.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
-    if (process.platform === "darwin" && tray) window.hide();
+    if (stateStore.read().keepRunningOnClose && tray) window.hide();
     else void requestQuit();
   });
   window.on("closed", () => {
@@ -490,7 +490,9 @@ function registerIpc({ logger, stateStore }) {
     };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    if (key !== "showBrowserDuringTurns") throw new Error("Unknown preference");
+    if (key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
+      throw new Error("Unknown preference");
+    }
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));

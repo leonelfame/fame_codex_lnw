@@ -82,11 +82,13 @@ test("Windows chrome uses the available left edge and the branded application ic
   assert.match(electronMain, /icon:\s*APP_ICON_PATH/);
 });
 
-test("closing the launcher exits on Windows and Linux instead of silently hiding in the tray", () => {
+test("closing the launcher follows the persisted background-runtime preference", () => {
   assert.match(
     electronMain,
-    /if \(process\.platform === "darwin" && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
+    /if \(stateStore\.read\(\)\.keepRunningOnClose && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
   );
+  assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
+  assert.match(i18nSource, /keepRunningOnClose: "Keep server running when window closes"/);
 });
 
 test("settings use a dark custom language menu and quiet native scrollbars", () => {

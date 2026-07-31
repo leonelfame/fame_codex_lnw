@@ -1159,6 +1159,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
+          <Switch
+            checked={snapshot.state.keepRunningOnClose}
+            onChange={(checked) => void api!.setPreference("keepRunningOnClose", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}

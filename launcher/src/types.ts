@@ -8,6 +8,7 @@ export interface LauncherState {
   githubOpened: boolean;
   xOpened: boolean;
   autoStart: boolean;
+  keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
@@ -104,7 +105,7 @@ export interface LauncherApi {
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
-  setPreference(key: "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
+  setPreference(key: "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
