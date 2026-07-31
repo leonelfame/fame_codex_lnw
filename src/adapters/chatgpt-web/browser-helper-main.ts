@@ -3,6 +3,7 @@ import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
 import type { ChatGptWebCapabilities } from "./model";
+import { createProcessLineWriter } from "./process-line-writer";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 
 interface RunMessage {
@@ -34,12 +35,21 @@ interface VerifyMessage {
 
 type InputMessage = RunMessage | VerifyMessage | { type: "abort"; id: string } | { type: "shutdown" };
 
+let outputFailure: Error | undefined;
+const handleOutputFailure = (error: Error): void => {
+  if (outputFailure) return;
+  outputFailure = error;
+  void requestShutdown();
+};
+const protocolOutput = createProcessLineWriter(stdout, handleOutputFailure);
+const diagnosticOutput = createProcessLineWriter(stderr, handleOutputFailure);
+
 const writeProtocol = (message: unknown): void => {
-  stdout.write(`${JSON.stringify(message)}\n`);
+  protocolOutput.write(JSON.stringify(message));
 };
 
 const diagnostic = (...values: unknown[]): void => {
-  stderr.write(`${values.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" ")}\n`);
+  diagnosticOutput.write(values.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" "));
 };
 console.info = diagnostic;
 console.warn = diagnostic;
@@ -56,6 +66,8 @@ function requestShutdown(): Promise<void> {
     completeShutdown = resolveShutdown;
   });
   shuttingDown = true;
+  protocolOutput.close();
+  diagnosticOutput.close();
   for (const controller of abortControllers.values()) controller.abort();
   input.close();
   void closeChatGptBrowserWorkers().then(
