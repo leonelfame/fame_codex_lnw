@@ -44,6 +44,16 @@ export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 
+/**
+ * ChatGPT applies composer state asynchronously, and a fast host can reach the next step before the
+ * editor has taken the previous one. This is headroom for that, not a readiness check.
+ */
+export const CHATGPT_UI_SETTLE_MS = 250;
+
+const settleChatGptUi = (): Promise<void> => (
+  new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
+);
+
 const browserStageTimeouts = {
   browserPage: 60_000,
   navigation: 70_000,
@@ -477,6 +487,7 @@ export class ChatGptBrowserWorker {
     } catch {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
+    await settleChatGptUi();
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const menuVisible = await effortMenu.isVisible().catch(() => false);
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
@@ -647,6 +658,7 @@ export class ChatGptBrowserWorker {
       composer = await this.activeComposer(page);
       await composer.fill("");
       await composer.focus();
+      await settleChatGptUi();
       await composer.pressSequentially("@c", { delay: 25 });
       try {
         await appResult.waitFor({
@@ -954,6 +966,7 @@ export class ChatGptBrowserWorker {
         if (!await sendButton.isEnabled()) {
           throw new Error("ChatGPT send button is disabled after the complete prompt was attached");
         }
+        await settleChatGptUi();
         await sendButton.press("Enter");
         const evidence = await this.waitForSubmissionAccepted(
           page,

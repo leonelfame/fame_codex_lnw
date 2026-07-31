@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { closeTurnBrokers } from "../src/adapters/chatgpt-web/turn-broker";
-import { defaultConfig } from "../src/config";
+import { callTurnBroker, closeTurnBrokers } from "../src/adapters/chatgpt-web/turn-broker";
+import { defaultBrokerEndpoint, defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
 
 async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promise<void> {
@@ -135,18 +135,27 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
 
 test("a full-mode runtime exposes its broker endpoint before any turn registers", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-serve-"));
-  const config = {
-    ...defaultConfig("full"),
-    port: 0,
-    brokerSocketPath: join(root, "runtime", "turn-broker.sock"),
-  };
+  // The endpoint is a Unix socket on POSIX and a named pipe on Windows, so liveness is proven by
+  // the broker answering its own protocol, never by a path existing.
+  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
   const server = startServer(config);
   try {
-    const deadline = Date.now() + 2_000;
-    while (!existsSync(config.brokerSocketPath) && Date.now() < deadline) await Bun.sleep(5);
-    // An in-flight ChatGPT turn calls the bridge from a separate process; it must reach the broker
-    // itself rather than a missing path.
-    expect(existsSync(config.brokerSocketPath)).toBe(true);
+    const deadline = Date.now() + 5_000;
+    let message = "";
+    for (;;) {
+      try {
+        await callTurnBroker(config.brokerSocketPath, { method: "claim", token: "not-a-registered-turn" });
+        message = "";
+        break;
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      // An in-flight ChatGPT turn calls the bridge from a separate process; it must reach the
+      // broker itself rather than an endpoint that no longer exists.
+      if (!message.includes("unavailable") || Date.now() >= deadline) break;
+      await Bun.sleep(20);
+    }
+    expect(message).toContain("turn token is invalid");
   } finally {
     await server.stop(true);
     await closeTurnBrokers();
