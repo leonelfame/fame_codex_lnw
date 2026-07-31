@@ -6,16 +6,17 @@ import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
-test("explicit browser-turn cancellation aborts and removes every registered session", () => {
+test("explicit browser-turn cancellation aborts and removes every registered session", async () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
-  sessions.getOrCreate("turn-a", () => ({
+  const replayable = sessions.getOrCreate("turn-a", () => ({
     mode: "read-only",
-    browser: new Promise<string>(() => {}),
+    browser: Promise.resolve("done"),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
   }));
+  await replayable.browserOutcome;
   sessions.getOrCreate("turn-b", () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
@@ -24,7 +25,7 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
     cancel: () => { cancelled += 1; },
   }));
 
-  expect(sessions.activeCount()).toBe(2);
+  expect(sessions.activeCount()).toBe(1);
   expect(sessions.clear()).toBe(2);
   expect(cancelled).toBe(2);
   expect(sessions.activeCount()).toBe(0);
@@ -50,21 +51,31 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   sessions.clear();
 });
 
-test("a browser turn that can no longer finish stops pinning the active-turn count", async () => {
-  const sessions = new ChatGptTurnSessions(60_000, 256, 1);
+test("a starting turn reclaims the abandoned turn whose surface it takes over", () => {
+  const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
-  sessions.getOrCreate("stuck-turn", () => ({
-    mode: "read-only",
+  const runtime = () => ({
+    mode: "read-only" as const,
     browser: new Promise<string>(() => {}),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
-  }));
+  });
 
+  // Parked between tool batches: stopping the task leaves no request to abort.
+  sessions.getOrCreate("stopped-turn", runtime);
   expect(sessions.activeCount()).toBe(1);
-  await Bun.sleep(5);
-  expect(sessions.activeCount()).toBe(0);
+
+  sessions.getOrCreate("next-turn", runtime);
   expect(cancelled).toBe(1);
+  expect(sessions.activeCount()).toBe(1);
+
+  // Resuming the same turn is never a takeover.
+  sessions.getOrCreate("next-turn", () => {
+    throw new Error("an in-flight turn must be reused");
+  });
+  expect(cancelled).toBe(1);
+  sessions.clear();
 });
 
 test("settled replay sessions expire from their last use instead of their creation time", async () => {

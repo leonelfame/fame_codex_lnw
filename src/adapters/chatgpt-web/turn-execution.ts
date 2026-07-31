@@ -241,10 +241,6 @@ export class ChatGptTurnSessions {
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
-    // A browser turn carries its own deadline, so one still unsettled past this ceiling can never
-    // finish. Without an upper bound such a session pins the runtime's active-turn count forever
-    // and no lifecycle operation can prove idleness again.
-    private readonly maxActiveMs = 60 * 60_000,
   ) {}
 
   getOrCreate(key: string, start: () => ChatGptTurnRuntime): ChatGptTurnSession {
@@ -254,10 +250,25 @@ export class ChatGptTurnSessions {
       existing.touch();
       return existing;
     }
+    this.reclaimSupersededTurns();
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start());
     this.entries.set(key, session);
     return session;
+  }
+
+  /**
+   * The launcher owns a single ChatGPT surface, and a starting turn navigates it to its own
+   * Temporary Chat. Any turn still open there is destroyed by that navigation, so a turn parked
+   * between tool batches - with no request left to abort when the user stops the task - can never
+   * produce an outcome again.
+   */
+  private reclaimSupersededTurns(): void {
+    for (const [key, session] of this.entries) {
+      if (!session.isActive()) continue;
+      session.cancel();
+      this.entries.delete(key);
+    }
   }
 
   clear(): number {
@@ -275,11 +286,9 @@ export class ChatGptTurnSessions {
   }
 
   private prune(): void {
-    const now = Date.now();
-    const idleCutoff = now - this.ttlMs;
-    const stuckCutoff = now - this.maxActiveMs;
+    const cutoff = Date.now() - this.ttlMs;
     for (const [key, session] of this.entries) {
-      if (session.isActive() ? session.createdAt > stuckCutoff : session.lastUsedAt() >= idleCutoff) continue;
+      if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
       session.cancel();
       this.entries.delete(key);
     }
