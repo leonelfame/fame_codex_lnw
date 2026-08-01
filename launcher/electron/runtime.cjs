@@ -15,7 +15,7 @@ const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 
-function collect(stream, chunks, onLine) {
+function collect(stream, chunks, onLine, onError) {
   let buffered = "";
   let bytes = 0;
   stream.on("data", (chunk) => {
@@ -38,6 +38,7 @@ function collect(stream, chunks, onLine) {
     const line = buffered.trim();
     if (line) onLine(line);
   });
+  stream.on("error", (error) => onError?.(error));
 }
 
 function resolveUserPath(value) {
@@ -390,14 +391,18 @@ class RuntimeHost {
         this.activeChild = child;
         const stdout = [];
         const stderr = [];
+        const pipeErrors = [];
+        const recordPipeError = (stream) => (error) => {
+          pipeErrors.push(`${name} ${stream} pipe failed: ${error instanceof Error ? error.message : String(error)}`);
+        };
         collect(child.stdout, stdout, (line) => {
           this.logger.info("runtime.stdout", { operation: name, line });
           this.publishOperation?.({ name, status: "running", message: redactText(line) });
-        });
+        }, recordPipeError("stdout"));
         collect(child.stderr, stderr, (line) => {
           this.logger.warn("runtime.stderr", { operation: name, line });
           this.publishOperation?.({ name, status: "running", message: redactText(line) });
-        });
+        }, recordPipeError("stderr"));
         let settled = false;
         let timedOut = null;
         let terminationTimeout = null;
@@ -468,6 +473,10 @@ class RuntimeHost {
                 `${timedOut.message}; final process-group cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
               ));
             }
+            return;
+          }
+          if (pipeErrors.length > 0) {
+            reject(new Error(pipeErrors.join("; ")));
             return;
           }
           resolve({

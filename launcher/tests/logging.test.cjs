@@ -3,7 +3,13 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createLogger, registerLoggedIpc, sanitize } = require("../electron/logging.cjs");
+const { PassThrough } = require("node:stream");
+const {
+  createLogger,
+  installProcessDiagnosticGuards,
+  registerLoggedIpc,
+  sanitize,
+} = require("../electron/logging.cjs");
 
 test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", () => {
   assert.deepEqual(sanitize({
@@ -53,6 +59,20 @@ test("launcher activity restores valid records from the previous process", () =>
     const logger = createLogger({ filePath });
     assert.deepEqual(logger.recent().map((record) => record.event), ["previous"]);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a closed Windows diagnostic pipe is recorded without becoming an uncaught process error", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-process-pipe-"));
+  const filePath = path.join(root, "process-stream-errors.log");
+  const stream = new PassThrough();
+  try {
+    installProcessDiagnosticGuards({ filePath, streams: [stream] });
+    stream.emit("error", Object.assign(new Error("write EOF"), { code: "EOF" }));
+    assert.match(fs.readFileSync(filePath, "utf8"), /write EOF/);
+  } finally {
+    stream.destroy();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

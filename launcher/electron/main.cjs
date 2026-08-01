@@ -19,7 +19,11 @@ const {
 const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
-const { createLogger, registerLoggedIpc } = require("./logging.cjs");
+const {
+  createLogger,
+  installProcessDiagnosticGuards,
+  registerLoggedIpc,
+} = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
@@ -64,6 +68,9 @@ const launcherUserData = configuredUserData
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
+installProcessDiagnosticGuards({
+  filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
+});
 
 let mainWindow = null;
 let browserHost = null;
@@ -783,6 +790,5 @@ void start().catch((error) => {
   try {
     dialog.showErrorBox("Codex Web GPT could not start", message);
   } catch {}
-  console.error(error);
   app.exit(1);
 });

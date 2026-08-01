@@ -97,6 +97,26 @@ function createLogger({ filePath, publish }) {
   };
 }
 
+function installProcessDiagnosticGuards({ filePath, streams = [process.stdout, process.stderr] }) {
+  const guarded = new Set();
+  for (const stream of streams) {
+    if (!stream || typeof stream.on !== "function" || guarded.has(stream)) continue;
+    guarded.add(stream);
+    stream.on("error", (error) => {
+      try {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+        fs.appendFileSync(
+          filePath,
+          `${new Date().toISOString()} ${error instanceof Error ? error.stack || error.message : String(error)}\n`,
+          { mode: 0o600 },
+        );
+      } catch {
+        // A lost diagnostic sink must not become a second process error.
+      }
+    });
+  }
+}
+
 function registerLoggedIpc(ipcMain, logger, channel, handler) {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
@@ -111,4 +131,11 @@ function registerLoggedIpc(ipcMain, logger, channel, handler) {
   });
 }
 
-module.exports = { createLogger, readRecent, redactText, registerLoggedIpc, sanitize };
+module.exports = {
+  createLogger,
+  installProcessDiagnosticGuards,
+  readRecent,
+  redactText,
+  registerLoggedIpc,
+  sanitize,
+};

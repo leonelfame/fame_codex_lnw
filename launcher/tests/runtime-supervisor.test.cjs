@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -27,6 +28,22 @@ async function freePort() {
       server.close((error) => error ? reject(error) : resolve(address.port));
     });
   });
+}
+
+async function localHealthServer(statusForPath = () => 200) {
+  const server = http.createServer((request, response) => {
+    response.writeHead(statusForPath(request.url || "/"));
+    response.end("ok");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
+  };
 }
 
 function launcherConfig(descriptorPath, overrides = {}) {
@@ -326,6 +343,80 @@ test("tunnel readiness preserves a native managed process identity when one is r
       detail: "state=ready; process_running=true; healthy=true; ready=true; health_url=present; pid=123456779",
     });
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("steady tunnel monitoring uses the runtime local health endpoints without a control-plane status lookup", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-local-tunnel-health-"));
+  const health = await localHealthServer();
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  supervisor.tunnel = { pid: process.pid, managed: true };
+  supervisor.tunnelHealthBaseUrl = health.baseUrl;
+  supervisor.readTunnelHealth = async () => {
+    throw new Error("control-plane lookup must not run for a healthy local runtime");
+  };
+  try {
+    const observation = await supervisor.observeTunnelForMonitor({ tunnel: {} });
+    assert.equal(observation.ready, true);
+    assert.equal(observation.statusKnown, true);
+    assert.match(observation.detail, /healthz returned HTTP 200/);
+    assert.match(observation.detail, /readyz returned HTTP 200/);
+  } finally {
+    await health.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unavailable local probe plus a stalled native status is unknown, not proof that the tunnel died", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-unknown-tunnel-health-"));
+  const port = await freePort();
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  supervisor.tunnelHealthBaseUrl = `http://127.0.0.1:${port}`;
+  supervisor.readTunnelHealth = async () => {
+    throw new Error("Tunnel health probe timed out after 5000ms");
+  };
+  try {
+    const observation = await supervisor.observeTunnelForMonitor({ tunnel: {} });
+    assert.equal(observation.ready, false);
+    assert.equal(observation.statusKnown, false);
+    assert.match(observation.detail, /native status unavailable/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit local readiness failure remains actionable tunnel evidence", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-degraded-tunnel-health-"));
+  const health = await localHealthServer(pathname => pathname === "/readyz" ? 503 : 200);
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  supervisor.tunnelHealthBaseUrl = health.baseUrl;
+  try {
+    const observation = await supervisor.readLocalTunnelHealth();
+    assert.equal(observation.ready, false);
+    assert.equal(observation.statusKnown, true);
+    assert.equal(observation.state, "degraded");
+    assert.match(observation.detail, /readyz returned HTTP 503/);
+  } finally {
+    await health.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

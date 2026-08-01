@@ -24,7 +24,7 @@ const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-function collectLines(stream, onLine) {
+function collectLines(stream, onLine, onError) {
   let buffered = "";
   stream.on("data", (chunk) => {
     buffered += chunk.toString("utf8");
@@ -44,6 +44,20 @@ function collectLines(stream, onLine) {
     const line = buffered.trim();
     if (line) onLine(line);
   });
+  stream.on("error", (error) => onError?.(error));
+}
+
+function loopbackHealthBaseURL(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:"
+      || !["127.0.0.1", "[::1]", "::1"].includes(parsed.hostname)
+      || !parsed.port) return null;
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return null;
+  }
 }
 
 function readJson(pathname) {
@@ -260,7 +274,9 @@ class RuntimeSupervisor {
     this.tunnelMonitorTimer = null;
     this.tunnelMonitorInFlight = false;
     this.tunnelMonitorFailures = 0;
+    this.tunnelMonitorObservationUnavailable = false;
     this.tunnelMonitorGeneration = 0;
+    this.tunnelHealthBaseUrl = null;
     this.recoveryTasks = new Set();
     this.expectedExits = new WeakSet();
     this.restartableChildren = new WeakSet();
@@ -391,10 +407,14 @@ class RuntimeSupervisor {
     collectLines(child.stdout, (line) => {
       this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
       this.logger.info(`runtime.${name}_stdout`, { line });
+    }, (error) => {
+      this.logger.warn(`runtime.${name}_stdout_unavailable`, { message: errorMessage(error) });
     });
     collectLines(child.stderr, (line) => {
       this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
       this.logger.warn(`runtime.${name}_stderr`, { line });
+    }, (error) => {
+      this.logger.warn(`runtime.${name}_stderr_unavailable`, { message: errorMessage(error) });
     });
     let terminalHandled = false;
     const handleTerminal = ({ code = null, signal = null, error = null }) => {
@@ -513,6 +533,8 @@ class RuntimeSupervisor {
     }
     try {
       const parsed = JSON.parse(result.output);
+      const healthBaseUrl = loopbackHealthBaseURL(parsed.health_url ?? parsed.healthUrl);
+      if (healthBaseUrl) this.tunnelHealthBaseUrl = healthBaseUrl;
       const pid = Number.isInteger(parsed.pid) && parsed.pid > 0
         ? parsed.pid
         : Number.isInteger(parsed.process?.pid) && parsed.process.pid > 0
@@ -571,8 +593,94 @@ class RuntimeSupervisor {
     }
   }
 
+  async probeTunnelEndpoint(pathname, timeoutMs = 2_000) {
+    if (!this.tunnelHealthBaseUrl) {
+      return { observed: false, ok: false, detail: "local tunnel health URL is not known" };
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${this.tunnelHealthBaseUrl}${pathname}`, {
+        method: "GET",
+        signal: controller.signal,
+      });
+      return {
+        observed: true,
+        ok: response.ok,
+        status: response.status,
+        detail: `${pathname} returned HTTP ${response.status}`,
+      };
+    } catch (error) {
+      return {
+        observed: false,
+        ok: false,
+        detail: `${pathname} could not be observed: ${errorMessage(error)}`,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async readLocalTunnelHealth() {
+    const [healthz, readyz] = await Promise.all([
+      this.probeTunnelEndpoint("/healthz"),
+      this.probeTunnelEndpoint("/readyz"),
+    ]);
+    const pid = Number.isInteger(this.tunnel?.pid) ? this.tunnel.pid : null;
+    if (pid && !processRunning(pid)) {
+      return {
+        ready: false,
+        pid,
+        state: "stopped",
+        processRunning: false,
+        healthy: false,
+        absent: false,
+        statusKnown: true,
+        detail: `managed tunnel process ${pid} is no longer running`,
+      };
+    }
+    const explicitlyUnhealthy = (healthz.observed && !healthz.ok)
+      || (readyz.observed && !readyz.ok);
+    const completelyObserved = healthz.observed && readyz.observed;
+    if (!explicitlyUnhealthy && !completelyObserved) {
+      return {
+        ready: false,
+        pid,
+        state: undefined,
+        processRunning: pid ? true : undefined,
+        healthy: undefined,
+        absent: false,
+        statusKnown: false,
+        detail: `${healthz.detail}; ${readyz.detail}`,
+      };
+    }
+    return {
+      ready: healthz.ok && readyz.ok,
+      pid,
+      state: healthz.ok && readyz.ok ? "ready" : "degraded",
+      processRunning: pid ? true : undefined,
+      healthy: healthz.ok,
+      absent: false,
+      statusKnown: true,
+      detail: `${healthz.detail}; ${readyz.detail}`,
+    };
+  }
+
+  async observeTunnelForMonitor(config) {
+    const local = await this.readLocalTunnelHealth();
+    if (local.statusKnown) return local;
+    try {
+      return await this.readTunnelHealth(config);
+    } catch (error) {
+      return {
+        ...local,
+        detail: `${local.detail}; native status unavailable: ${errorMessage(error)}`,
+      };
+    }
+  }
+
   async tunnelHealth(config) {
-    return (await this.readTunnelHealth(config)).ready;
+    return (await this.observeTunnelForMonitor(config)).ready;
   }
 
   async waitForKnownTunnelStatus(config, timeoutMs = 10_000) {
@@ -707,6 +815,7 @@ class RuntimeSupervisor {
   startTunnelMonitor(config) {
     this.stopTunnelMonitor();
     this.tunnelMonitorFailures = 0;
+    this.tunnelMonitorObservationUnavailable = false;
     const generation = this.tunnelMonitorGeneration;
     const recordFailure = (message) => {
       if (this.stopping || generation !== this.tunnelMonitorGeneration) return;
@@ -729,8 +838,23 @@ class RuntimeSupervisor {
         || this.tunnelMonitorInFlight
         || this.restartTimers.tunnel) return;
       this.tunnelMonitorInFlight = true;
-      void this.readTunnelHealth(config).then((health) => {
+      void this.observeTunnelForMonitor(config).then((health) => {
         if (this.stopping || generation !== this.tunnelMonitorGeneration) return;
+        if (!health.statusKnown) {
+          if (!this.tunnelMonitorObservationUnavailable) {
+            this.tunnelMonitorObservationUnavailable = true;
+            this.logger.warn("runtime.tunnel_monitor_observation_unavailable", {
+              message: health.detail,
+            });
+          }
+          return;
+        }
+        if (this.tunnelMonitorObservationUnavailable) {
+          this.tunnelMonitorObservationUnavailable = false;
+          this.logger.info("runtime.tunnel_monitor_observation_restored", {
+            message: health.detail,
+          });
+        }
         if (health.ready) {
           this.tunnelMonitorFailures = 0;
           if (this.tunnel?.pid !== health.pid) {
@@ -758,6 +882,7 @@ class RuntimeSupervisor {
     if (this.tunnelMonitorTimer) clearInterval(this.tunnelMonitorTimer);
     this.tunnelMonitorTimer = null;
     this.tunnelMonitorFailures = 0;
+    this.tunnelMonitorObservationUnavailable = false;
     this.tunnelMonitorGeneration += 1;
   }
 
@@ -1261,6 +1386,17 @@ class RuntimeSupervisor {
       }, timeoutMs);
       child.stdout.on("data", (chunk) => capture(stdout, chunk, "stdout"));
       child.stderr.on("data", (chunk) => capture(stderr, chunk, "stderr"));
+      const onOutputError = (stream) => (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        try {
+          terminateOwnedProcessTree(child);
+        } catch {}
+        reject(new Error(`${label} ${stream} pipe failed: ${errorMessage(error)}`));
+      };
+      child.stdout.once("error", onOutputError("stdout"));
+      child.stderr.once("error", onOutputError("stderr"));
       child.once("error", (error) => {
         if (settled) return;
         settled = true;

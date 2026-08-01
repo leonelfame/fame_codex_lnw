@@ -85,6 +85,12 @@ async function verifyConnectorWithBrowserHelper({ helper, descriptorPath, appNam
     child.stdin.on("error", (error) => finish(
       error instanceof Error ? error : new Error(String(error)),
     ));
+    child.stdout.on("error", (error) => finish(
+      error instanceof Error ? error : new Error(String(error)),
+    ));
+    child.stderr.on("error", (error) => finish(
+      error instanceof Error ? error : new Error(String(error)),
+    ));
     output.on("line", (line) => {
       let message;
       try { message = JSON.parse(line); }
