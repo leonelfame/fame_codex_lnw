@@ -59,7 +59,7 @@ describe("native /models augmentation", () => {
       expect(model).toMatchObject({
         slug: route.slug,
         display_name: route.displayName,
-        tool_mode: route.requiresPro ? null : "code_mode_only",
+        tool_mode: "code_mode_only",
         default_reasoning_level: route.codexEffort,
         supported_reasoning_levels: [{ effort: route.codexEffort, description: route.displayName }],
         context_window: CHATGPT_WEB_CONTEXT_WINDOW,
