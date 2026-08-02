@@ -161,6 +161,7 @@ test("concurrent login requests share one authentication operation", async () =>
       waits += 1;
       return await new Promise((resolve) => { resolveLogin = resolve; });
     },
+    activateHomeSurface() {},
     withManualOperation: async (_name, action) => await action(),
   };
   const first = BrowserHost.prototype.openLogin.call(fixture);
@@ -678,9 +679,11 @@ test("launcher session refresh resolves persisted authentication before setup ac
 
 test("manual browser operations disable background throttling until completion", async () => {
   const throttling = [];
+  const surfaces = [];
   const fixture = {
     activeTraceId: null,
     manualOperation: null,
+    activateHomeSurface: () => surfaces.push("home"),
     setState() {},
     view: {
       webContents: {
@@ -693,8 +696,58 @@ test("manual browser operations disable background throttling until completion",
   const result = await BrowserHost.prototype.withManualOperation.call(fixture, "hidden check", async () => "ok");
 
   assert.equal(result, "ok");
+  assert.deepEqual(surfaces, ["home"]);
   assert.deepEqual(throttling, [false, true]);
   assert.equal(fixture.manualOperation, null);
+});
+
+test("manual operations show the home surface without discarding retained task tabs", () => {
+  const events = [];
+  const taskTab = { id: "tab-ready", status: "ready" };
+  const fixture = {
+    selectedTabId: taskTab.id,
+    turnTabs: new Map([[taskTab.id, taskTab]]),
+    visible: true,
+    surfaceActive: true,
+    activeView: () => ({ webContents: { focus: () => events.push("focus") } }),
+    syncViewVisibility: () => events.push("visibility"),
+    snapshot: () => ({ activeTabId: "home" }),
+    publishState: () => events.push("publish"),
+    writeDescriptor: () => events.push("descriptor"),
+  };
+
+  BrowserHost.prototype.activateHomeSurface.call(fixture);
+
+  assert.equal(fixture.selectedTabId, "home");
+  assert.equal(fixture.turnTabs.size, 1);
+  assert.deepEqual(events, ["visibility", "focus", "publish", "descriptor"]);
+});
+
+test("selected home surface remains represented while task tabs are retained", () => {
+  const { webContents } = createContents();
+  const taskTab = { id: "tab-ready", traceId: "trace_ready" };
+  const fixture = {
+    selectedTabId: "home",
+    turnTabs: new Map([[taskTab.id, taskTab]]),
+    state: {
+      title: "ChatGPT",
+      status: "signed-out",
+      loading: false,
+      visible: true,
+      surfaceActive: true,
+    },
+    visible: true,
+    surfaceActive: true,
+    activeView: () => ({ webContents }),
+    selectedTurnTab: () => null,
+    tabSnapshot: (tab) => ({ id: tab.id, traceId: tab.traceId, active: false }),
+  };
+
+  const snapshot = BrowserHost.prototype.snapshot.call(fixture);
+
+  assert.equal(snapshot.activeTabId, "home");
+  assert.deepEqual(snapshot.tabs.map((tab) => tab.id), ["home", "tab-ready"]);
+  assert.equal(snapshot.tabs[0].active, true);
 });
 
 test("a stale helper cannot end a replacement turn with the same trace id", async () => {

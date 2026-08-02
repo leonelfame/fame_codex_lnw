@@ -148,9 +148,13 @@ export async function selectLauncherPage(
   descriptor: LauncherBrowserHostDescriptor,
   timeoutMs: number,
   surfaceId = descriptor.surfaceId,
+  abortSignal?: AbortSignal,
 ): Promise<{ context: BrowserContext; page: Page }> {
   const deadline = Date.now() + timeoutMs;
   do {
+    if (abortSignal?.aborted) {
+      throw new DOMException("Launcher browser connection aborted", "AbortError");
+    }
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
     const inspected = await Promise.all(candidates.map(async candidate => ({
       ...candidate,
@@ -175,7 +179,11 @@ export async function connectLauncherBrowserHost(
   descriptorPath: string,
   timeoutMs = 20_000,
   surfaceId?: string,
+  abortSignal?: AbortSignal,
 ): Promise<LauncherBrowserConnection> {
+  if (abortSignal?.aborted) {
+    throw new DOMException("Launcher browser connection aborted", "AbortError");
+  }
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
   let browser: Browser;
@@ -184,12 +192,25 @@ export async function connectLauncherBrowserHost(
   } catch (error) {
     throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const closeOnAbort = () => { void browser.close().catch(() => {}); };
+  abortSignal?.addEventListener("abort", closeOnAbort, { once: true });
   try {
-    const { context, page } = await selectLauncherPage(browser, descriptor, timeoutMs, surfaceId);
+    if (abortSignal?.aborted) {
+      throw new DOMException("Launcher browser connection aborted", "AbortError");
+    }
+    const { context, page } = await selectLauncherPage(
+      browser,
+      descriptor,
+      timeoutMs,
+      surfaceId,
+      abortSignal,
+    );
     return { descriptor, browser, context, page };
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;
+  } finally {
+    abortSignal?.removeEventListener("abort", closeOnAbort);
   }
 }
 

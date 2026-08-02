@@ -405,17 +405,24 @@ export class ChatGptBrowserWorker {
     if (browser) await browser.close();
   }
 
-  private async runStage<T>(traceId: string, stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T> {
+  private async runStage<T>(
+    traceId: string,
+    stage: string,
+    timeoutMs: number,
+    action: (abortSignal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
     const startedAt = performance.now();
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const timeout = new Promise<never>((_, rejectTimeout) => {
         timer = setTimeout(() => {
           rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
+          controller.abort();
         }, timeoutMs);
       });
-      const value = await Promise.race([action(), timeout]);
+      const value = await Promise.race([action(controller.signal), timeout]);
       console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
@@ -858,7 +865,12 @@ export class ChatGptBrowserWorker {
         completionActionVisible: completionAction !== undefined,
         traceBlocks,
       };
-    }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(() => absentResponseDomSnapshot());
+    }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(() => {
+      if (responseTurn.page().isClosed()) {
+        throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
+      }
+      return absentResponseDomSnapshot();
+    });
     snapshot.traceBlocks = snapshot.traceBlocks.filter(block => !isChatGptTraceControl(block));
     return snapshot;
   }
@@ -956,13 +968,25 @@ export class ChatGptBrowserWorker {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
       const deadline = Date.now() + this.config.turnTimeoutMs;
-      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async () => {
-        if (!launcherSurfaceId) return await this.pageForNewTurn();
+      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
+        if (!launcherSurfaceId) {
+          const managed = await this.pageForNewTurn();
+          if (abortSignal.aborted) {
+            await managed.close().catch(() => {});
+            throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+          }
+          return managed;
+        }
         const connection = await connectLauncherBrowserHost(
           this.config.browserHostDescriptorPath!,
           browserStageTimeouts.browserPage,
           launcherSurfaceId,
+          abortSignal,
         );
+        if (abortSignal.aborted) {
+          await connection.browser.close().catch(() => {});
+          throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+        }
         turnConnection = connection.browser;
         return connection.page;
       });
@@ -1029,6 +1053,9 @@ export class ChatGptBrowserWorker {
       const completionTracker = new ChatGptCompletionTracker();
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       for (;;) {
+        if (page.isClosed()) {
+          throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
+        }
         if (turn.abortSignal?.aborted) {
           const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
           if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});

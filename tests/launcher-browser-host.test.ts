@@ -186,3 +186,20 @@ test("launcher page selection rejects duplicated ownership markers", async () =>
     "2 surfaces with the same ownership id",
   );
 });
+
+test("launcher page selection stops immediately when acquisition is aborted", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const browser = {
+    contexts: () => [],
+  } as unknown as Browser;
+  const controller = new AbortController();
+  controller.abort();
+
+  expect(selectLauncherPage(
+    browser,
+    descriptor,
+    60_000,
+    descriptor.surfaceId,
+    controller.signal,
+  )).rejects.toMatchObject({ name: "AbortError" });
+});

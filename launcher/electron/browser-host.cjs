@@ -365,6 +365,15 @@ class BrowserHost {
   snapshot() {
     const contents = this.activeView()?.webContents;
     const selected = this.selectedTurnTab();
+    const homeTab = {
+      id: "home",
+      traceId: null,
+      title: this.state.title || "ChatGPT",
+      status: this.state.status,
+      loading: this.state.loading === true,
+      active: this.selectedTabId === "home",
+      closable: false,
+    };
     const state = selected
       ? {
           ...this.state,
@@ -383,16 +392,11 @@ class BrowserHost {
       }),
       activeTabId: this.selectedTabId,
       tabs: this.turnTabs.size > 0
-        ? [...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab))
-        : [{
-            id: "home",
-            traceId: null,
-            title: this.state.title || "ChatGPT",
-            status: this.state.status,
-            loading: this.state.loading === true,
-            active: true,
-            closable: false,
-          }],
+        ? [
+            ...(this.selectedTabId === "home" ? [homeTab] : []),
+            ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
+          ]
+        : [homeTab],
       maxTabs: MAX_BROWSER_TABS,
     };
   }
@@ -423,6 +427,14 @@ class BrowserHost {
 
   activeView() {
     return this.authView || this.selectedTurnTab()?.view || this.view;
+  }
+
+  activateHomeSurface() {
+    this.selectedTabId = "home";
+    this.syncViewVisibility();
+    if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
+    this.publishState?.(this.snapshot());
+    this.writeDescriptor();
   }
 
   syncViewVisibility() {
@@ -685,10 +697,12 @@ class BrowserHost {
 
   openLogin() {
     if (this.state.authenticated) {
+      this.activateHomeSurface();
       this.show();
       return Promise.resolve(this.snapshot());
     }
     if (this.loginOperation) {
+      this.activateHomeSurface();
       this.show();
       return this.loginOperation;
     }
@@ -1322,6 +1336,7 @@ class BrowserHost {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
+    this.activateHomeSurface();
     this.manualOperation = name;
     const contents = this.view?.webContents;
     if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(false);

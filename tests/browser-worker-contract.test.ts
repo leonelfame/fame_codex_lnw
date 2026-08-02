@@ -52,6 +52,48 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
   await Promise.all([...active.slice(1), sixth]);
 });
 
+test("browser stage timeout aborts late page acquisition", async () => {
+  let acquisitionAborted = false;
+  const runStage = (ChatGptBrowserWorker.prototype as unknown as {
+    runStage<T>(
+      traceId: string,
+      stage: string,
+      timeoutMs: number,
+      action: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+  }).runStage;
+
+  const result = runStage.call(
+    {},
+    "trace_timeout",
+    "browser_page",
+    10,
+    async (signal) => await new Promise<string>((resolve) => {
+      signal.addEventListener("abort", () => {
+        acquisitionAborted = true;
+        resolve("late page");
+      }, { once: true });
+    }),
+  );
+
+  await expect(result).rejects.toThrow("ChatGPT browser stage timed out: browser_page");
+  expect(acquisitionAborted).toBeTrue();
+});
+
+test("closing the launcher page is an immediate terminal turn error", async () => {
+  const responseDomSnapshot = (ChatGptBrowserWorker.prototype as unknown as {
+    responseDomSnapshot(responseTurn: unknown): Promise<unknown>;
+  }).responseDomSnapshot;
+  const responseTurn = {
+    evaluate: async () => { throw new Error("Target page has been closed"); },
+    page: () => ({ isClosed: () => true }),
+  };
+
+  await expect(responseDomSnapshot.call({}, responseTurn)).rejects.toThrow(
+    "ChatGPT browser tab was closed; the Codex turn was terminated",
+  );
+});
+
 test("connector verification and real tool turns share one Playwright selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource.match(/this\.selectConnector\(page\)/g)?.length).toBe(2);
