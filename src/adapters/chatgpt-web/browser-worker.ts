@@ -24,6 +24,9 @@ import {
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
+import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+
+export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
 
@@ -43,7 +46,6 @@ export const DEFAULT_CHATGPT_TURN_TIMEOUT_MS = 40 * 60_000;
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
-
 /**
  * ChatGPT applies composer state asynchronously, and a fast host can reach the next step before the
  * editor has taken the previous one. This is headroom for that, not a readiness check.
@@ -215,18 +217,12 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
 /** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
 export class ChatGptVisibleTraceTracker {
   private readonly seen = new Set<string>();
-  private readonly emittedCommentary = new Map<number, string>();
-  private readonly commentaryChangedAt = new Map<number, number>();
   private readonly emittedReasoning = new Map<number, string>();
   private readonly reasoningCandidates = new Map<number, { text: string; changedAt: number }>();
 
   constructor(private readonly traceStabilityMs = 1_000) {}
 
-  observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
-    let lastMarkdown = -1;
-    for (let index = 0; index < blocks.length; index++) {
-      if (blocks[index]!.kind === "markdown") lastMarkdown = index;
-    }
+  observe(blocks: ChatGptVisibleTraceBlock[], _completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
     const output: ChatGptVisibleTraceEvent[] = [];
     for (let index = 0; index < blocks.length; index++) {
       const block = blocks[index]!;
@@ -235,6 +231,11 @@ export class ChatGptVisibleTraceTracker {
         this.seen.add(CHATGPT_INTERNAL_COMPACTION_MARKER);
         output.push({ kind: "reasoning", text: "Context automatically compacted" });
       }
+      // Every visible Markdown root belongs to the final assistant answer. ChatGPT may split one
+      // answer into several roots around status/tool UI; emitting the earlier roots as commentary
+      // moves most of the answer under Codex's `Working` disclosure and leaves a truncated final.
+      // ChatGptMarkdownStream owns all Markdown roots; this tracker owns status/reasoning only.
+      if (block.kind === "markdown") continue;
       const text = stripChatGptTransportMarkers(block.text)
         .replace(/\r\n/g, "\n")
         .split("\n")
@@ -243,53 +244,25 @@ export class ChatGptVisibleTraceTracker {
         .replace(/\n{3,}/g, "\n\n")
         .trim();
       if (!text) continue;
-      // The trailing Markdown root is ambiguous while running and becomes the final answer once
-      // complete. It stays owned by ChatGptMarkdownStream; earlier roots are stable commentary.
-      if (block.kind === "markdown"
-        && (completionActionVisible ? index === lastMarkdown : index === blocks.length - 1)) {
+      const candidate = this.reasoningCandidates.get(index);
+      if (!candidate || candidate.text !== text) {
+        this.reasoningCandidates.set(index, { text, changedAt: now });
         continue;
       }
-      if (block.kind === "markdown") {
-        const previous = this.emittedCommentary.get(index);
-        if (previous === text) {
-          const changedAt = this.commentaryChangedAt.get(index) ?? now;
-          if (now - changedAt < this.traceStabilityMs) break;
-          continue;
-        }
-        this.commentaryChangedAt.set(index, now);
-        if (previous && text.startsWith(previous)) {
-          this.emittedCommentary.set(index, text);
-          output.push({ kind: "commentary", text: text.slice(previous.length), continuation: true });
-          break;
-        }
-        this.emittedCommentary.set(index, text);
-      } else {
-        const candidate = this.reasoningCandidates.get(index);
-        if (!candidate || candidate.text !== text) {
-          this.reasoningCandidates.set(index, { text, changedAt: now });
-          continue;
-        }
-        if (now - candidate.changedAt < this.traceStabilityMs) continue;
+      if (now - candidate.changedAt < this.traceStabilityMs) continue;
 
-        const previous = this.emittedReasoning.get(index);
-        if (previous === text) continue;
-        this.emittedReasoning.set(index, text);
+      const previous = this.emittedReasoning.get(index);
+      if (previous === text) continue;
+      this.emittedReasoning.set(index, text);
 
-        const key = `${block.kind}\0${text}`;
-        if (this.seen.has(key)) continue;
-        this.seen.add(key);
-        if (previous && text.startsWith(previous)) {
-          output.push({ kind: "reasoning", text: text.slice(previous.length), continuation: true });
-        } else {
-          output.push({ kind: "reasoning", text });
-        }
-        continue;
-      }
       const key = `${block.kind}\0${text}`;
       if (this.seen.has(key)) continue;
       this.seen.add(key);
-      output.push({ kind: block.kind === "markdown" ? "commentary" : "reasoning", text });
-      if (block.kind === "markdown") break;
+      if (previous && text.startsWith(previous)) {
+        output.push({ kind: "reasoning", text: text.slice(previous.length), continuation: true });
+      } else {
+        output.push({ kind: "reasoning", text });
+      }
     }
     return output;
   }
@@ -374,24 +347,42 @@ export class ChatGptBrowserWorker {
   private browser?: Browser;
   private context?: BrowserContext;
   private page?: Page;
+  private managedBrowserReady?: Promise<{ browser: Browser; context: BrowserContext }>;
   private launcherHelper?: LauncherBrowserHelperClient;
-  private tail: Promise<void> = Promise.resolve();
+  private verificationTail: Promise<void> = Promise.resolve();
+  private readonly activeRuns = new Map<string, Promise<string>>();
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
   run(turn: BrowserTurn): Promise<string> {
+    if (this.activeRuns.has(turn.traceId)) {
+      return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
+    }
+    if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
+      return Promise.reject(new Error(
+        `ChatGPT Web supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
+      ));
+    }
     const useHelper = this.config.browserHost === "launcher" && process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS !== "1";
     if (useHelper) {
       this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
     }
-    const run = this.tail.then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
-    this.tail = run.then(() => undefined, () => undefined);
+    const run = Promise.resolve().then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
+    this.activeRuns.set(turn.traceId, run);
+    void run.finally(() => {
+      if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
+    }).catch(() => {});
     return run;
   }
 
   verifyConnector(): Promise<string> {
-    const verification = this.tail.then(() => this.verifyConnectorExclusive());
-    this.tail = verification.then(() => undefined, () => undefined);
+    const verification = this.verificationTail.then(() => {
+      if (this.activeRuns.size > 0) {
+        throw new Error("ChatGPT connector verification requires all browser turns to finish");
+      }
+      return this.verifyConnectorExclusive();
+    });
+    this.verificationTail = verification.then(() => undefined, () => undefined);
     return verification;
   }
 
@@ -401,40 +392,26 @@ export class ChatGptBrowserWorker {
       this.launcherHelper = undefined;
       await helper.close();
     }
-    await this.tail;
+    await Promise.allSettled([...this.activeRuns.values()]);
+    await this.verificationTail;
     const browser = this.browser;
     this.browser = undefined;
     this.context = undefined;
     this.page = undefined;
+    this.managedBrowserReady = undefined;
     // For connectOverCDP, Playwright implements Browser.close as a transport disconnect; it does
     // not close the launcher-owned Electron process. Always release that connection and its
     // artifact directory instead of leaking one per timeout/helper lifecycle.
     if (browser) await browser.close();
   }
 
-  private discardBrowser(): void {
-    const browser = this.browser;
-    this.browser = undefined;
-    this.context = undefined;
-    this.page = undefined;
-    if (browser) {
-      void browser.close().catch(error => {
-        console.error(
-          `[chatgpt-web] failed to discard browser connection: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
-    }
-  }
-
   private async runStage<T>(traceId: string, stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T> {
     const startedAt = performance.now();
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
     try {
       const timeout = new Promise<never>((_, rejectTimeout) => {
         timer = setTimeout(() => {
-          timedOut = true;
           rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
         }, timeoutMs);
       });
@@ -443,7 +420,6 @@ export class ChatGptBrowserWorker {
       return value;
     } catch (error) {
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${error instanceof Error ? error.message : String(error)}`);
-      if (timedOut) this.discardBrowser();
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
@@ -474,25 +450,44 @@ export class ChatGptBrowserWorker {
     return this.page;
   }
 
+  private async ensureManagedBrowser(): Promise<{ browser: Browser; context: BrowserContext }> {
+    if (this.managedBrowserReady) return this.managedBrowserReady;
+    const opening = (async () => {
+      if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
+        throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
+      }
+      if (!existsSync(this.config.chromeExecutablePath)) {
+        throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
+      }
+      const browser = await chromium.launch({
+        executablePath: this.config.chromeExecutablePath,
+        headless: !this.config.headed,
+      });
+      const context = await browser.newContext({ storageState: this.config.storageStatePath });
+      this.browser = browser;
+      this.context = context;
+      return { browser, context };
+    })();
+    this.managedBrowserReady = opening;
+    try {
+      return await opening;
+    } catch (error) {
+      if (this.managedBrowserReady === opening) this.managedBrowserReady = undefined;
+      throw error;
+    }
+  }
+
   /**
    * A Codex turn owns one isolated Temporary Chat document. Reusing the same
    * ChatGPT SPA page can retain the previous transcript and autocomplete DOM,
    * so an @app lookup may select stale UI from the preceding turn.
    */
   private async pageForNewTurn(): Promise<Page> {
-    const previous = await this.ensurePage();
-    if (this.config.browserHost === "launcher") return previous;
-    if (previous.url() === "about:blank") return previous;
-    const context = this.context;
-    if (!context) throw new Error("ChatGPT web browser context is unavailable");
-    const page = await context.newPage();
-    this.page = page;
-    await previous.close().catch(error => {
-      console.error(
-        `[chatgpt-web] failed to close previous browser page: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-    return page;
+    if (this.config.browserHost === "launcher") {
+      throw new Error("Launcher turns require an explicitly leased browser surface");
+    }
+    const { context } = await this.ensureManagedBrowser();
+    return await context.newPage();
   }
 
   private async selectModelAndEffort(
@@ -813,7 +808,13 @@ export class ChatGptBrowserWorker {
           && rect.height > 0;
       };
 
-      const rendered = [...root.querySelectorAll<HTMLElement>(".markdown")].at(-1);
+      // ChatGPT can split one assistant answer into several sibling Markdown roots around
+      // reasoning/status UI. Keep only top-level visible roots, then aggregate all of them in DOM
+      // order so Codex receives the complete answer instead of only the trailing fragment.
+      const renderedRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]
+        .filter(candidate => !candidate.parentElement?.closest(".markdown"))
+        .filter(visible);
+      const rendered = renderedRoots.at(-1);
       const renderedChildren = rendered ? [...rendered.children] : [];
       const completionAction = rendered
         ? [...root.querySelectorAll<HTMLElement>(completionActionSelector)]
@@ -823,7 +824,7 @@ export class ChatGptBrowserWorker {
         : undefined;
       const completionActionSet = new Set(completionAction ? [completionAction] : []);
       const candidates = new Map<HTMLElement, "markdown" | "status">();
-      root.querySelectorAll<HTMLElement>(".markdown").forEach(candidate => candidates.set(candidate, "markdown"));
+      renderedRoots.forEach(candidate => candidates.set(candidate, "markdown"));
       root.querySelectorAll<HTMLElement>(
         'button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"]',
       ).forEach(candidate => {
@@ -848,9 +849,12 @@ export class ChatGptBrowserWorker {
         ));
       return {
         responsePresent: true,
-        visibleText: rendered?.innerText.trim() ?? "",
-        fullHtml: rendered?.innerHTML ?? "",
-        stableHtml: renderedChildren.slice(0, -1).map(child => child.outerHTML).join(""),
+        visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
+        fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
+        stableHtml: [
+          ...renderedRoots.slice(0, -1).map(candidate => candidate.innerHTML),
+          ...renderedChildren.slice(0, -1).map(child => child.outerHTML),
+        ].join(""),
         completionActionVisible: completionAction !== undefined,
         traceBlocks,
       };
@@ -908,16 +912,18 @@ export class ChatGptBrowserWorker {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
 
-    await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+    const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
       phase: "start",
       traceId: turn.traceId,
       helperPid: process.pid,
     });
+    const surfaceId = lease.surfaceId;
+    if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
     let originalError: unknown;
     try {
-      return await this.runBrowserTurn(turn);
+      return await this.runBrowserTurn(turn, surfaceId);
     } catch (error) {
       originalError = error;
       terminal = error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed";
@@ -941,14 +947,26 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async runBrowserTurn(turn: BrowserTurn): Promise<string> {
+  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const prepared = await turn.prepare();
+    let turnConnection: Browser | undefined;
+    let managedPage: Page | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
       const deadline = Date.now() + this.config.turnTimeoutMs;
-      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, () => this.pageForNewTurn());
+      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async () => {
+        if (!launcherSurfaceId) return await this.pageForNewTurn();
+        const connection = await connectLauncherBrowserHost(
+          this.config.browserHostDescriptorPath!,
+          browserStageTimeouts.browserPage,
+          launcherSurfaceId,
+        );
+        turnConnection = connection.browser;
+        return connection.page;
+      });
+      if (!launcherSurfaceId) managedPage = page;
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
       );
@@ -1043,8 +1061,8 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
           });
           if (domError) throw new Error(domError);
-          // ChatGPT can render visible commentary Markdown between tool-status rows. Only a
-          // Markdown root accompanied by the response action belongs to the final answer stream.
+          // Commit only when ChatGPT exposes response-scoped completion actions, but keep every
+          // top-level Markdown root in that response as one final-answer stream.
           if (snapshot.completionActionVisible) {
             const stableDelta = markdownStream.observeStableHtml(snapshot.stableHtml);
             if (stableDelta) turn.onTextDelta(stableDelta);
@@ -1096,6 +1114,19 @@ export class ChatGptBrowserWorker {
       return finalText;
     } finally {
       prepared.release();
+      if (turnConnection) {
+        await turnConnection.close().catch(error => {
+          console.error(
+            `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      } else if (managedPage && !managedPage.isClosed()) {
+        await managedPage.close().catch(error => {
+          console.error(
+            `[chatgpt-web] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
     }
   }
 }

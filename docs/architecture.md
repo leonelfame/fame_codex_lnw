@@ -7,7 +7,7 @@ Codex app / CLI
 launcher-owned codex-chatgpt-web daemon
   ├─ official /models passthrough + fixed ChatGPT Web models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
-  ├─ ChatGPT browser worker (embedded Electron surface, one turn at a time)
+  ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
   ├─ capability broker (full mode only)
   └─ stdio MCP server
             ▲
@@ -37,11 +37,14 @@ launcher-owned codex-chatgpt-web daemon
 
 ## Browser lifecycle
 
-The desktop launcher owns one persistent Electron partition and one visible browser surface.
-Playwright attaches to that exact surface through a launcher-owned loopback CDP endpoint; it does
-not launch another browser or copy authentication state. A Codex turn navigates the owned surface
-to a fresh Temporary Chat, and the surface returns to an inert local page after completion. The
-login persists locally while browser conversations are not reused between tasks.
+The desktop launcher owns one persistent Electron partition and up to five task-bound browser
+tabs. Each Codex task is leased an independent `WebContentsView` and surface ID; Playwright attaches
+to that exact surface through a launcher-owned loopback CDP endpoint. It does not launch another
+browser or copy authentication state. Each tab opens a fresh Temporary Chat, shares only the local
+login partition, and keeps its own document and lifecycle. Completed tabs remain inspectable until
+closed. Closing a running tab destroys its page and terminates that browser turn. A sixth concurrent
+turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
+controls.
 
 The complete serialized Codex task is inserted as one inline JSON envelope. Image bytes stay out of
 the JSON and are attached natively with stable references. The runtime does not create a context
@@ -104,8 +107,8 @@ launcher error.
 - Store browser state and tunnel credentials under the application home with mode `0600`.
 - Protect lifecycle control endpoints with a random application-owned bearer token.
 - Never place secret values in command-line arguments, logs, generated profiles, or Git.
-- Serialize browser turns and reject unsupported models explicitly. The selected routed model fixes
-  the adapter effort; a conflicting request effort cannot change it.
+- Limit browser turns to five independent task-bound tabs and reject unsupported models explicitly.
+  The selected routed model fixes the adapter effort; a conflicting request effort cannot change it.
 - Do not retry or switch modes to evade product usage limits.
 
 See the complete [security model](security-model.md).

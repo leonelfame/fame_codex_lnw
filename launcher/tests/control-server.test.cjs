@@ -6,7 +6,10 @@ test("browser control server authenticates and owns turn visibility", async () =
   const calls = [];
   const logs = [];
   const host = {
-    beginTurn: (...args) => calls.push(["start", ...args]),
+    beginTurn: (...args) => {
+      calls.push(["start", ...args]);
+      return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1" };
+    },
     endTurn: (...args) => calls.push(["end", ...args]),
   };
   const server = await new BrowserControlServer({

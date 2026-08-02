@@ -147,6 +147,7 @@ export async function selectLauncherPage(
   browser: Browser,
   descriptor: LauncherBrowserHostDescriptor,
   timeoutMs: number,
+  surfaceId = descriptor.surfaceId,
 ): Promise<{ context: BrowserContext; page: Page }> {
   const deadline = Date.now() + timeoutMs;
   do {
@@ -158,7 +159,7 @@ export async function selectLauncherPage(
           .__CODEX_WEB_GPT_SURFACE_ID__,
       ).catch(() => undefined),
     })));
-    const owned = inspected.filter(candidate => candidate.surfaceId === descriptor.surfaceId);
+    const owned = inspected.filter(candidate => candidate.surfaceId === surfaceId);
     if (owned.length === 1) {
       return { context: owned[0].context, page: owned[0].page };
     }
@@ -173,6 +174,7 @@ export async function selectLauncherPage(
 export async function connectLauncherBrowserHost(
   descriptorPath: string,
   timeoutMs = 20_000,
+  surfaceId?: string,
 ): Promise<LauncherBrowserConnection> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
@@ -182,8 +184,13 @@ export async function connectLauncherBrowserHost(
   } catch (error) {
     throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const { context, page } = await selectLauncherPage(browser, descriptor, timeoutMs);
-  return { descriptor, browser, context, page };
+  try {
+    const { context, page } = await selectLauncherPage(browser, descriptor, timeoutMs, surfaceId);
+    return { descriptor, browser, context, page };
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
 }
 
 export async function inspectLauncherBrowserHost(
@@ -238,7 +245,7 @@ export async function notifyLauncherTurn(
   timeoutMs = activity.phase === "end"
     ? LAUNCHER_TURN_END_TIMEOUT_MS
     : LAUNCHER_TURN_START_TIMEOUT_MS,
-): Promise<void> {
+): Promise<{ surfaceId?: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -256,6 +263,14 @@ export async function notifyLauncherTurn(
       const detail = await response.text().catch(() => "");
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (activity.phase === "start") {
+      if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
+        throw new Error("Launcher browser control channel returned an invalid turn surface id");
+      }
+      return { surfaceId: body.surfaceId };
+    }
+    return {};
   } catch (error) {
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {

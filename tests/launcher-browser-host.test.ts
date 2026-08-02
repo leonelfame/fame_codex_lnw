@@ -71,7 +71,9 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
     };
     response.writeHead(200, { "content-type": "application/json" });
-    response.end('{"ok":true}\n');
+    response.end(request.url === "/v1/turn/start"
+      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB"}\n'
+      : '{"ok":true}\n');
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -81,7 +83,11 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server has no port");
     const path = descriptorFile(`http://127.0.0.1:${address.port}`);
-    await notifyLauncherTurn(path, { phase: "start", traceId: "abc123def456", helperPid: process.pid });
+    await expect(notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "abc123def456",
+      helperPid: process.pid,
+    })).resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB" });
     expect(received.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
     expect(received.body).toEqual({ phase: "start", traceId: "abc123def456", helperPid: process.pid });
     await notifyLauncherTurn(path, {

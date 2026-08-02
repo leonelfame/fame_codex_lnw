@@ -34,6 +34,19 @@ export interface BrowserState {
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  activeTabId: string;
+  maxTabs: number;
+  tabs: BrowserTabState[];
+}
+
+export interface BrowserTabState {
+  id: string;
+  traceId: string | null;
+  title: string;
+  status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
+  loading: boolean;
+  active: boolean;
+  closable: boolean;
 }
 
 export interface LogRecord {
@@ -92,6 +105,8 @@ export interface LauncherApi {
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
+  selectBrowserTab(tabId: string): Promise<BrowserState>;
+  closeBrowserTab(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;

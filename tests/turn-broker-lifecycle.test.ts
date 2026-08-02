@@ -51,7 +51,7 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   sessions.clear();
 });
 
-test("a starting turn reclaims the abandoned turn whose surface it takes over", () => {
+test("five active turns coexist and a sixth fails closed", () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
   const runtime = () => ({
@@ -62,20 +62,19 @@ test("a starting turn reclaims the abandoned turn whose surface it takes over", 
     cancel: () => { cancelled += 1; },
   });
 
-  // Parked between tool batches: stopping the task leaves no request to abort.
-  sessions.getOrCreate("stopped-turn", runtime);
-  expect(sessions.activeCount()).toBe(1);
+  const active = Array.from({ length: 5 }, (_unused, index) => (
+    sessions.getOrCreate(`turn-${index + 1}`, runtime)
+  ));
+  expect(sessions.activeCount()).toBe(5);
+  expect(cancelled).toBe(0);
+  expect(() => sessions.getOrCreate("turn-6", runtime)).toThrow("at most 5 simultaneous browser turns");
 
-  sessions.getOrCreate("next-turn", runtime);
-  expect(cancelled).toBe(1);
-  expect(sessions.activeCount()).toBe(1);
-
-  // Resuming the same turn is never a takeover.
-  sessions.getOrCreate("next-turn", () => {
+  expect(sessions.getOrCreate("turn-3", () => {
     throw new Error("an in-flight turn must be reused");
-  });
-  expect(cancelled).toBe(1);
+  })).toBe(active[2]);
+  expect(cancelled).toBe(0);
   sessions.clear();
+  expect(cancelled).toBe(5);
 });
 
 test("settled replay sessions expire from their last use instead of their creation time", async () => {

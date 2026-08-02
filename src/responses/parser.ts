@@ -54,6 +54,14 @@ function inputContentParts(blocks: unknown[] | string | undefined): string | Cod
   return parts;
 }
 
+function containsOpaqueEncryptedContent(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some(block => isObj(block)
+    && block.type === "encrypted_content"
+    && typeof block.encrypted_content === "string"
+    && block.encrypted_content.length > 0);
+}
+
 type OutputBlock = { type: "output_text"; text: string } | { type: "text"; text: string } | { type: "refusal"; refusal: string };
 
 function outputTextOf(blocks: unknown[] | string | undefined): CodexTextContent[] {
@@ -253,6 +261,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   // synthetic `{type:"compaction"}` output item (src/responses/compaction.ts). Flagged for the server.
   let compactionRequest = false;
   let contextCompactionBoundary = false;
+  let opaqueMultiAgentV2Payload = false;
 
   if (typeof data.instructions === "string" && data.instructions.length > 0) {
     systemPrompt.push(data.instructions);
@@ -308,6 +317,10 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           recipient?: string;
           content?: unknown;
         };
+
+        if (containsOpaqueEncryptedContent(agentMessage.content)) {
+          opaqueMultiAgentV2Payload = true;
+        }
 
         const content = inputContentParts(
           agentMessage.content as unknown[] | string | undefined,
@@ -596,6 +609,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     ...(structuredOutput ? { _structuredOutput: true } : {}),
     ...(compactionRequest ? { _compactionRequest: true } : {}),
     ...(contextCompactionBoundary ? { _contextCompactionBoundary: true } : {}),
+    ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
   };
 }
 

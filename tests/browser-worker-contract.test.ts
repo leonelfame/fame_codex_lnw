@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -16,6 +16,40 @@ test("completed prompts activate the scoped semantic send control", () => {
   expect(workerSource).toContain('.getByTestId("send-button")');
   expect(workerSource).toContain('await sendButton.press("Enter")');
   expect(workerSource).not.toContain('getByTestId("send-button").dispatchEvent("click")');
+});
+
+test("browser turns run concurrently up to the five-tab limit", async () => {
+  expect(MAX_CHATGPT_BROWSER_TABS).toBe(5);
+  const releases = new Map<string, () => void>();
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { browserHost: "managed-chrome" },
+    activeRuns: new Map(),
+    runExclusive: (turn: { traceId: string }) => new Promise<string>(resolve => {
+      releases.set(turn.traceId, () => resolve(turn.traceId));
+    }),
+  }) as ChatGptBrowserWorker;
+  const browserTurn = (traceId: string) => ({
+    traceId,
+    modelId: "chatgpt-web/high",
+    capabilities: { localToolsEnabled: false, proAvailable: true },
+    prepare: async () => ({ text: traceId, images: [], release() {} }),
+    onTextDelta() {},
+  });
+
+  const active = Array.from({ length: 5 }, (_unused, index) => worker.run(browserTurn(`trace_${index + 1}`)));
+  await Promise.resolve();
+  expect(releases.size).toBe(5);
+  await expect(worker.run(browserTurn("trace_6"))).rejects.toThrow("at most 5 simultaneous browser turns");
+
+  releases.get("trace_1")?.();
+  await active[0];
+  const sixth = worker.run(browserTurn("trace_6"));
+  await Promise.resolve();
+  expect(releases.has("trace_6")).toBeTrue();
+  for (const traceId of ["trace_2", "trace_3", "trace_4", "trace_5", "trace_6"]) {
+    releases.get(traceId)?.();
+  }
+  await Promise.all([...active.slice(1), sixth]);
 });
 
 test("connector verification and real tool turns share one Playwright selector", () => {
@@ -398,7 +432,7 @@ test("browser diagnostics redact context envelopes and capability values", () =>
   expect(diagnostic).toContain("<codex_context_json>[redacted]</codex_context_json>");
 });
 
-test("visible DOM trace emits statuses and stable commentary but withholds the final answer", () => {
+test("visible DOM trace emits statuses but leaves every Markdown root to the final answer stream", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
   const initialBlocks = [
     { kind: "status", text: "Reviewed architecture documentation" },
@@ -415,10 +449,8 @@ test("visible DOM trace emits statuses and stable commentary but withholds the f
     { kind: "markdown", text: "Final answer still streaming" },
   ] as const;
   expect(tracker.observe([...commentaryBlocks], false, 1_200)).toEqual([
-    { kind: "commentary", text: "The implementation has a concrete state drift." },
   ]);
-  expect(tracker.observe([...commentaryBlocks], false, 1_300)).toEqual([]);
-  expect(tracker.observe([...commentaryBlocks], false, 1_400)).toEqual([
+  expect(tracker.observe([...commentaryBlocks], false, 1_300)).toEqual([
     { kind: "reasoning", text: "Inspecting runtime evidence" },
   ]);
   expect(tracker.observe([
@@ -426,27 +458,31 @@ test("visible DOM trace emits statuses and stable commentary but withholds the f
   ], true)).toEqual([]);
 });
 
-test("visible DOM trace streams a growing commentary block as append-only deltas", () => {
+test("visible DOM trace never reclassifies growing Markdown as commentary", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
   const initial = [
     { kind: "markdown", text: "I’m reading" },
     { kind: "status", text: "Read context file contents" },
   ] as const;
-  expect(tracker.observe([...initial], false, 1_000)).toEqual([
-    { kind: "commentary", text: "I’m reading" },
-  ]);
+  expect(tracker.observe([...initial], false, 1_000)).toEqual([]);
   const expanded = [
     { kind: "markdown", text: "I’m reading the repository’s mandatory architecture" },
     { kind: "status", text: "Read context file contents" },
   ] as const;
-  expect(tracker.observe([...expanded], false, 1_050)).toEqual([
-    { kind: "commentary", text: " the repository’s mandatory architecture", continuation: true },
-  ]);
-  expect(tracker.observe([...expanded], false, 1_100)).toEqual([]);
-  expect(tracker.observe([...expanded], false, 1_150)).toEqual([]);
-  expect(tracker.observe([...expanded], false, 1_250)).toEqual([
+  expect(tracker.observe([...expanded], false, 1_050)).toEqual([]);
+  expect(tracker.observe([...expanded], false, 1_100)).toEqual([
     { kind: "reasoning", text: "Read context file contents" },
   ]);
+  expect(tracker.observe([...expanded], false, 1_150)).toEqual([]);
+  expect(tracker.observe([...expanded], false, 1_250)).toEqual([]);
+});
+
+test("response DOM aggregation keeps every top-level Markdown root in the final answer", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain('const renderedRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
+  expect(workerSource).toContain('fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join("")');
+  expect(workerSource).toContain('...renderedRoots.slice(0, -1).map(candidate => candidate.innerHTML)');
+  expect(workerSource).not.toContain('fullHtml: rendered?.innerHTML ?? ""');
 });
 
 test("visible DOM trace waits out animated Pro fragments and appends genuine growth", () => {

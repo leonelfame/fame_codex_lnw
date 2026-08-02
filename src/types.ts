@@ -36,6 +36,11 @@ export interface CodexParsedRequest {
    * provider-private continuation caches again on every later turn.
    */
   _contextCompactionBoundary?: boolean;
+  /**
+   * True when Codex MultiAgent V2 delegated an agent_message as provider-private encrypted_content.
+   * ChatGPT Web has no OpenAI backend key for that blob and must fail before opening the browser.
+   */
+  _opaqueMultiAgentV2Payload?: boolean;
 }
 
 export interface CodexContext {

@@ -248,6 +248,13 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   return {
     name: "chatgpt-web",
     async runTurn(parsed, incoming, emit) {
+      if (parsed._opaqueMultiAgentV2Payload) {
+        throw new Error(
+          "ChatGPT Web subagents currently require a V1-rooted task. "
+          + "Start a new task with a ChatGPT Web model before spawning ChatGPT Web Pro. "
+          + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
+        );
+      }
       const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {

@@ -41,7 +41,8 @@ connects ChatGPT back to the tools of that same Codex task.
 
 - **A polished cross-platform launcher.** One command installs the native macOS, Windows, or Linux
   app. It keeps sign-in, setup, smoke testing, MCP guidance, runtime health, and local logs in one
-  place, while the embedded browser lets you watch every ChatGPT turn as it happens.
+  place, while the embedded browser lets you watch every ChatGPT turn as it happens. Up to five
+  task-bound browser tabs can run in parallel; the cap avoids excessive parallel account traffic.
 - **ChatGPT is the selected model.** It runs as a native Codex model, not as a tool called by
   another host model. The original model picker, task lifecycle, streaming, tracing, and tool UI
   remain intact.

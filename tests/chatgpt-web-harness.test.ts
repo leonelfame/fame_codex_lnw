@@ -17,6 +17,7 @@ import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapte
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
+import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
 const tempRoot = join(tmpdir(), `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`);
@@ -101,6 +102,46 @@ function toolResult(value: Record<string, unknown>): BrokerToolResult {
 }
 
 describe("ChatGPT outer-native harness v3", () => {
+  test("rejects an opaque MultiAgent V2 child payload before starting the browser", async () => {
+    const request = parseRequest({
+      model: "chatgpt-web/pro",
+      stream: true,
+      reasoning: { effort: "ultra" },
+      input: [{
+        type: "agent_message",
+        author: "parent",
+        recipient: "child",
+        content: [{ type: "encrypted_content", encrypted_content: "opaque-native-v2-payload" }],
+      }],
+    });
+    expect(request._opaqueMultiAgentV2Payload).toBe(true);
+
+    const socketPath = brokerTestEndpoint(`cgw-h3-v2-reject-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: "browser://chatgpt-v2-reject-test",
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: false, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
+      browserStarts += 1;
+      return "unexpected";
+    };
+    try {
+      await expect(createChatGptWebAdapter(provider).runTurn!(
+        request,
+        { headers: new Headers() },
+        () => {},
+      )).rejects.toThrow("require a V1-rooted task");
+      expect(browserStarts).toBe(0);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("extracts authoritative environment, tool registry, and turn identity from the Codex wire envelope", () => {
     const request = rawWireRequest(environmentXml);
     expect(extractChatGptTurnEnvironment(request)).toEqual({

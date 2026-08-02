@@ -698,9 +698,14 @@ test("manual browser operations disable background throttling until completion",
 });
 
 test("a stale helper cannot end a replacement turn with the same trace id", async () => {
+  const turnTabs = new Map([["tab-1", {
+    id: "tab-1",
+    traceId: "trace_same_retry",
+    helperPid: 222,
+  }]]);
   await assert.rejects(
     BrowserHost.prototype.endTurn.call(
-      { activeTraceId: "trace_same_retry", activeHelperPid: 222 },
+      { turnTabs, closedTurnOwners: new Map() },
       "trace_same_retry",
       111,
       "failed",
@@ -709,4 +714,126 @@ test("a stale helper cannot end a replacement turn with the same trace id", asyn
     ),
     /Browser helper ownership mismatch: expected 222, received 111/,
   );
+});
+
+test("closing a running browser tab preserves ownership until its helper reports termination", () => {
+  const closed = [];
+  const tab = {
+    id: "tab-running",
+    traceId: "trace_running",
+    helperPid: 333,
+    status: "running",
+    view: {
+      webContents: { isDestroyed: () => false, close: () => closed.push("contents") },
+    },
+  };
+  const fixture = {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    selectedTabId: tab.id,
+    window: { contentView: { removeChildView: () => closed.push("view") } },
+    syncViewVisibility() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    logger: { info() {} },
+  };
+
+  BrowserHost.prototype.closeTab.call(fixture, tab.id);
+
+  assert.deepEqual(closed, ["view", "contents"]);
+  assert.equal(fixture.closedTurnOwners.get("trace_running"), 333);
+  assert.equal(fixture.selectedTabId, "home");
+});
+
+test("a later provider round reuses its task tab and restores active ownership", () => {
+  const throttling = [];
+  const tab = {
+    id: "tab-reused",
+    surfaceId: "surface-reused",
+    traceId: "trace_reused",
+    helperPid: 111,
+    status: "ready",
+    loading: false,
+    message: "Task completed",
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        setBackgroundThrottling: (enabled) => throttling.push(enabled),
+      },
+    },
+  };
+  const events = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[tab.id, tab]]),
+    selectedTabId: "home",
+    syncViewVisibility: () => events.push("visible"),
+    snapshot: () => ({ tabs: [] }),
+    publishState: () => events.push("published"),
+    writeDescriptor: () => events.push("descriptor"),
+    logger: { info: (event) => events.push(event) },
+  });
+
+  const lease = BrowserHost.prototype.beginTurn.call(fixture, "trace_reused", false, 222);
+
+  assert.deepEqual(lease, { surfaceId: "surface-reused", tabId: "tab-reused" });
+  assert.equal(tab.helperPid, 222);
+  assert.equal(tab.status, "running");
+  assert.equal(tab.loading, true);
+  assert.equal(tab.message, "ChatGPT is working");
+  assert.equal(fixture.selectedTabId, tab.id);
+  assert.deepEqual(throttling, [false]);
+  assert.deepEqual(events, ["visible", "published", "descriptor", "browser.tab_reused"]);
+});
+
+test("five browser tabs are a hard account-safety limit", () => {
+  const turnTabs = new Map(Array.from({ length: 5 }, (_unused, index) => [
+    `tab-${index + 1}`,
+    { ordinal: index + 1 },
+  ]));
+
+  assert.throws(
+    () => BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_six", 444),
+    /already has 5 browser tabs.*avoid excessive parallel traffic/,
+  );
+});
+
+test("ending one browser turn does not stop another running tab", async () => {
+  const ended = {
+    id: "tab-ended",
+    traceId: "trace_ended",
+    helperPid: 555,
+    status: "running",
+    loading: true,
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  const active = {
+    id: "tab-active",
+    traceId: "trace_active",
+    helperPid: 666,
+    status: "running",
+    loading: true,
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[ended.id, ended], [active.id, active]]),
+    closedTurnOwners: new Map(),
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    hide: () => assert.fail("a second running tab must keep the browser host active"),
+    logger: { info() {} },
+  });
+
+  await BrowserHost.prototype.endTurn.call(
+    fixture,
+    ended.traceId,
+    ended.helperPid,
+    "completed",
+    true,
+  );
+
+  assert.equal(ended.status, "ready");
+  assert.equal(active.status, "running");
+  assert.equal(fixture.activeTraceId, active.traceId);
 });

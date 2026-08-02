@@ -507,7 +507,9 @@ code {
   position: relative;
   display: flex;
   width: min(220px, 32vw);
-  min-width: 120px;
+  min-width: 96px;
+  max-width: 220px;
+  flex: 1 1 120px;
   height: 28px;
   align-items: center;
   gap: 7px;

@@ -596,7 +596,6 @@ function BrowserSurface({
 }) {
   const visible = browser?.visible === true;
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
-  const title = browserTabTitle(browser, copy);
   const navigate = async (action: "back" | "forward" | "reload") => {
     try {
       await api!.navigateBrowser(action);
@@ -612,20 +611,52 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
+  const selectTab = async (tabId: string) => {
+    try {
+      await api!.selectBrowserTab(tabId);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const closeTab = async (tabId: string) => {
+    try {
+      await api!.closeBrowserTab(tabId);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
 
   return (
     <section className="browser-surface">
-      <div className="browser-tab-strip">
-        <div className="browser-tab is-active">
-          <BrandMark small />
-          <span title={title}>{title}</span>
-          {browser?.loading ? <i className="tab-spinner" /> : <StateDot state={browserTone(browser)} />}
-          {visible ? (
-            <button aria-label={copy.hideTab} onClick={() => void toggle()} title={copy.hideTab} type="button">
-              <Icon name="close" />
-            </button>
-          ) : null}
-        </div>
+      <div className="browser-tab-strip" title={copy.browserTabLimit}>
+        {(browser?.tabs ?? []).map((tab) => (
+          <div
+            className={`browser-tab${tab.active ? " is-active" : ""}`}
+            key={tab.id}
+            onClick={() => void selectTab(tab.id)}
+            role="tab"
+            aria-selected={tab.active}
+          >
+            <BrandMark small />
+            <span title={tab.traceId ? `${tab.title} · ${tab.traceId}` : tab.title}>
+              {browserTabTitleFromTitle(tab.title, copy)}
+            </span>
+            {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
+            {tab.closable ? (
+              <button
+                aria-label={copy.hideTab}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void closeTab(tab.id);
+                }}
+                title={copy.hideTab}
+                type="button"
+              >
+                <Icon name="close" />
+              </button>
+            ) : null}
+          </div>
+        ))}
         <div className="browser-tab-drag draggable" />
       </div>
       <div className="browser-toolbar">
@@ -1633,10 +1664,17 @@ function browserTone(browser: BrowserState | null): "idle" | "ready" | "busy" | 
   return "idle";
 }
 
-function browserTabTitle(browser: BrowserState | null, copy: Copy): string {
-  const title = browser?.title?.trim();
+function browserTabTitleFromTitle(value: string | undefined, copy: Copy): string {
+  const title = value?.trim();
   if (!title || title === "about:blank" || title.includes("codex-web-gpt-browser-host")) return copy.temporaryChat;
   return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.temporaryChat;
+}
+
+function browserTabTone(status: BrowserState["tabs"][number]["status"]): "idle" | "ready" | "busy" | "error" {
+  if (status === "error" || status === "aborted") return "error";
+  if (status === "loading" || status === "running" || status === "testing") return "busy";
+  if (status === "ready") return "ready";
+  return "idle";
 }
 
 function formatBrowserAddress(url: string | undefined, copy: Copy): string {

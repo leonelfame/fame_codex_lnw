@@ -74,6 +74,10 @@ export function buildChatGptWebModel(
     input_modalities: ["text", "image"],
     visibility: "list",
     supported_in_api: false,
+    // Codex MultiAgent V2 encrypts delegated task payloads for native OpenAI models. A browser
+    // provider cannot decrypt that cross-backend payload, so every routed Web model must stay on
+    // the native V1 surface where `message` and `fork_context` remain ordinary Codex context.
+    multi_agent_version: "v1",
     // Keep every routed Web model inside Codex's native code-mode and subagent model registry.
     // Pro's lack of local computer tools is enforced by the adapter runtime; `requiresPro` is only
     // an account-entitlement gate and must not make the model disappear from native orchestration.

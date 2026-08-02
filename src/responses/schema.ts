@@ -49,6 +49,17 @@ const assistantMessageItemSchema = z.object({
   content: z.union([z.string(), z.array(outputContentBlockSchema)]).optional(),
   phase: z.enum(["commentary", "final_answer"]).optional(),
 });
+const agentMessageItemSchema = z.object({
+  type: z.literal("agent_message"),
+  author: z.string().optional(),
+  recipient: z.string().optional(),
+  // MultiAgent V1 sends normal input content. V2 may send only encrypted_content; accept that
+  // shape so the adapter can reject it explicitly instead of silently manufacturing an empty task.
+  content: z.union([
+    z.string(),
+    z.array(z.union([inputContentBlockSchema, encryptedContentBlockSchema])),
+  ]).optional(),
+}).loose();
 const reasoningItemSchema = z.object({
   type: z.literal("reasoning"),
   id: z.string().optional(),
@@ -88,6 +99,7 @@ export const inputItemSchema = z.union([
   userMessageItemSchema,
   systemMessageItemSchema,
   assistantMessageItemSchema,
+  agentMessageItemSchema,
   reasoningItemSchema,
   functionCallItemSchema,
   functionCallOutputItemSchema,

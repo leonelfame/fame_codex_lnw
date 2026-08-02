@@ -19,6 +19,7 @@ function source(): Record<string, unknown> {
         shell_type: "shell_command",
         visibility: "list",
         supported_in_api: true,
+        multi_agent_version: "v2",
         base_instructions: "native harness",
         supported_reasoning_levels: [
           { effort: "low", description: "Low" },
@@ -62,6 +63,7 @@ describe("native /models augmentation", () => {
         tool_mode: "code_mode_only",
         default_reasoning_level: route.codexEffort,
         supported_reasoning_levels: [{ effort: route.codexEffort, description: route.displayName }],
+        multi_agent_version: "v1",
         context_window: CHATGPT_WEB_CONTEXT_WINDOW,
         max_context_window: CHATGPT_WEB_CONTEXT_WINDOW,
         auto_compact_token_limit: CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
@@ -89,6 +91,7 @@ describe("native /models augmentation", () => {
       CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro).map(route => route.slug),
     );
     expect(web.every(model => model.tool_mode === null)).toBe(true);
+    expect(web.every(model => model.multi_agent_version === "v1")).toBe(true);
     expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
   });
 

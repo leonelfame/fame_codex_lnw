@@ -377,6 +377,8 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-show", () => browserHost.reveal());
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
+  handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
+  handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
   handle("launcher:browser-login", () => browserHost.openLogin());
   handle("launcher:browser-smoke", async () => {
     const result = await browserHost.smokeTest();

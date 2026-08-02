@@ -113,8 +113,10 @@ class BrowserControlServer {
       }
       const preferences = this.getPreferences();
       if (request.url === "/v1/turn/start") {
-        host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
+        const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
         this.logger.info("browser.turn_started", { traceId: body.traceId });
+        writeJson(response, 200, { ok: true, ...lease });
+        return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
         await host.endTurn(

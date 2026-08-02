@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
 import { extractChatGptTurnIdentity } from "./environment";
+import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
@@ -254,25 +255,16 @@ export class ChatGptTurnSessions {
       existing.touch();
       return existing;
     }
-    this.reclaimSupersededTurns();
+    const active = [...this.entries.values()].filter(session => session.isActive()).length;
+    if (active >= MAX_CHATGPT_BROWSER_TABS) {
+      throw new Error(
+        `ChatGPT Web supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
+      );
+    }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start());
     this.entries.set(key, session);
     return session;
-  }
-
-  /**
-   * The launcher owns a single ChatGPT surface, and a starting turn navigates it to its own
-   * Temporary Chat. Any turn still open there is destroyed by that navigation, so a turn parked
-   * between tool batches - with no request left to abort when the user stops the task - can never
-   * produce an outcome again.
-   */
-  private reclaimSupersededTurns(): void {
-    for (const [key, session] of this.entries) {
-      if (!session.isActive()) continue;
-      session.cancel();
-      this.entries.delete(key);
-    }
   }
 
   clear(): number {
