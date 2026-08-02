@@ -17,6 +17,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Validate launcher installer with Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $source = Get-Content scripts/install-launcher.ps1 -Raw
+          [void][scriptblock]::Create($source)
+          if (-not [Environment]::Is64BitOperatingSystem) {
+            throw "The Windows CI runner must be 64-bit"
+          }
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.11

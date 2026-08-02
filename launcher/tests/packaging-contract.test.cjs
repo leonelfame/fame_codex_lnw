@@ -54,6 +54,8 @@ test("release installers resolve checksummed native launcher assets", () => {
     "the downloaded AppImage must be executable before it is inspected",
   );
   assert.match(windowsInstaller, /codex-web-gpt-\$Version-win-\$Arch\.exe/);
+  assert.match(windowsInstaller, /\[Environment\]::Is64BitOperatingSystem/);
+  assert.doesNotMatch(windowsInstaller, /RuntimeInformation/);
 });
 
 test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {

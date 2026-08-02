@@ -37,11 +37,10 @@ if ($Version -and $Version.StartsWith("v")) { $Version = $Version.Substring(1) }
 if (-not $Version) { throw "Could not resolve the latest Codex Web GPT release" }
 if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Invalid release version: $Version" }
 
-$Architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-$Arch = switch ($Architecture) {
-  "x64" { "x64" }
-  default { throw "The packaged Windows launcher currently supports x64; detected $Architecture" }
+if (-not [Environment]::Is64BitOperatingSystem) {
+  throw "The packaged Windows launcher requires 64-bit Windows"
 }
+$Arch = "x64"
 
 $Asset = "codex-web-gpt-$Version-win-$Arch.exe"
 $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
