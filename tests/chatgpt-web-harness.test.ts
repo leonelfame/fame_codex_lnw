@@ -908,4 +908,49 @@ describe("ChatGPT outer-native harness v3", () => {
       await broker.close();
     }
   }, 30_000);
+
+  test("serves the outer-native bridge contract over MCP stdio for a turn registered without a turn timeout", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-mcp-no-ttl-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const gatewayOnlyEnvironment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    gatewayOnlyEnvironment.tools = gatewayOnlyEnvironment.tools.filter(tool => (
+      tool.name === "exec" || tool.name === "search_openai_docs"
+    ));
+    const token = await broker.register(gatewayOnlyEnvironment);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "codex-chatgpt-web-harness-test", version: "1.0.0" });
+    const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+
+    try {
+      await client.connect(transport);
+
+      const bound = await call("codex_bind_turn", { turn_token: token });
+      expect(bound.content).toEqual([{ type: "text", text: expect.stringContaining("binding_") }]);
+      expect(bound.isError).not.toBe(true);
+      const binding = bound.structuredContent as { binding_id: string; expires_at: string | null };
+      expect(binding.binding_id).toStartWith("binding_");
+      expect(binding.expires_at).toBeNull();
+
+      const execPromise = call("codex_exec", { binding_id: binding.binding_id, cmd: "pwd", workdir: tempRoot });
+      const [execRequest] = await Promise.race([
+        broker.nextToolBatch(token),
+        execPromise.then(response => {
+          throw new Error(`codex_exec settled before reaching the broker: ${JSON.stringify(response.content)}`);
+        }),
+      ]);
+      expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
+      expect(execRequest?.input).toContain(`tools["exec_command"](${JSON.stringify({ cmd: "pwd", workdir: tempRoot })})`);
+      broker.completeTool(token, execRequest!.callId, toolResult({ output: tempRoot, exit_code: 0 }));
+      expect((await execPromise).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
+    } finally {
+      await client.close().catch(() => {});
+      broker.revoke(token);
+      await broker.close();
+    }
+  }, 30_000);
 });

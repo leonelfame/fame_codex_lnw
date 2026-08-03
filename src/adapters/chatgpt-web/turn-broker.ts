@@ -498,10 +498,16 @@ export class TurnBroker {
   }
 }
 
+/**
+ * A turn registered without a TTL has no deadline to bound its tool calls against, so a null
+ * timeout waits for as long as the turn itself lives. Undefined keeps the bounded default, because
+ * a caller that cannot compute a deadline must not silently inherit an unbounded wait. An
+ * unbounded call still ends when the turn is revoked or the broker drops the connection.
+ */
 export async function callTurnBroker<T>(
   socketPath: string,
   request: Omit<BrokerRequest, "id">,
-  timeoutMs = 5_000,
+  timeoutMs: number | null = 5_000,
 ): Promise<T> {
   const id = opaqueId("request");
   return new Promise<T>((resolveCall, rejectCall) => {
@@ -515,9 +521,12 @@ export async function callTurnBroker<T>(
       socket.destroy();
       rejectCall(error);
     };
-    const timer = setTimeout(() => finishError(new Error("ChatGPT web turn broker timed out")), timeoutMs);
+    const timer = timeoutMs === null
+      ? undefined
+      : setTimeout(() => finishError(new Error("ChatGPT web turn broker timed out")), timeoutMs);
     socket.setEncoding("utf8");
     socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
+    socket.once("close", () => finishError(new Error("ChatGPT web turn broker closed the connection")));
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...request })}\n`));
     socket.on("data", chunk => {
       if (settled) return;
