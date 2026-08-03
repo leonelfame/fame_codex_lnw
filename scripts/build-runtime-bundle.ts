@@ -3,6 +3,17 @@ import { join, resolve } from "node:path";
 import { VERSION } from "../src/version";
 
 const root = resolve(import.meta.dir, "..");
+const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+  version?: string;
+  packageManager?: string;
+};
+if (packageJson.version !== VERSION) throw new Error("package.json and runtime version are out of sync");
+const packageManagerMatch = /^bun@(\d+\.\d+\.\d+)$/.exec(packageJson.packageManager ?? "");
+if (!packageManagerMatch) throw new Error("package.json must pin an exact Bun packageManager version");
+const expectedBunVersion = packageManagerMatch[1];
+if (Bun.version !== expectedBunVersion) {
+  throw new Error(`Runtime bundle requires Bun ${expectedBunVersion}, received ${Bun.version}`);
+}
 const output = resolve(process.argv[2] ?? join(root, "dist", "runtime"));
 const appDir = join(output, "app");
 const runtimeDir = join(output, "runtime");
@@ -84,8 +95,6 @@ exec "$root/runtime/bun" "$root/app/cli.js" "$@"
 writeFileSync(join(binDir, launcherName), launcher, process.platform === "win32" ? undefined : { mode: 0o755 });
 if (process.platform !== "win32") chmodSync(join(binDir, launcherName), 0o755);
 
-const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: string };
-if (packageJson.version !== VERSION) throw new Error("package.json and runtime version are out of sync");
 const playwrightPackage = join(appDir, "node_modules", "playwright-core", "package.json");
 writeFileSync(join(output, "manifest.json"), `${JSON.stringify({
   schemaVersion: 1,

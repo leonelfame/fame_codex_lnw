@@ -67,7 +67,7 @@ try {
   if ($Actual -ne $Expected) { throw "SHA-256 verification failed for $Asset" }
   $Process = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
   if ($Process.ExitCode -ne 0) { throw "Installer exited with code $($Process.ExitCode)" }
-  $Executable = Join-Path $env:LOCALAPPDATA "Programs\Codex Web GPT\Codex Web GPT.exe"
+  $Executable = Join-Path $env:LOCALAPPDATA "Programs\codex-web-gpt-launcher\Codex Web GPT.exe"
   if (-not (Test-Path $Executable)) { throw "Installed launcher was not found at $Executable" }
   Start-Process $Executable
   Write-Host "Installed $Executable"

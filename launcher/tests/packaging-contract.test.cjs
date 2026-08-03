@@ -56,6 +56,11 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(windowsInstaller, /codex-web-gpt-\$Version-win-\$Arch\.exe/);
   assert.match(windowsInstaller, /\[Environment\]::Is64BitOperatingSystem/);
   assert.doesNotMatch(windowsInstaller, /RuntimeInformation/);
+  const expectedWindowsExecutable = `Programs\\${manifest.name}\\${manifest.build.productName}.exe`;
+  assert.ok(
+    windowsInstaller.includes(expectedWindowsExecutable),
+    `the PowerShell installer must launch the NSIS executable at ${expectedWindowsExecutable}`,
+  );
 });
 
 test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
