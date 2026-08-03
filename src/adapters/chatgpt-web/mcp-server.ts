@@ -8,11 +8,11 @@ import { callTurnBroker, type BrokerToolResult } from "./turn-broker";
 
 interface ClaimedTurn {
   bindingId: string;
-  environment: ChatGptTurnEnvironment & { expiresAt: number };
+  environment: ChatGptTurnEnvironment & { expiresAt?: number };
 }
 
 interface ResolvedTurn {
-  environment: ChatGptTurnEnvironment & { expiresAt: number };
+  environment: ChatGptTurnEnvironment & { expiresAt?: number };
 }
 
 const bindingSchema = z.string().min(20).max(256).describe("Opaque binding_id returned by codex_bind_turn.");
@@ -70,8 +70,8 @@ function namedTool(environment: ChatGptTurnEnvironment, requestedWireName: strin
   return tool;
 }
 
-function invocationTimeout(environment: ChatGptTurnEnvironment & { expiresAt: number }): number {
-  return Math.max(1, environment.expiresAt - Date.now());
+function invocationTimeout(environment: ChatGptTurnEnvironment & { expiresAt?: number }): number | null {
+  return environment.expiresAt === undefined ? null : Math.max(1, environment.expiresAt - Date.now());
 }
 
 function asMcpResult(value: BrokerToolResult) {
@@ -124,15 +124,16 @@ function execGatewayProgram(
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
   const server = new McpServer({ name: "codex-native", version: "3.0.0" });
 
-  const environment = async (bindingId: string): Promise<ChatGptTurnEnvironment & { expiresAt: number }> => {
+  const environment = async (bindingId: string): Promise<ChatGptTurnEnvironment & { expiresAt?: number }> => {
     const resolved = await callTurnBroker<ResolvedTurn>(options.brokerSocketPath, { method: "resolve", bindingId });
-    if (resolved.environment.expiresAt <= Date.now()) throw new Error("Codex turn binding expired");
+    const expiresAt = resolved.environment.expiresAt;
+    if (expiresAt !== undefined && expiresAt <= Date.now()) throw new Error("Codex turn binding expired");
     return resolved.environment;
   };
 
   const invoke = async (
     bindingId: string,
-    bound: ChatGptTurnEnvironment & { expiresAt: number },
+    bound: ChatGptTurnEnvironment & { expiresAt?: number },
     tool: CodexTool,
     payload: { arguments?: Record<string, unknown>; input?: string },
   ) => {
@@ -148,7 +149,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
 
   const invokeNative = (
     bindingId: string,
-    bound: ChatGptTurnEnvironment & { expiresAt: number },
+    bound: ChatGptTurnEnvironment & { expiresAt?: number },
     tool: CodexTool,
     payload: { arguments?: Record<string, unknown>; input?: string },
   ) => {
@@ -160,7 +161,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
 
   const invokeNestedNative = (
     bindingId: string,
-    bound: ChatGptTurnEnvironment & { expiresAt: number },
+    bound: ChatGptTurnEnvironment & { expiresAt?: number },
     nestedToolName: string,
     freeform: boolean,
     payload: { arguments?: Record<string, unknown>; input?: string },
@@ -195,7 +196,9 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         roots: claimed.environment.roots,
         writable_roots: claimed.environment.writableRoots,
         sandbox: claimed.environment.sandboxPolicy.type,
-        expires_at: new Date(claimed.environment.expiresAt).toISOString(),
+        expires_at: claimed.environment.expiresAt === undefined
+          ? null
+          : new Date(claimed.environment.expiresAt).toISOString(),
         tool_count: claimed.environment.tools.length,
         command_tool: commandTool ? wireName(commandTool) : gateway ? "exec_command" : null,
         outer_tool_gateway: gateway ? wireName(gateway) : null,

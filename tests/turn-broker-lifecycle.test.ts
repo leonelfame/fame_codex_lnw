@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
@@ -144,6 +145,49 @@ test("turn broker tokens do not expire while their browser turn is still alive",
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function unansweredBrokerEndpoint(name: string, onConnection: (socket: Socket) => void) {
+  const root = mkdtempSync(join(tmpdir(), name));
+  const socketPath = defaultBrokerEndpoint(root);
+  if (!isWindowsPipeEndpoint(socketPath)) mkdirSync(dirname(socketPath), { recursive: true });
+  const server = createServer(onConnection);
+  return {
+    socketPath,
+    listen: () => new Promise<void>(ready => server.listen(socketPath, ready)),
+    close: async () => {
+      await new Promise<void>(done => server.close(() => done()));
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("an unbounded broker call fails when the broker closes without answering", async () => {
+  const broker = unansweredBrokerEndpoint("cgw-broker-closed-", socket => socket.on("data", () => socket.end()));
+  await broker.listen();
+  try {
+    await expect(callTurnBroker(broker.socketPath, { method: "claim", token: "turn_closed" }, null))
+      .rejects.toThrow("closed the connection");
+  } finally {
+    await broker.close();
+  }
+}, 10_000);
+
+test("an unbounded broker call outlives the bounded default timeout", async () => {
+  const accepted: Socket[] = [];
+  const broker = unansweredBrokerEndpoint("cgw-broker-slow-", socket => { accepted.push(socket); });
+  await broker.listen();
+  try {
+    const call = callTurnBroker(broker.socketPath, { method: "claim", token: "turn_unbounded" }, null);
+    const outcome = await Promise.race([
+      call.then(() => "settled", () => "settled"),
+      Bun.sleep(5_300).then(() => "pending"),
+    ]);
+    expect(outcome).toBe("pending");
+  } finally {
+    for (const socket of accepted) socket.destroy();
+    await broker.close();
+  }
+}, 15_000);
 
 test("turn broker names the finished turn that owns a replayed handle", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
