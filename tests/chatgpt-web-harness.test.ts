@@ -426,6 +426,45 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(imageUsage.inputTokens).toBeGreaterThanOrEqual(textUsage.inputTokens + 3_500);
   });
 
+  test("keeps the ChatGPT rate-limit dialog distinct from model capacity and UI failures", () => {
+    const rateLimit = buildResponseJSON([{
+      type: "error",
+      message: "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
+      status: 429,
+      errorType: "rate_limit_error",
+      code: "rate_limit_exceeded",
+      retryable: true,
+    }], CHATGPT_WEB_MODEL_ID) as {
+      status: string;
+      retryable: boolean;
+      error: { type: string; code: string };
+    };
+    expect(rateLimit).toMatchObject({
+      status: "failed",
+      retryable: true,
+      error: { type: "rate_limit_error", code: "rate_limit_exceeded" },
+    });
+
+    const missingEffort = buildResponseJSON([{
+      type: "error",
+      message: "ChatGPT effort menu did not expose item index 1; item count: 0",
+      status: 502,
+      errorType: "server_error",
+      code: "upstream_server_error",
+      retryable: false,
+    }], CHATGPT_WEB_MODEL_ID) as {
+      status: string;
+      retryable: boolean;
+      error: { type: string; code: string };
+    };
+    expect(missingEffort).toMatchObject({
+      status: "failed",
+      retryable: false,
+      error: { type: "server_error", code: "upstream_server_error" },
+    });
+    expect(missingEffort.error.code).not.toBe("server_is_overloaded");
+  });
+
   test("returns one native compaction item with preserved estimated usage", () => {
     const request = parsed();
     const summary = "Completed the tool loop; continue with the deployment check.";

@@ -4,6 +4,7 @@ import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "..
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -414,6 +415,17 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         session.cancel();
         if (session.runtime.mode === "tools") {
           void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
+        }
+        if (error instanceof ChatGptWebAdapterError) {
+          emit({
+            type: "error",
+            message: error.message,
+            status: error.status,
+            errorType: error.errorType,
+            code: error.code,
+            retryable: error.retryable,
+          });
+          return;
         }
         throw error;
       } finally {

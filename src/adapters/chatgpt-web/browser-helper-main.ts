@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import type { CompiledChatGptWebPrompt } from "./prompt";
@@ -132,6 +133,12 @@ async function run(message: RunMessage): Promise<void> {
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
+      ...(error instanceof ChatGptWebAdapterError ? {
+        status: error.status,
+        errorType: error.errorType,
+        code: error.code,
+        retryable: error.retryable,
+      } : {}),
     });
   } finally {
     abortControllers.delete(message.id);

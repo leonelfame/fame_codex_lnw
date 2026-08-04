@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 
@@ -16,7 +17,16 @@ type HelperMessage =
   | { type: "ready" }
   | { type: "event"; id: string; event: "heartbeat" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "result"; id: string; text: string }
-  | { type: "error"; id: string; name?: string; message: string };
+  | {
+      type: "error";
+      id: string;
+      name?: string;
+      message: string;
+      status?: number;
+      errorType?: string;
+      code?: string;
+      retryable?: boolean;
+    };
 
 function parseHelperMessage(line: string): HelperMessage {
   const value = JSON.parse(line) as unknown;
@@ -59,8 +69,26 @@ function parseHelperMessage(line: string): HelperMessage {
   if (message.type === "error") {
     const errorMessage = message.message;
     const errorName = message.name;
+    const status = message.status;
+    const errorType = message.errorType;
+    const code = message.code;
+    const retryable = message.retryable;
+    const structured = status !== undefined
+      || errorType !== undefined
+      || code !== undefined
+      || retryable !== undefined;
     if (typeof errorMessage !== "string"
-      || (errorName !== undefined && typeof errorName !== "string")) {
+      || (errorName !== undefined && typeof errorName !== "string")
+      || (structured && (
+        !Number.isInteger(status)
+        || (status as number) < 400
+        || (status as number) > 599
+        || typeof errorType !== "string"
+        || !errorType
+        || typeof code !== "string"
+        || !code
+        || typeof retryable !== "boolean"
+      ))) {
       throw new Error("Launcher browser helper error payload is invalid");
     }
     return {
@@ -68,6 +96,12 @@ function parseHelperMessage(line: string): HelperMessage {
       id: message.id,
       message: errorMessage,
       ...(errorName !== undefined ? { name: errorName as string } : {}),
+      ...(structured ? {
+        status: status as number,
+        errorType: errorType as string,
+        code: code as string,
+        retryable: retryable as boolean,
+      } : {}),
     };
   }
   throw new Error("Launcher browser helper emitted an unknown message type");
@@ -261,9 +295,16 @@ export class LauncherBrowserHelperClient {
       this.finish(message.id);
       pending.resolve(message.text);
     } else if (message.type === "error") {
-      const error = message.name === "AbortError"
-        ? new DOMException(message.message, "AbortError")
-        : new Error(message.message);
+      const error = message.status !== undefined
+        ? new ChatGptWebAdapterError(message.message, {
+          status: message.status,
+          errorType: message.errorType!,
+          code: message.code!,
+          retryable: message.retryable!,
+        })
+        : message.name === "AbortError"
+          ? new DOMException(message.message, "AbortError")
+          : new Error(message.message);
       this.finish(message.id);
       pending.reject(error);
     }

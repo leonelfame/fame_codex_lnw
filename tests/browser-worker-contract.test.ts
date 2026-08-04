@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import type { Page } from "playwright-core";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, throwIfChatGptRateLimitDialog } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -476,6 +477,65 @@ test("effort selection uses structural menu indices instead of localized labels"
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
+});
+
+test("effort selection handles the known ChatGPT rate-limit dialog before keyboard activation", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
+  const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
+  const selectionSource = workerSource.slice(selectionStart, selectionEnd);
+  const guard = selectionSource.indexOf("throwIfChatGptRateLimitDialog(page)");
+  const activation = selectionSource.indexOf('currentEffort.press("Enter")');
+
+  expect(workerSource).toContain("Too many requests");
+  expect(workerSource).toContain("making requests too quickly");
+  expect(guard).toBeGreaterThan(-1);
+  expect(activation).toBeGreaterThan(guard);
+  expect(selectionSource).not.toContain("currentEffort.click");
+  expect(selectionSource).not.toContain("is unavailable");
+});
+
+function dialogPage(text: string): { page: Page; pressed: string[] } {
+  let matches = true;
+  const pressed: string[] = [];
+  const button = {
+    last: () => button,
+    isVisible: async () => matches,
+    press: async (key: string) => { pressed.push(key); },
+  };
+  const dialog = {
+    filter: ({ hasText }: { hasText: string | RegExp }) => {
+      matches &&= typeof hasText === "string" ? text.includes(hasText) : hasText.test(text);
+      return dialog;
+    },
+    last: () => dialog,
+    isVisible: async () => matches,
+    getByRole: () => button,
+  };
+  return {
+    page: { locator: () => dialog } as unknown as Page,
+    pressed,
+  };
+}
+
+test("the known ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
+  const fixture = dialogPage("Too many requests. You're making requests too quickly.");
+
+  await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_exceeded",
+    retryable: true,
+  });
+  expect(fixture.pressed).toEqual(["Enter"]);
+});
+
+test("unrelated ChatGPT dialogs are left untouched", async () => {
+  const fixture = dialogPage("Confirm another action");
+
+  await throwIfChatGptRateLimitDialog(fixture.page);
+  expect(fixture.pressed).toEqual([]);
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {

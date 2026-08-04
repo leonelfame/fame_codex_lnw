@@ -25,6 +25,7 @@ import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { ChatGptWebAdapterError } from "./adapter-error";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -54,6 +55,32 @@ export const CHATGPT_UI_SETTLE_MS = 250;
 const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
+
+const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
+  .filter({ hasText: /Too many requests/i })
+  .filter({ hasText: /making requests too quickly/i })
+  .last();
+
+export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
+  const dialog = chatGptRateLimitDialog(page);
+  if (!await dialog.isVisible().catch(() => false)) return;
+
+  const acknowledge = dialog.getByRole("button", { name: "Got it", exact: true }).last();
+  if (await acknowledge.isVisible().catch(() => false)) {
+    try {
+      await acknowledge.press("Enter");
+    } catch (error) {
+      throw new ChatGptWebAdapterError(
+        `ChatGPT rate-limit dialog is open, but its acknowledgement failed: ${error instanceof Error ? error.message : String(error)}`,
+        { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+      );
+    }
+  }
+  throw new ChatGptWebAdapterError(
+    "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+}
 
 const browserStageTimeouts = {
   browserPage: 60_000,
@@ -515,19 +542,33 @@ export class ChatGptBrowserWorker {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
     await settleChatGptUi();
+    await throwIfChatGptRateLimitDialog(page);
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const menuVisible = await effortMenu.isVisible().catch(() => false);
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
-    if (!menuVisible && menuExpanded !== "true") await currentEffort.press("Enter");
+    if (!menuVisible && menuExpanded !== "true") {
+      await throwIfChatGptRateLimitDialog(page);
+      await currentEffort.press("Enter");
+    }
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
+    const waitAbort = new AbortController();
     try {
-      await effortChoice.waitFor({ state: "visible", timeout: 70_000 });
-    } catch {
-      throw new Error(
-        `ChatGPT effort item index ${mode.uiEffortIndex} is unavailable`
-        + `; available item count: ${await effortChoices.count().catch(() => 0)}`,
+      const ready = await Promise.race([
+        effortChoice.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "effort" as const),
+        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
+      ]);
+      if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
+    } catch (error) {
+      if (error instanceof ChatGptWebAdapterError) throw error;
+      await throwIfChatGptRateLimitDialog(page);
+      throw new ChatGptWebAdapterError(
+        `ChatGPT effort menu did not expose item index ${mode.uiEffortIndex}`
+        + `; item count: ${await effortChoices.count().catch(() => 0)}`,
+        { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
       );
+    } finally {
+      waitAbort.abort();
     }
     const selected = await effortChoice.getAttribute("aria-checked");
     if (selected !== "true" && selected !== "false") {
@@ -537,6 +578,7 @@ export class ChatGptBrowserWorker {
       await page.keyboard.press("Escape");
       return mode;
     }
+    await throwIfChatGptRateLimitDialog(page);
     await effortChoice.press("Enter");
 
     const deadline = Date.now() + 40_000;
@@ -544,7 +586,10 @@ export class ChatGptBrowserWorker {
     while (Date.now() < deadline) {
       if (!await effortMenu.isVisible().catch(() => false)) {
         const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
-        if (expanded !== "true") await currentEffort.press("Enter");
+        if (expanded !== "true") {
+          await throwIfChatGptRateLimitDialog(page);
+          await currentEffort.press("Enter");
+        }
         await effortChoice.waitFor({
           state: "visible",
           timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),

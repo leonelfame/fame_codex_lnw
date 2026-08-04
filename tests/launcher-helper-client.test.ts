@@ -2,8 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
-import type { ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND } from "../src/launcher-browser-host";
 
 const roots: string[] = [];
@@ -128,4 +129,61 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
 
   expect(messages).toEqual(["run", "abort"]);
   expect(released).toBe(true);
+});
+
+test("structured helper errors preserve the ChatGPT adapter failure contract", async () => {
+  const client = new LauncherBrowserHelperClient({
+    appName: "Codex Native",
+    browserHost: "launcher",
+    browserHostDescriptorPath: "/durable/launcher.json",
+    storageStatePath: "/durable/unused-state.json",
+    chromeExecutablePath: "/durable/unused-chrome",
+    turnTimeoutMs: 60_000,
+    headed: true,
+    autoApproveToolCalls: false,
+  });
+  const internal = client as unknown as {
+    child?: unknown;
+    pending: Map<string, {
+      turn: BrowserTurn;
+      resolve: (value: string) => void;
+      reject: (error: Error) => void;
+    }>;
+    handleLine(child: unknown, line: string): void;
+  };
+  const child = {};
+  internal.child = child;
+  const result = new Promise<string>((resolveResult, rejectResult) => {
+    internal.pending.set("rate-limit-123", {
+      turn: {
+        traceId: "rate-limit-123",
+        modelId: "chatgpt-web/medium",
+        capabilities: { localToolsEnabled: false, proAvailable: false },
+        prepare: async () => ({ text: "inspect", images: [], release() {} }),
+        onTextDelta() {},
+      },
+      resolve: resolveResult,
+      reject: rejectResult,
+    });
+  });
+
+  internal.handleLine(child, JSON.stringify({
+    type: "error",
+    id: "rate-limit-123",
+    name: "ChatGptWebAdapterError",
+    message: "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_exceeded",
+    retryable: true,
+  }));
+
+  const error = await result.then(() => undefined, failure => failure);
+  expect(error).toBeInstanceOf(ChatGptWebAdapterError);
+  expect(error).toMatchObject({
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_exceeded",
+    retryable: true,
+  });
 });
