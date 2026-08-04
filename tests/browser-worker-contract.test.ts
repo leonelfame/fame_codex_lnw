@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, throwIfChatGptRateLimitDialog, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -558,6 +558,65 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
 
   await throwIfChatGptTerminalErrorAlert(fixture.page);
   expect(fixture.pressed).toEqual([]);
+});
+
+function toolConfirmationPage(options: { disappearAfterReads?: number } = {}): {
+  page: Page;
+  pressed: string[];
+} {
+  let reads = 0;
+  let visible = true;
+  const pressed: string[] = [];
+  const button = (name: string) => ({
+    last: () => button(name),
+    waitFor: async () => {},
+    press: async (key: string) => {
+      pressed.push(`${name}:${key}`);
+      visible = false;
+    },
+  });
+  const dialog = {
+    filter: ({ hasText }: { hasText: string }) => {
+      expect(hasText).toBe("Allow ChatGPT to use Codex Native?");
+      return dialog;
+    },
+    last: () => dialog,
+    isVisible: async () => {
+      reads += 1;
+      if (options.disappearAfterReads !== undefined && reads >= options.disappearAfterReads) visible = false;
+      return visible;
+    },
+    getByRole: (_role: string, input: { name: string }) => button(input.name),
+    waitFor: async ({ state }: { state: string }) => {
+      expect(state).toBe("hidden");
+      expect(visible).toBeFalse();
+    },
+  };
+  return {
+    page: { locator: () => dialog } as unknown as Page,
+    pressed,
+  };
+}
+
+test("manual ChatGPT connector approval pauses and resumes the same browser turn", async () => {
+  const fixture = toolConfirmationPage({ disappearAfterReads: 3 });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 100)).toBeTrue();
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("an unanswered ChatGPT connector approval is denied instead of aborting the turn", async () => {
+  const fixture = toolConfirmationPage();
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Deny:Enter"]);
+});
+
+test("explicit connector auto-approval still selects Allow once", async () => {
+  const fixture = toolConfirmationPage();
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:Enter"]);
 });
 
 test("browser preflight fails closed with Codex's native context-window error contract", () => {

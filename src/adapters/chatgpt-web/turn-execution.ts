@@ -128,6 +128,9 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
     threadId: identity.threadId,
     turnId: identity.turnId,
     purpose: parsed._compactionRequest ? "compaction" : "response",
+    userInputs: parsed.context.messages
+      .filter(message => message.role === "user")
+      .map(message => message.content),
   };
   return createHash("sha256").update(JSON.stringify({
     modelId: parsed.modelId,

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   LAUNCHER_TURN_END_TIMEOUT_MS,
   LAUNCHER_TURN_START_TIMEOUT_MS,
+  LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS,
   LAUNCHER_BROWSER_HOST_KIND,
   inspectLauncherBrowserHost,
   notifyLauncherTurn,
@@ -108,6 +109,7 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
 });
 
 test("launcher session verification uses the authenticated control channel instead of Bun CDP", async () => {
+  expect(LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS).toBe(120_000);
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -136,6 +138,30 @@ test("launcher session verification uses the authenticated control channel inste
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("launcher session verification reports its own deadline instead of a generic abort", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 30));
+    if (!response.destroyed) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end('{"error":"late"}\n');
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(inspectLauncherBrowserHost(path, { detectPro: true, timeoutMs: 5 }))
+      .rejects.toThrow("session inspection timed out after 5ms");
+  } finally {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }
 });
 

@@ -219,8 +219,15 @@ export async function inspectLauncherBrowserHost(
   options: { detectPro?: boolean; timeoutMs?: number } = {},
 ): Promise<{ proAvailable?: boolean; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const timeoutMs = options.timeoutMs ?? (options.detectPro
+    ? LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS
+    : LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/session/inspect`, {
       method: "POST",
@@ -241,11 +248,17 @@ export async function inspectLauncherBrowserHost(
     }
     return { url: body.url, ...(options.detectPro ? { proAvailable: body.proAvailable as boolean } : {}) };
   } catch (error) {
-    throw new Error(`Launcher ChatGPT session could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+    const detail = timedOut
+      ? `session inspection timed out after ${timeoutMs}ms`
+      : error instanceof Error ? error.message : String(error);
+    throw new Error(`Launcher ChatGPT session could not be verified: ${detail}`);
   } finally {
     clearTimeout(timer);
   }
 }
+
+export const LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS = 30_000;
+export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | { phase: "start"; traceId: string; helperPid: number }

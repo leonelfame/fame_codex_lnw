@@ -136,7 +136,12 @@ function workspaceMetadataEnvironmentBeforeUser(
     const trimmed = text.trim();
     if (!/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) continue;
 
-    const cwdMatches = [...trimmed.matchAll(/<cwd>([^<]+)<\/cwd>/g)].map(match => decodeXmlText(match[1]!.trim()));
+    let cwdMatches: string[];
+    try {
+      cwdMatches = selectedEnvironmentCwdMatches(trimmed).map(value => decodeXmlText(value.trim()));
+    } catch {
+      continue;
+    }
     if (cwdMatches.length !== 1 || !isAbsolute(cwdMatches[0]!)) continue;
     const rootMatches = [...trimmed.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
       .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => decodeXmlText(match[1]!.trim())));
@@ -221,6 +226,22 @@ function decodeXmlText(value: string): string {
     .replaceAll("&#39;", "'");
 }
 
+function selectedEnvironmentCwdMatches(text: string): string[] {
+  const environments = [...text.matchAll(/<environment\b([^>]*)>([\s\S]*?)<\/environment>/gi)];
+  if (environments.length === 0) {
+    return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
+  }
+  const primary = environments.filter(match => /\bprimary=["']true["']/i.test(match[1] ?? ""));
+  if (primary.length !== 1) {
+    throw new Error("ChatGPT web turn requires exactly one primary Codex environment");
+  }
+  const cwdMatches = [...primary[0]![2]!.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
+  if (cwdMatches.length !== 1) {
+    throw new Error("ChatGPT web primary Codex environment requires exactly one cwd");
+  }
+  return cwdMatches;
+}
+
 function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
@@ -239,7 +260,7 @@ function matchesPath(root: string, path: string): boolean {
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
   const text = trustedEnvironmentText(parsed);
-  const cwdMatches = [...text.matchAll(/<cwd>([^<]+)<\/cwd>/g)].map(match => match[1] ?? "");
+  const cwdMatches = selectedEnvironmentCwdMatches(text);
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
   if (cwdCandidates.length !== 1) throw new Error("ChatGPT web turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;

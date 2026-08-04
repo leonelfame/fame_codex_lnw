@@ -95,6 +95,23 @@ describe("trusted current Codex environment envelope", () => {
     expect(() => extractChatGptTurnEnvironment(currentWire({ includeIds: false })))
       .toThrow("missing cwd");
   });
+
+  test("selects the primary cwd from Codex project environments", () => {
+    const projectEnvironment = `<environment_context>
+  <environments>
+    <environment id="secondary"><cwd>${resolve(root, "secondary")}</cwd></environment>
+    <environment id="primary" primary="true"><cwd>${root}</cwd></environment>
+  </environments>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+    expect(extractChatGptTurnEnvironment(currentWire({ environmentXml: projectEnvironment }))).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
 });
 
 describe("permission_profile sandbox detection (Codex CLI 0.146+)", () => {

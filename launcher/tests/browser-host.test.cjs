@@ -13,7 +13,32 @@ const {
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
   isTemporaryChatUrl,
+  initializationNavigationWasSuperseded,
 } = require("../electron/browser-host.cjs");
+
+test("only a proven replacement navigation suppresses initial ERR_ABORTED noise", () => {
+  const aborted = Object.assign(new Error("ERR_ABORTED (-3) loading 'about:blank'"), { code: "ERR_ABORTED" });
+  assert.equal(initializationNavigationWasSuperseded(
+    aborted,
+    "about:blank#codex-web-gpt-browser-host",
+    "https://chatgpt.com/?temporary-chat=true",
+  ), true);
+  assert.equal(initializationNavigationWasSuperseded(
+    aborted,
+    "about:blank#codex-web-gpt-browser-host",
+    "about:blank#codex-web-gpt-browser-host",
+  ), false);
+  assert.equal(initializationNavigationWasSuperseded(
+    aborted,
+    "about:blank#codex-web-gpt-browser-host",
+    "about:blank",
+  ), false);
+  assert.equal(initializationNavigationWasSuperseded(
+    new Error("net::ERR_FAILED"),
+    "about:blank#codex-web-gpt-browser-host",
+    "https://chatgpt.com/?temporary-chat=true",
+  ), false);
+});
 
 function createContents() {
   const calls = [];

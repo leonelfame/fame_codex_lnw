@@ -114,6 +114,14 @@ function isTemporaryChatUrl(value) {
     && parsed.searchParams.get("temporary-chat") === "true";
 }
 
+function initializationNavigationWasSuperseded(error, expectedUrl, currentUrl) {
+  const code = error && typeof error === "object" ? error.code : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return (code === "ERR_ABORTED" || /\bERR_ABORTED\s*\(-3\)/.test(message))
+    && currentUrl !== expectedUrl
+    && isTemporaryChatUrl(currentUrl);
+}
+
 class BrowserHost {
   constructor({ window, descriptorPath, cdpPort, control, helper, logger, publishState }) {
     this.window = window;
@@ -165,6 +173,11 @@ class BrowserHost {
     this.view.setVisible(false);
     this.bindWebContents();
     void this.view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
+      const currentUrl = this.view.webContents.getURL();
+      if (initializationNavigationWasSuperseded(error, IDLE_BROWSER_URL, currentUrl)) {
+        this.logger.info("browser.initialization_superseded", { url: currentUrl });
+        return;
+      }
       this.logger.error("browser.initialization_failed", { message: error instanceof Error ? error.message : String(error) });
       this.setState({ status: "error", message: "Embedded browser failed to initialize" });
     });
@@ -1397,6 +1410,7 @@ module.exports = {
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
+  initializationNavigationWasSuperseded,
   isTemporaryChatUrl,
   TEMPORARY_CHAT_URL,
 };

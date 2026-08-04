@@ -278,6 +278,13 @@ describe("ChatGPT outer-native harness v3", () => {
       timestamp: Date.now(),
     });
     expect(chatGptTurnExecutionKey(first)).toBe(chatGptTurnExecutionKey(second));
+    const steered = structuredClone(second);
+    steered.context.messages.push({
+      role: "user",
+      content: "Stop and review the implementation before continuing",
+      timestamp: Date.now(),
+    });
+    expect(chatGptTurnExecutionKey(steered)).not.toBe(chatGptTurnExecutionKey(second));
     const compact = structuredClone(first);
     compact._compactionRequest = true;
     expect(chatGptTurnExecutionKey(compact)).not.toBe(chatGptTurnExecutionKey(first));

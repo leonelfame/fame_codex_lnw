@@ -47,6 +47,7 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
+export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 /**
  * ChatGPT applies composer state asynchronously, and a fast host can reach the next step before the
  * editor has taken the previous one. This is headroom for that, not a readiness check.
@@ -94,6 +95,40 @@ export async function throwIfChatGptTerminalErrorAlert(page: Page): Promise<void
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
     { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
   );
+}
+
+export async function resolveChatGptToolConfirmation(
+  page: Page,
+  appName: string,
+  autoApprove: boolean,
+  signal?: AbortSignal,
+  timeoutMs = CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
+): Promise<boolean> {
+  const dialog = page.locator('[role="dialog"]')
+    .filter({ hasText: `Allow ChatGPT to use ${appName}?` })
+    .last();
+  if (!await dialog.isVisible().catch(() => false)) return false;
+
+  if (autoApprove) {
+    const allowOnce = dialog.getByRole("button", { name: "Allow once", exact: true }).last();
+    await allowOnce.waitFor({ state: "visible", timeout: 10_000 });
+    await allowOnce.press("Enter");
+    return true;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (!await dialog.isVisible().catch(() => false)) return true;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now()))));
+  }
+
+  if (!await dialog.isVisible().catch(() => false)) return true;
+  const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
+  await deny.waitFor({ state: "visible", timeout: 5_000 });
+  await deny.press("Enter");
+  await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+  return true;
 }
 
 export function assertChatGptWebInputWithinContextWindow(
@@ -862,20 +897,6 @@ export class ChatGptBrowserWorker {
     throw new Error("ChatGPT accepted the prompt attachments but did not make the message ready to send");
   }
 
-  private async handleToolConfirmation(page: Page): Promise<boolean> {
-    const heading = page.getByText(`Allow ChatGPT to use ${this.config.appName}?`, { exact: true }).last();
-    if (!await heading.isVisible().catch(() => false)) return false;
-    if (!this.config.autoApproveToolCalls) {
-      throw new Error(
-        `ChatGPT is waiting for confirmation to use ${this.config.appName}; set chatgptWeb.autoApproveToolCalls=true to authorize per-call "Allow once" clicks`,
-      );
-    }
-    const allowOnce = page.getByRole("button", { name: "Allow once", exact: true }).last();
-    await allowOnce.waitFor({ state: "visible", timeout: 10_000 });
-    await allowOnce.press("Enter");
-    return true;
-  }
-
   private async responseDomSnapshot(responseTurn: Locator): Promise<ChatGptResponseDomSnapshot> {
     const snapshot = await responseTurn.evaluate((element, completionActionSelector) => {
       const root = element as HTMLElement;
@@ -1155,7 +1176,12 @@ export class ChatGptBrowserWorker {
 
         await throwIfChatGptTerminalErrorAlert(page);
 
-        if (mode.localTools && await this.handleToolConfirmation(page)) {
+        if (mode.localTools && await resolveChatGptToolConfirmation(
+          page,
+          this.config.appName,
+          this.config.autoApproveToolCalls,
+          turn.abortSignal,
+        )) {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
