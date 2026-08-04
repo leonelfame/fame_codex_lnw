@@ -265,8 +265,9 @@ test("launcher repairs its runtime before building the tunnel MCP command", asyn
   try {
     await supervisor.runTunnelConnectCommand(config);
     const command = connectArgs[connectArgs.indexOf("--mcp-command") + 1];
+    const serializedRuntime = repairedRuntime.replaceAll("\\", "\\\\");
     assert.equal(runtimeRepairs, 1);
-    assert.equal(command.includes(repairedRuntime), true);
+    assert.equal(command.includes(serializedRuntime), true);
     assert.equal(command.includes(`${path.sep}versions${path.sep}`), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
