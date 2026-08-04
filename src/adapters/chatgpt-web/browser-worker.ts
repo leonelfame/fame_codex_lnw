@@ -23,6 +23,7 @@ import {
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
+import { resolveChatGptWebContextLimits } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { ChatGptWebAdapterError } from "./adapter-error";
@@ -79,6 +80,31 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   throw new ChatGptWebAdapterError(
     "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
     { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+}
+
+const chatGptTerminalErrorAlert = (page: Page): Locator => page.locator('[role="alert"]')
+  .filter({ hasText: /Something went wrong/i })
+  .filter({ hasText: /help\.openai\.com/i })
+  .last();
+
+export async function throwIfChatGptTerminalErrorAlert(page: Page): Promise<void> {
+  if (!await chatGptTerminalErrorAlert(page).isVisible().catch(() => false)) return;
+  throw new ChatGptWebAdapterError(
+    "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
+    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
+  );
+}
+
+export function assertChatGptWebInputWithinContextWindow(
+  estimatedInputTokens: number,
+  proAvailable: boolean,
+): void {
+  const { contextWindow } = resolveChatGptWebContextLimits(proAvailable);
+  if (estimatedInputTokens < contextWindow) return;
+  throw new ChatGptWebAdapterError(
+    `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this ChatGPT Web model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
 
@@ -632,6 +658,7 @@ export class ChatGptBrowserWorker {
   ): Promise<ChatGptSubmissionEvidence> {
     const visibleStopButtons = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible: true });
     for (;;) {
+      await throwIfChatGptTerminalErrorAlert(page);
       const [userTurnCount, assistantTurnCount, visibleStopButtonCount] = await Promise.all([
         userTurns.count(),
         responseTurns.count(),
@@ -1018,6 +1045,10 @@ export class ChatGptBrowserWorker {
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
+      assertChatGptWebInputWithinContextWindow(
+        estimatedInputTokens,
+        turn.capabilities.proAvailable,
+      );
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
@@ -1121,6 +1152,8 @@ export class ChatGptBrowserWorker {
           turn.onHeartbeat?.();
           lastHeartbeat = Date.now();
         }
+
+        await throwIfChatGptTerminalErrorAlert(page);
 
         if (mode.localTools && await this.handleToolConfirmation(page)) {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));

@@ -4,6 +4,26 @@ export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
 export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+export const CHATGPT_WEB_PLUS_CONTEXT_WINDOW = 225_000;
+export const CHATGPT_WEB_PRO_CONTEXT_WINDOW = 256_000;
+
+export interface ChatGptWebContextLimits {
+  contextWindow: number;
+  autoCompactTokenLimit: number;
+}
+
+/** Resolve the authenticated account's product limit for one visible ChatGPT mode. */
+export function resolveChatGptWebContextLimits(
+  proAvailable: boolean,
+): ChatGptWebContextLimits {
+  const contextWindow = proAvailable ? CHATGPT_WEB_PRO_CONTEXT_WINDOW : CHATGPT_WEB_PLUS_CONTEXT_WINDOW;
+  return {
+    contextWindow,
+    // Leave ten percent for Codex to submit and receive the compact checkpoint before the hard cap.
+    autoCompactTokenLimit: Math.floor(contextWindow * 0.9),
+  };
+}
+
 export interface ChatGptWebModelRoute {
   slug: string;
   displayName: string;
@@ -47,10 +67,10 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
   {
     slug: "chatgpt-web/extra-high",
     displayName: "ChatGPT Web — Extra High",
-    description: "ChatGPT Web Extra High through the native Codex harness.",
+    description: "Account-gated ChatGPT Web Extra High through the native Codex harness.",
     codexEffort: "xhigh",
     adapterEffort: "xhigh",
-    requiresPro: false,
+    requiresPro: true,
   },
   {
     slug: "chatgpt-web/pro",
@@ -78,7 +98,7 @@ export function requireChatGptWebModelRoute(modelId: string, proAvailable: boole
   const route = routesBySlug.get(modelId);
   if (!route) throw new Error(`ChatGPT web model is not enabled: ${modelId}`);
   if (route.requiresPro && !proAvailable) {
-    throw new Error("ChatGPT Web Pro is not available for this account");
+    throw new Error(`${route.displayName} is not available for this account`);
   }
   return route;
 }

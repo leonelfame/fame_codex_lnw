@@ -356,6 +356,10 @@ describe("ChatGPT outer-native harness v3", () => {
       localToolsEnabled: false,
       proAvailable: false,
     })).toThrow("Pro effort is not available");
+    expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", {
+      localToolsEnabled: true,
+      proAvailable: false,
+    })).toThrow("Extra High effort is not available");
     expect(() => resolveChatGptWebModelMode("unknown", "high", toolCapabilities)).toThrow("model is not supported");
   });
 
@@ -463,6 +467,28 @@ describe("ChatGPT outer-native harness v3", () => {
       error: { type: "server_error", code: "upstream_server_error" },
     });
     expect(missingEffort.error.code).not.toBe("server_is_overloaded");
+
+    const contextWindow = buildResponseJSON([{
+      type: "error",
+      message: "This task exceeds the 225,000-token context window. Switch models, run /compact, then retry.",
+      status: 400,
+      errorType: "invalid_request_error",
+      code: "context_length_exceeded",
+      retryable: false,
+    }], CHATGPT_WEB_MODEL_ID) as {
+      status: string;
+      retryable: boolean;
+      error: { type: string; code: string; message: string };
+    };
+    expect(contextWindow).toMatchObject({
+      status: "failed",
+      retryable: false,
+      error: {
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+      },
+    });
+    expect(contextWindow.error.message).toContain("/compact");
   });
 
   test("returns one native compaction item with preserved estimated usage", () => {

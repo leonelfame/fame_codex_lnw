@@ -4,6 +4,7 @@ import {
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_MODEL_ROUTES,
   requireChatGptWebModelRoute,
+  resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { defaultConfig } from "../src/config";
 import { routeChatGptWebRequest } from "../src/server";
@@ -32,10 +33,28 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
   });
 
-  test("does not expose or resolve Pro without the account capability", () => {
-    expect(availableChatGptWebModelRoutes(false).map(route => route.slug)).not.toContain("chatgpt-web/pro");
+  test("exposes only Plus-eligible routes without the Pro account capability", () => {
+    expect(availableChatGptWebModelRoutes(false).map(route => route.slug)).toEqual([
+      "chatgpt-web/light",
+      "chatgpt-web/medium",
+      "chatgpt-web/high",
+    ]);
+    expect(availableChatGptWebModelRoutes(true)).toEqual(CHATGPT_WEB_MODEL_ROUTES);
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", false))
+      .toThrow("Extra High is not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", false))
       .toThrow("Pro is not available for this account");
+  });
+
+  test("uses one account-specific context limit for every Web mode with ten-percent compact headroom", () => {
+    expect(resolveChatGptWebContextLimits(false)).toEqual({
+      contextWindow: 225_000,
+      autoCompactTokenLimit: 202_500,
+    });
+    expect(resolveChatGptWebContextLimits(true)).toEqual({
+      contextWindow: 256_000,
+      autoCompactTokenLimit: 230_400,
+    });
   });
 
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {

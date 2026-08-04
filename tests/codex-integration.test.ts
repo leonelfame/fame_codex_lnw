@@ -78,6 +78,20 @@ describe("reversible native Codex route integration", () => {
     expect(uninstallCodexIntegration()).toEqual({ changed: false });
   });
 
+  test("accepts an explicitly persisted built-in openai provider and restores it exactly", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\nmodel_provider = "openai" # explicit built-in default\n';
+    writeFileSync(configPath, original);
+
+    expect(() => preflightCodexIntegration(defaultConfig("browser-only"))).not.toThrow();
+    installCodexIntegration(defaultConfig("browser-only"));
+    expect(readFileSync(configPath, "utf8")).not.toMatch(/^\s*model_provider\s*=/m);
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
   test("restores an explicit remote_compaction_v2 setting byte-for-byte", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

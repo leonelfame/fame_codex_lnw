@@ -110,8 +110,8 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 
 | Mode | Models | Local Codex tools | Extra setup |
 | --- | --- | --- | --- |
-| **Browser-only** | Instant through Pro | No; Codex shows a warning | None |
-| **Full harness** | Instant through Pro | Instant–Extra High: yes; Pro: read-only | OpenAI tunnel + ChatGPT connector |
+| **Browser-only** | Plus: Instant–High; Pro: adds Extra High and Pro | No; Codex shows a warning | None |
+| **Full harness** | Plus: Instant–High; Pro: adds Extra High and Pro | Instant–Extra High: yes; Pro: read-only | OpenAI tunnel + ChatGPT connector |
 
 Every picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and Speed
 rows, but changing them cannot silently change the selected browser model. Pro receives the full

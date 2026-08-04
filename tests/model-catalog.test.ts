@@ -1,10 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
-import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
+import { CHATGPT_WEB_MODEL_ROUTES, resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
 import {
   augmentNativeModelCatalog,
-  CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
-  CHATGPT_WEB_CONTEXT_WINDOW,
   CHATGPT_WEB_MODEL_PRIORITY,
 } from "../src/model-catalog";
 
@@ -58,6 +56,7 @@ describe("native /models augmentation", () => {
     expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
     for (const [index, model] of web.entries()) {
       const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+      const limits = resolveChatGptWebContextLimits(true);
       expect(model).toMatchObject({
         slug: route.slug,
         display_name: route.displayName,
@@ -67,9 +66,9 @@ describe("native /models augmentation", () => {
         multi_agent_version: "v1",
         supported_in_api: true,
         priority: CHATGPT_WEB_MODEL_PRIORITY,
-        context_window: CHATGPT_WEB_CONTEXT_WINDOW,
-        max_context_window: CHATGPT_WEB_CONTEXT_WINDOW,
-        auto_compact_token_limit: CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
+        context_window: limits.contextWindow,
+        max_context_window: limits.contextWindow,
+        auto_compact_token_limit: limits.autoCompactTokenLimit,
         additional_speed_tiers: [],
         service_tiers: [],
         default_service_tier: null,
@@ -94,7 +93,7 @@ describe("native /models augmentation", () => {
     expect(spawnOverrides).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
   });
 
-  test("owns only its namespace, is idempotent, and omits account-gated Pro when unavailable", () => {
+  test("owns only its namespace, is idempotent, and omits Pro-only modes when unavailable", () => {
     const config = defaultConfig("browser-only");
     config.proAvailable = false;
     const polluted = source();
@@ -112,6 +111,14 @@ describe("native /models augmentation", () => {
     expect(web.every(model => model.tool_mode === null)).toBe(true);
     expect(web.every(model => model.multi_agent_version === "v1")).toBe(true);
     expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
+    expect(web.map(model => ({
+      contextWindow: model.context_window,
+      autoCompactTokenLimit: model.auto_compact_token_limit,
+    }))).toEqual([
+      { contextWindow: 225_000, autoCompactTokenLimit: 202_500 },
+      { contextWindow: 225_000, autoCompactTokenLimit: 202_500 },
+      { contextWindow: 225_000, autoCompactTokenLimit: 202_500 },
+    ]);
   });
 
   test("honors an explicit Codex context override without replacing or reordering native models", () => {
@@ -134,9 +141,10 @@ describe("native /models augmentation", () => {
     ]);
     expect(models[1]!.context_window).toBe(300_000);
     for (const model of models.slice(3)) {
-      expect(model.context_window).toBe(CHATGPT_WEB_CONTEXT_WINDOW);
-      expect(model.max_context_window).toBe(CHATGPT_WEB_CONTEXT_WINDOW);
-      expect(model.auto_compact_token_limit).toBe(CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT);
+      const limits = resolveChatGptWebContextLimits(false);
+      expect(model.context_window).toBe(limits.contextWindow);
+      expect(model.max_context_window).toBe(limits.contextWindow);
+      expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
     }
   });
 
@@ -167,7 +175,7 @@ describe("native /models augmentation", () => {
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
     const web = (result.models as Array<Record<string, unknown>>)
       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.length).toBe(4);
+    expect(web.length).toBe(3);
     expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
     expect(web.every(model => model.tool_mode === "code_mode_only")).toBe(true);
   });

@@ -695,7 +695,8 @@ function installRoute(
   const document = parseDocument(text);
   const previous = assignments(document.lines);
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
-    .filter(([, assignment]) => assignment.present)
+    .filter(([key, assignment]) => assignment.present
+      && !(key === "model_provider" && assignment.value === "openai"))
     .map(([key, assignment]) => `${key}=${JSON.stringify(assignment.value)}`);
   if (conflicts.length > 0 && !replaceExistingRoute) {
     throw new Error(

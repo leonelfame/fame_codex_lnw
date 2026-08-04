@@ -30,6 +30,7 @@ export function resolveChatGptWebModelMode(
     case "high":
       return { modelId, effort, displayLabel: "High", uiEffortIndex: 2, localTools: capabilities.localToolsEnabled };
     case "xhigh":
+      if (!capabilities.proAvailable) throw new Error("ChatGPT Extra High effort is not available for this account");
       return { modelId, effort, displayLabel: "Extra High", uiEffortIndex: 3, localTools: capabilities.localToolsEnabled };
     case "max":
       if (!capabilities.proAvailable) throw new Error("ChatGPT Pro effort is not available for this account");

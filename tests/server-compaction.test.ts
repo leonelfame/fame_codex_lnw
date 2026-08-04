@@ -113,16 +113,21 @@ test("rejects an unknown routed compact model instead of treating it as ChatGPT 
   expect(body.error.message).toContain("model is not enabled");
 });
 
-test("rejects the Pro routed model before opening a browser when the account has no Pro access", async () => {
-  const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "chatgpt-web/pro", input: "test", stream: false }),
-  }), defaultConfig("browser-only"));
+test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {
+  for (const [routedModel, label] of [
+    ["chatgpt-web/extra-high", "Extra High"],
+    ["chatgpt-web/pro", "Pro"],
+  ] as const) {
+    const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: routedModel, input: "test", stream: false }),
+    }), defaultConfig("browser-only"));
 
-  expect(response.status).toBe(400);
-  const body = await response.json() as { error: { message: string } };
-  expect(body.error.message).toContain("Pro is not available for this account");
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: { message: string } };
+    expect(body.error.message).toContain(`${label} is not available for this account`);
+  }
 });
 
 test("refuses a ChatGPT Web continuation when local previous-response state is unavailable", async () => {

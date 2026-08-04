@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, throwIfChatGptRateLimitDialog } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, throwIfChatGptRateLimitDialog, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -536,6 +536,50 @@ test("unrelated ChatGPT dialogs are left untouched", async () => {
 
   await throwIfChatGptRateLimitDialog(fixture.page);
   expect(fixture.pressed).toEqual([]);
+});
+
+test("the known terminal ChatGPT error alert returns a structured retryable failure", async () => {
+  const fixture = dialogPage(
+    "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
+  );
+
+  await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 502,
+    errorType: "server_error",
+    code: "upstream_server_error",
+    retryable: true,
+  });
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("unrelated ChatGPT alerts are not terminal", async () => {
+  const fixture = dialogPage("Your file was uploaded successfully");
+
+  await throwIfChatGptTerminalErrorAlert(fixture.page);
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("browser preflight fails closed with Codex's native context-window error contract", () => {
+  expect(() => assertChatGptWebInputWithinContextWindow(225_000, false)).toThrow(
+    "225,000-token context window",
+  );
+  try {
+    assertChatGptWebInputWithinContextWindow(225_000, false);
+    throw new Error("expected context-window preflight to fail");
+  } catch (error) {
+    expect(error).toMatchObject({
+      name: "ChatGptWebAdapterError",
+      status: 400,
+      errorType: "invalid_request_error",
+      code: "context_length_exceeded",
+      retryable: false,
+    });
+    expect(String(error)).toContain("/compact");
+  }
+
+  expect(() => assertChatGptWebInputWithinContextWindow(224_999, false)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(255_999, true)).not.toThrow();
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {

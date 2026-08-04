@@ -3,15 +3,12 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
+  resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 
 type JsonObject = Record<string, unknown>;
 
-/** ChatGPT Web task history is bounded independently from native Codex model configuration. */
-export const CHATGPT_WEB_CONTEXT_WINDOW = 256_000;
-/** Leave enough room for Codex to submit and receive the checkpoint summary before the hard cap. */
-export const CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CHATGPT_WEB_CONTEXT_WINDOW * 0.9);
 /** Keep all five routed models inside Codex's five-entry spawn-agent override registry. */
 export const CHATGPT_WEB_MODEL_PRIORITY = 0;
 
@@ -68,6 +65,7 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
+  const limits = resolveChatGptWebContextLimits(config.proAvailable);
   const model: JsonObject = {
     ...structuredClone(template),
     slug: route.slug,
@@ -90,9 +88,9 @@ export function buildChatGptWebModel(
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
-    context_window: CHATGPT_WEB_CONTEXT_WINDOW,
-    max_context_window: CHATGPT_WEB_CONTEXT_WINDOW,
-    auto_compact_token_limit: CHATGPT_WEB_AUTO_COMPACT_TOKEN_LIMIT,
+    context_window: limits.contextWindow,
+    max_context_window: limits.contextWindow,
+    auto_compact_token_limit: limits.autoCompactTokenLimit,
     // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],
