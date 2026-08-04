@@ -180,7 +180,8 @@ export function compileChatGptWebPrompt(
     ? [
       "For local files, commands, processes, images, user interaction, and configured MCP/apps, use the attached Codex Native plugin inside this same response.",
       `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}. This bind is mandatory on every response, even when the request appears not to need a local operation.`,
-      "Use its returned binding_id on every later Codex Native call. Do not reveal either capability value in the answer.",
+      "turn_token and binding_id are different values: copy the exact binding_ value returned by codex_bind_turn into every later Codex Native call, and never put the turn_ value in a binding_id field. Do not reveal either capability value in the answer.",
+      "A bind result with binding_status active and valid_until outer_turn_end has no time limit. Never report that it expired unless a real Codex Native call returns that exact error.",
       `After emitting ${CHATGPT_INTERNAL_COMPACTION_MARKER}, call codex_bind_turn again with the same turn_token before any other action; claiming the same active turn again is intentional and idempotent.`,
       "Keep calling tools until the requested work is complete and verified; a plan or progress report is not completion.",
       "Use codex_apply_patch for targeted edits, codex_exec for commands, and codex_write_stdin for sessions returned by codex_exec.",
@@ -205,7 +206,7 @@ export function compileChatGptWebPrompt(
     ? [
       "<codex_transport_resume>",
       `The task context is complete. Your first action now must be the actual Codex Native codex_bind_turn call with turn_token ${turnToken}; emit no commentary or answer before its real result.`,
-      "After binding, execute the latest active user request under the preserved task instructions and keep using the returned binding_id for Codex Native calls.",
+      "After binding, copy its exact binding_ result (not the turn_ token) into the binding_id field, execute the latest active user request, and keep using that binding_id for Codex Native calls.",
       "</codex_transport_resume>",
     ]
     : [

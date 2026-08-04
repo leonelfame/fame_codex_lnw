@@ -3,14 +3,16 @@ const path = require("node:path");
 const { renameAtomicFile } = require("./atomic-file.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 
-function validateRuntimeBundle(runtimeRoot, { version, platform, arch }) {
+function validateRuntimeBundle(runtimeRoot, { version, platform, arch, bundleId }) {
   const manifestPath = path.join(runtimeRoot, "manifest.json");
   if (!fs.existsSync(manifestPath)) throw new Error(`Runtime manifest is missing: ${manifestPath}`);
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   if (manifest.schemaVersion !== 1
     || manifest.appVersion !== version
     || manifest.platform !== platform
-    || manifest.arch !== arch) {
+    || manifest.arch !== arch
+    || !/^[a-f0-9]{64}$/.test(manifest.bundleId)
+    || (bundleId && manifest.bundleId !== bundleId)) {
     throw new Error(
       `Runtime bundle identity mismatch: expected ${version} ${platform}/${arch}, received ${JSON.stringify(manifest)}`,
     );
@@ -36,6 +38,8 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   };
   const source = path.join(resourcesPath, "runtime");
   validateRuntimeBundle(source, identity);
+  const sourceManifest = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8"));
+  const expectedIdentity = { ...identity, bundleId: sourceManifest.bundleId };
   const versionsRoot = path.join(coreHome, "versions");
   const destination = path.join(
     versionsRoot,
@@ -43,7 +47,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   );
   if (fs.existsSync(destination)) {
     try {
-      return validateRuntimeBundle(destination, identity);
+      return validateRuntimeBundle(destination, expectedIdentity);
     } catch {
       // A terminated installer or external cleanup can leave a version directory present but
       // incomplete. Rebuild the launcher-owned bundle transactionally from the signed package.
@@ -56,14 +60,14 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   let previousMoved = false;
   try {
     fs.cpSync(source, temporary, { recursive: true, errorOnExist: true, force: false });
-    validateRuntimeBundle(temporary, identity);
+    validateRuntimeBundle(temporary, expectedIdentity);
     if (fs.existsSync(destination)) {
       renameAtomicFile(destination, previous);
       previousMoved = true;
     }
     try {
       renameAtomicFile(temporary, destination);
-      validateRuntimeBundle(destination, identity);
+      validateRuntimeBundle(destination, expectedIdentity);
     } catch (error) {
       fs.rmSync(destination, { recursive: true, force: true });
       if (previousMoved) {
@@ -91,7 +95,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     }
   }
   try { fs.chmodSync(destination, 0o700); } catch {}
-  return validateRuntimeBundle(destination, identity);
+  return validateRuntimeBundle(destination, expectedIdentity);
 }
 
 module.exports = {

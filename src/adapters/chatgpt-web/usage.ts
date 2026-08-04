@@ -1,4 +1,5 @@
 import { estimateTokens } from "../../lib/token-estimate";
+import { resolveChatGptWebContextLimits } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import { compileChatGptWebPrompt } from "./prompt";
@@ -14,7 +15,11 @@ const ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
 const CHATGPT_PLATFORM_RESERVE_TOKENS = 8_192;
 const CHATGPT_IMAGE_RESERVE_TOKENS = 4_096;
 const CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
-const CHATGPT_WEB_CHARS_PER_TOKEN = 3;
+
+// Live ChatGPT composer probes on 2026-08-04 accepted 547k inline characters and disabled Send at
+// 548k. Compact before that product boundary and keep a separate fail-closed submission ceiling.
+export const CHATGPT_WEB_INLINE_PROMPT_AUTO_COMPACT_CHARS = 480_000;
+export const CHATGPT_WEB_INLINE_PROMPT_LIMIT_CHARS = 540_000;
 
 export interface ChatGptWebRoundEvidence {
   answer?: string;
@@ -23,10 +28,7 @@ export interface ChatGptWebRoundEvidence {
 }
 
 function conservativeTextTokens(text: string, modelId: string): number {
-  return Math.max(
-    estimateTokens(text, modelId),
-    text.length === 0 ? 0 : Math.ceil(text.length / CHATGPT_WEB_CHARS_PER_TOKEN),
-  );
+  return estimateTokens(text, modelId);
 }
 
 export function estimateCompiledChatGptWebInputTokens(
@@ -49,10 +51,17 @@ export function estimateChatGptWebInputTokens(
   capabilities: ChatGptWebCapabilities,
 ): number {
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  return estimateCompiledChatGptWebInputTokens(
-    compileChatGptWebPrompt(parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined),
-    parsed.modelId,
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    capabilities,
+    mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
   );
+  const modelTokens = estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
+  const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(capabilities.proAvailable);
+  const transportPressureTokens = Math.ceil(
+    compiled.text.length * autoCompactTokenLimit / CHATGPT_WEB_INLINE_PROMPT_AUTO_COMPACT_CHARS,
+  );
+  return Math.max(modelTokens, transportPressureTokens);
 }
 
 function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {

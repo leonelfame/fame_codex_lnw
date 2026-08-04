@@ -51,12 +51,17 @@ the JSON and are attached natively with stable references. The runtime does not 
 JSONL file, upload a synthetic context document, include prompt hashes, or truncate the envelope.
 Attachment acceptance and send readiness are verified before the turn begins.
 
-ChatGPT owns context compaction inside that browser response. The appended models intentionally
-advertise no Codex context window or auto-compaction threshold, and routed compaction v1/v2 calls
-fail explicitly instead of opening a second summarizer turn. A prompt-level checkpoint marker is
-translated into a visible Codex trace item; tool-capable turns re-bind the same capability after
-that checkpoint. Visible ChatGPT status rows become reasoning summaries, while stable prose between
-rows becomes native Codex commentary.
+The appended models advertise the authenticated account's context window and a ten-percent
+auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
+reserves, rather than inferred from character length. The ChatGPT composer also has an independent
+inline-size boundary: usage accounting asks Codex to compact before that boundary, and a prompt
+that still exceeds the proven hard ceiling fails explicitly before any browser turn opens.
+
+Routed compaction v1/v2 runs as a dedicated read-only browser summarization turn with no broker or
+local tools, then returns the native replacement-history shape expected by Codex. A prompt-level
+checkpoint marker is translated into a visible Codex trace item; tool-capable turns re-bind the
+same capability after that checkpoint. Visible ChatGPT status rows become reasoning summaries,
+while stable prose between rows becomes native Codex commentary.
 
 ## Installation and service lifecycle
 

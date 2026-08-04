@@ -102,6 +102,14 @@ test("settings expose a persistent fail-closed Codex bridge switch and status in
   assert.match(i18nSource, /Turning it off restores your previous model route without deleting setup or saved credentials/);
 });
 
+test("doctor summary never hides failed checks behind trailing healthy checks", () => {
+  assert.match(
+    appSource,
+    /report\.ok\s*\?\s*report\.checks\.slice\(-6\)\s*:\s*report\.checks\.filter\(\(check\) => check\.status !== "ok"\)/,
+  );
+  assert.match(appSource, /visibleChecks\.map\(\(check\) =>/);
+});
+
 test("settings use a dark custom language menu and quiet native scrollbars", () => {
   assert.doesNotMatch(appSource, /<select/);
   assert.match(appSource, /className="language-menu-panel"/);

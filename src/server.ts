@@ -8,6 +8,7 @@ import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
+import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import { readCodexModelContextOverride, type CodexModelContextOverride } from "./codex-integration";
@@ -368,13 +369,28 @@ export async function compactRequest(
   });
   const response = await responseRequest(internal, config, adapterFactory);
   if (!response.ok) return response;
-  let body: { output?: unknown[]; status?: unknown; error?: unknown };
+  let body: {
+    output?: unknown[];
+    status?: unknown;
+    error?: { message?: unknown; type?: unknown; code?: unknown } | null;
+  };
   try {
     body = await response.json() as typeof body;
   } catch {
     return formatErrorResponse(502, "invalid_response_error", "Compaction turn returned invalid JSON");
   }
-  if (body.error || body.status !== "completed") {
+  if (body.error) {
+    const error = {
+      message: typeof body.error.message === "string" ? body.error.message : "Compaction turn failed",
+      type: typeof body.error.type === "string" ? body.error.type : "upstream_error",
+      code: typeof body.error.code === "string" ? body.error.code : null,
+    };
+    return Response.json(
+      { error },
+      { status: httpStatusFromTerminalError(error) },
+    );
+  }
+  if (body.status !== "completed") {
     return formatErrorResponse(502, "upstream_error", `Compaction turn failed (status: ${String(body.status ?? "unknown")})`);
   }
   const items = (body.output ?? []).filter(

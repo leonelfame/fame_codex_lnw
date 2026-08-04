@@ -138,16 +138,23 @@ function workspaceMetadataEnvironmentBeforeUser(
 
     let cwdMatches: string[];
     try {
-      cwdMatches = selectedEnvironmentCwdMatches(trimmed).map(value => decodeXmlText(value.trim()));
+      cwdMatches = environmentCwdMatches(trimmed).map(value => decodeXmlText(value.trim()));
     } catch {
       continue;
     }
     if (cwdMatches.length !== 1 || !isAbsolute(cwdMatches[0]!)) continue;
     const rootMatches = [...trimmed.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
       .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => decodeXmlText(match[1]!.trim())));
-    const declaredRoots = [...new Set((rootMatches.length > 0 ? rootMatches : cwdMatches).map(pathIdentity))];
-    if (declaredRoots.some(path => !normalizedMetadataRoots.includes(path))) continue;
-    if (!normalizedMetadataRoots.some(root => matchesPath(root, pathIdentity(cwdMatches[0]!)))) continue;
+    const declaredRootValues = rootMatches.length > 0 ? rootMatches : cwdMatches;
+    if (declaredRootValues.some(path => !isAbsolute(path))) continue;
+    const declaredRoots = [...new Set(declaredRootValues.map(pathIdentity))];
+    const cwd = pathIdentity(cwdMatches[0]!);
+    // Codex 0.146 binds the primary cwd to client_metadata.workspaces, while --add-dir and
+    // desktop-owned auxiliary roots exist only in the adjacent environment envelope. Bind the
+    // envelope to its metadata-authenticated primary workspace without misclassifying those
+    // additional filesystem roots as conflicting or untrusted.
+    if (!normalizedMetadataRoots.some(root => matchesPath(root, cwd))) continue;
+    if (!declaredRoots.some(root => matchesPath(root, cwd))) continue;
     if (sandboxTypeFromEnvironment(trimmed) !== metadataSandbox) continue;
     return trimmed;
   }
@@ -226,20 +233,8 @@ function decodeXmlText(value: string): string {
     .replaceAll("&#39;", "'");
 }
 
-function selectedEnvironmentCwdMatches(text: string): string[] {
-  const environments = [...text.matchAll(/<environment\b([^>]*)>([\s\S]*?)<\/environment>/gi)];
-  if (environments.length === 0) {
-    return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
-  }
-  const primary = environments.filter(match => /\bprimary=["']true["']/i.test(match[1] ?? ""));
-  if (primary.length !== 1) {
-    throw new Error("ChatGPT web turn requires exactly one primary Codex environment");
-  }
-  const cwdMatches = [...primary[0]![2]!.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
-  if (cwdMatches.length !== 1) {
-    throw new Error("ChatGPT web primary Codex environment requires exactly one cwd");
-  }
-  return cwdMatches;
+function environmentCwdMatches(text: string): string[] {
+  return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
 }
 
 function uniqueAbsolutePaths(values: string[], field: string): string[] {
@@ -260,7 +255,7 @@ function matchesPath(root: string, path: string): boolean {
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
   const text = trustedEnvironmentText(parsed);
-  const cwdMatches = selectedEnvironmentCwdMatches(text);
+  const cwdMatches = environmentCwdMatches(text);
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
   if (cwdCandidates.length !== 1) throw new Error("ChatGPT web turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;

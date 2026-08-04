@@ -70,7 +70,9 @@ policies.
 
 ## Quick start
 
-Install the desktop launcher:
+Install or update the desktop launcher. To update or repair an existing installation, quit the
+launcher and run the same command again; it replaces the application and embedded runtime while
+preserving the ChatGPT profile and launcher configuration.
 
 **macOS or Linux**
 

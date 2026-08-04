@@ -35,6 +35,32 @@ async function dispatchTrustedKey({ debuggerClient, key }) {
   });
 }
 
+async function dispatchTrustedClick({ debuggerClient, point }) {
+  if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+    throw new Error("CDP click point is invalid");
+  }
+  const position = { x: point.x, y: point.y };
+  await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
+    await sendCommand("Input.dispatchMouseEvent", {
+      ...position,
+      type: "mouseMoved",
+      button: "none",
+    });
+    await sendCommand("Input.dispatchMouseEvent", {
+      ...position,
+      type: "mousePressed",
+      button: "left",
+      clickCount: 1,
+    });
+    await sendCommand("Input.dispatchMouseEvent", {
+      ...position,
+      type: "mouseReleased",
+      button: "left",
+      clickCount: 1,
+    });
+  });
+}
+
 async function evaluatePage({ debuggerClient, expression }) {
   if (typeof expression !== "string" || !expression.trim()) {
     throw new Error("CDP evaluation expression is required");
@@ -56,6 +82,7 @@ async function evaluatePage({ debuggerClient, expression }) {
 }
 
 module.exports = {
+  dispatchTrustedClick,
   dispatchTrustedKey,
   evaluatePage,
   withWebContentsDebugger,

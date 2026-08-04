@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
-import { atomicWriteFile, expandUserPath, getConfigDir } from "../../config";
+import { atomicWriteFile, defaultChromeExecutable, expandUserPath, getConfigDir } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import { ChatGptMarkdownBuffer } from "./markdown";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, CHATGPT_MAX_INPUT_IMAGES, containsChatGptCompactionMarker, stripChatGptTransportMarkers, type CompiledChatGptWebPrompt, type ChatGptWebPromptImage } from "./prompt";
-import { estimateCompiledChatGptWebInputTokens } from "./usage";
+import { CHATGPT_WEB_INLINE_PROMPT_LIMIT_CHARS, estimateCompiledChatGptWebInputTokens } from "./usage";
 import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
@@ -46,6 +46,7 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
+export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 /**
@@ -84,9 +85,8 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   );
 }
 
-const chatGptTerminalErrorAlert = (page: Page): Locator => page.locator('[role="alert"]')
-  .filter({ hasText: /Something went wrong/i })
-  .filter({ hasText: /help\.openai\.com/i })
+const chatGptTerminalErrorAlert = (page: Page): Locator => page
+  .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
   .last();
 
 export async function throwIfChatGptTerminalErrorAlert(page: Page): Promise<void> {
@@ -139,6 +139,14 @@ export function assertChatGptWebInputWithinContextWindow(
   if (estimatedInputTokens < contextWindow) return;
   throw new ChatGptWebAdapterError(
     `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this ChatGPT Web model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+  );
+}
+
+export function assertChatGptWebPromptWithinInlineTransport(promptChars: number): void {
+  if (promptChars <= CHATGPT_WEB_INLINE_PROMPT_LIMIT_CHARS) return;
+  throw new ChatGptWebAdapterError(
+    `This task compiles to ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the current ChatGPT composer limit. Switch to a native Codex model, run /compact, then retry this Web model.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -232,10 +240,12 @@ export class ChatGptTurnDomHealthTracker {
   private sawResponse = false;
   private missingResponseSince?: number;
   private emptyCompletionSince?: number;
+  private missingCompletionAction?: { text: string; since: number };
 
   constructor(
     private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
     private readonly emptyCompletionMs = CHATGPT_EMPTY_RESPONSE_GRACE_MS,
+    private readonly missingCompletionActionMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
   ) {}
 
   update(state: {
@@ -267,6 +277,18 @@ export class ChatGptTurnDomHealthTracker {
       if (now - this.emptyCompletionSince >= this.emptyCompletionMs) {
         return "ChatGPT browser turn completed without a final answer";
       }
+    }
+
+    const missingCompletionAction = state.responsePresent
+      && !state.running
+      && state.currentText.length > 0
+      && !state.completionActionVisible;
+    if (!missingCompletionAction) {
+      this.missingCompletionAction = undefined;
+    } else if (this.missingCompletionAction?.text !== state.currentText) {
+      this.missingCompletionAction = { text: state.currentText, since: now };
+    } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
+      return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
     }
     return undefined;
   }
@@ -380,7 +402,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     browserHost,
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
-    chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")),
+    chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
@@ -609,7 +631,7 @@ export class ChatGptBrowserWorker {
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
     if (!menuVisible && menuExpanded !== "true") {
       await throwIfChatGptRateLimitDialog(page);
-      await currentEffort.press("Enter");
+      await currentEffort.click();
     }
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
@@ -640,7 +662,7 @@ export class ChatGptBrowserWorker {
       return mode;
     }
     await throwIfChatGptRateLimitDialog(page);
-    await effortChoice.press("Enter");
+    await effortChoice.click();
 
     const deadline = Date.now() + 40_000;
     let confirmed: string | null = null;
@@ -649,7 +671,7 @@ export class ChatGptBrowserWorker {
         const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
         if (expanded !== "true") {
           await throwIfChatGptRateLimitDialog(page);
-          await currentEffort.press("Enter");
+          await currentEffort.click();
         }
         await effortChoice.waitFor({
           state: "visible",
@@ -988,12 +1010,13 @@ export class ChatGptBrowserWorker {
             tag: candidate.tagName.toLowerCase(),
             role: candidate.getAttribute("role"),
             testId: candidate.getAttribute("data-testid"),
-            ariaLabel: candidate.getAttribute("aria-label"),
-            title: candidate.getAttribute("title"),
-            text: candidate.innerText.trim().slice(0, 500),
+            ariaLabelChars: candidate.getAttribute("aria-label")?.length ?? 0,
+            titleChars: candidate.getAttribute("title")?.length ?? 0,
+            textChars: candidate.innerText.trim().length,
           }));
         return {
-          text: root.innerText.trim().slice(0, 2_000),
+          textChars: root.innerText.trim().length,
+          htmlChars: root.innerHTML.length,
           descriptors,
         };
       })
@@ -1011,8 +1034,8 @@ export class ChatGptBrowserWorker {
           return {
             role: candidate.getAttribute("role"),
             testId: candidate.getAttribute("data-testid"),
-            ariaLabel: candidate.getAttribute("aria-label"),
-            text: candidate.innerText.trim().slice(0, 1_000),
+            ariaLabelChars: candidate.getAttribute("aria-label")?.length ?? 0,
+            textChars: candidate.innerText.trim().length,
           };
         })
     )).catch(() => [] as Array<Record<string, string | null>>);
@@ -1070,6 +1093,7 @@ export class ChatGptBrowserWorker {
         estimatedInputTokens,
         turn.capabilities.proAvailable,
       );
+      assertChatGptWebPromptWithinInlineTransport(prepared.text.length);
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;

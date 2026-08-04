@@ -198,7 +198,17 @@ test("launcher delegates long-lived tunnel supervision to native runtimes connec
       alias: "codex-chatgpt-web",
     },
   });
-  const args = managedTunnelConnectArgs(config);
+  const invocation = {
+    executable: "C:\\Program Files\\Codex Web GPT\\resources\\runtime\\bun.exe",
+    args: [
+      "C:\\Program Files\\Codex Web GPT\\resources\\runtime\\app\\cli.js",
+      "mcp",
+      "--broker-socket",
+      config.brokerSocketPath,
+    ],
+    cwd: "C:\\Program Files\\Codex Web GPT\\resources\\runtime",
+  };
+  const args = managedTunnelConnectArgs(config, invocation);
   assert.deepEqual(args.slice(0, 4), [
     "runtimes", "connect", "--alias", "codex-chatgpt-web",
   ]);
@@ -206,6 +216,61 @@ test("launcher delegates long-lived tunnel supervision to native runtimes connec
   assert.equal(args.at(-1), "--json");
   assert.equal(args[args.indexOf("--mcp-command") + 1].includes("bun.exe"), true);
   assert.equal(args[args.indexOf("--mcp-command") + 1].includes("\\\\\\\\.\\\\pipe\\\\codex-chatgpt-web-example"), true);
+  assert.equal(args[args.indexOf("--mcp-command") + 1].includes("versions"), false);
+  assert.throws(
+    () => managedTunnelConnectArgs(config),
+    /requires an explicit runtime invocation/,
+  );
+});
+
+test("launcher repairs its runtime before building the tunnel MCP command", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-runtime-"));
+  const config = launcherConfig(path.join(root, "launcher-browser.json"), {
+    mode: "full",
+    runtimeCommand: [path.join(root, "versions", "stale", "runtime", "bun")],
+    tunnel: {
+      binaryPath: path.join(root, "bin", "tunnel-client"),
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: path.join(root, "secrets", "tunnel-runtime.key"),
+      profileDir: path.join(root, "tunnel", "profiles"),
+      profileName: "codex-chatgpt-web",
+      alias: "codex-chatgpt-web",
+    },
+  });
+  const repairedRuntime = path.join(root, "launcher-runtime");
+  let runtimeRepairs = 0;
+  let connectArgs;
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: true },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    installedRuntimeRoot: path.join(root, "versions", "stale"),
+    runtimeRootProvider: () => {
+      runtimeRepairs += 1;
+      return repairedRuntime;
+    },
+    coreHome: root,
+    browserDescriptorPath: config.browserHostDescriptorPath,
+    runtimeInvocationFactory: ({ installedRuntimeRoot, args }) => ({
+      executable: path.join(installedRuntimeRoot, "runtime", "bun"),
+      args: [path.join(installedRuntimeRoot, "app", "cli.js"), ...args],
+      cwd: installedRuntimeRoot,
+    }),
+  });
+  supervisor.runTunnelCommand = async (_config, args) => {
+    connectArgs = args;
+    return { code: 0, stdout: "", stderr: "", output: "" };
+  };
+
+  try {
+    await supervisor.runTunnelConnectCommand(config);
+    const command = connectArgs[connectArgs.indexOf("--mcp-command") + 1];
+    assert.equal(runtimeRepairs, 1);
+    assert.equal(command.includes(repairedRuntime), true);
+    assert.equal(command.includes(`${path.sep}versions${path.sep}`), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("tunnel control failures preserve stderr even when stdout is also present", async () => {
@@ -245,16 +310,21 @@ test("tunnel health diagnostics preserve the machine-readable readiness state", 
     coreHome: root,
     browserDescriptorPath: path.join(root, "launcher.json"),
   });
-  supervisor.runTunnelCommand = async () => ({
-    code: 0,
-    output: JSON.stringify({
-      state: "stopped",
-      process_running: false,
-      healthy: false,
-      ready: false,
-      health_url: "",
-    }),
-  });
+  let commandArgs;
+  supervisor.runTunnelCommand = async (_config, args) => {
+    commandArgs = args;
+    return {
+      code: 0,
+      output: JSON.stringify({
+        entries: [{
+          alias: "codex-web-gpt",
+          runtime_state: "stopped",
+          classification: "stale_alias",
+          live_runtime: { found: false },
+        }],
+      }),
+    };
+  };
   try {
     assert.deepEqual(await supervisor.readTunnelHealth({
       tunnel: { alias: "codex-web-gpt" },
@@ -266,8 +336,9 @@ test("tunnel health diagnostics preserve the machine-readable readiness state", 
       healthy: false,
       absent: false,
       statusKnown: true,
-      detail: "state=stopped; process_running=false; healthy=false; ready=false; health_url=missing; pid=missing",
+      detail: "state=stopped; process_running=false; healthy=false; ready=false; classification=stale_alias; live_admin=false; pid=missing",
     });
+    assert.deepEqual(commandArgs, ["runtimes", "cleanup", "--json"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -321,12 +392,16 @@ test("tunnel readiness preserves a native managed process identity when one is r
   supervisor.runTunnelCommand = async () => ({
     code: 0,
     output: JSON.stringify({
-      runtime_state: "ready",
-      process_running: true,
-      healthy: true,
-      ready: true,
-      health_url: "http://127.0.0.1:12345",
-      process: { pid: 123_456_779 },
+      entries: [{
+        alias: "codex-web-gpt",
+        runtime_state: "ready",
+        classification: "active_runtime",
+        live_runtime: {
+          found: true,
+          base_url: "http://127.0.0.1:12345",
+          system: { pid: 123_456_779 },
+        },
+      }],
     }),
   });
   try {
@@ -340,7 +415,7 @@ test("tunnel readiness preserves a native managed process identity when one is r
       healthy: true,
       absent: false,
       statusKnown: true,
-      detail: "state=ready; process_running=true; healthy=true; ready=true; health_url=present; pid=123456779",
+      detail: "state=ready; process_running=true; healthy=true; ready=true; classification=active_runtime; live_admin=true; pid=123456779",
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -433,15 +508,12 @@ test("tunnel readiness accepts the official tmux status without inventing a PID"
   supervisor.runTunnelCommand = async () => ({
     code: 0,
     output: JSON.stringify({
-      runtime_state: "ready",
-      process_running: true,
-      healthy: true,
-      ready: true,
-      health_url: "http://127.0.0.1:12345",
-      process: {
-        mode: "tmux",
-        session_name: "codex-chatgpt-web",
-      },
+      entries: [{
+        alias: "codex-chatgpt-web",
+        runtime_state: "ready",
+        classification: "active_runtime",
+        live_runtime: { found: true, base_url: "http://127.0.0.1:12345" },
+      }],
     }),
   });
   try {
@@ -450,7 +522,7 @@ test("tunnel readiness accepts the official tmux status without inventing a PID"
     });
     assert.equal(health.ready, true);
     assert.equal(health.pid, null);
-    await supervisor.waitForTunnel({ tunnel: {} }, 1);
+    await supervisor.waitForTunnel({ tunnel: { alias: "codex-chatgpt-web" } }, 1);
     assert.equal(supervisor.tunnel?.managed, true);
     assert.equal(supervisor.tunnel?.pid, null);
   } finally {
@@ -468,8 +540,8 @@ test("a clean machine reports the official unknown-alias status as an absent run
     browserDescriptorPath: path.join(root, "launcher.json"),
   });
   supervisor.runTunnelCommand = async () => ({
-    code: 1,
-    output: "alias codex-chatgpt-web is not known; run create or connect first",
+    code: 0,
+    output: JSON.stringify({ entries: [] }),
   });
   try {
     const health = await supervisor.readTunnelHealth({
@@ -1191,6 +1263,54 @@ test("launcher clears an empty stale ownership marker when Windows reuses its PI
     assert.equal(fs.existsSync(supervisor.statePath), false);
   } finally {
     pidOccupant.kill("SIGTERM");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed full-runtime marker with no child evidence cannot block removal on a stalled tunnel probe", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dead-runtime-removal-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const statePath = path.join(root, "runtime", "launcher-supervisor.json");
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.writeFileSync(descriptorPath, "{}\n");
+  fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, {
+    mode: "full",
+    tunnel: {
+      binaryPath: path.join(root, "tunnel-client"),
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: path.join(root, "runtime.key"),
+      profileDir: path.join(root, "profiles"),
+      profileName: "codex-chatgpt-web",
+      alias: "codex-chatgpt-web",
+    },
+  }))}\n`);
+  fs.writeFileSync(statePath, `${JSON.stringify({
+    version: 1,
+    ownerPid: process.pid,
+    daemonPid: null,
+    tunnelPid: null,
+    status: "external",
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  let tunnelProbes = 0;
+  supervisor.proxyHealth = async () => false;
+  supervisor.readTunnelHealth = async () => {
+    tunnelProbes += 1;
+    throw new Error("Tunnel health probe timed out after 5000ms");
+  };
+  try {
+    assert.deepEqual(await supervisor.stopForSetup(), { status: "stopped" });
+    assert.equal(tunnelProbes, 0);
+    assert.equal(fs.existsSync(statePath), false);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

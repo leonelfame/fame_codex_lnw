@@ -154,6 +154,28 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
   void check();
 }
 
+async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
+  try {
+    const route = await runtimeHost.restoreBridgeRoute("runtime-start-fail-safe");
+    if (!route.installed || route.active) return { restored: false };
+    const state = stateStore.update({
+      bridgeEnabled: false,
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
+    logger.warn("bridge.route_restored_after_runtime_failure", {
+      changed: route.changed === true,
+    });
+    return { restored: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
+    return { restored: false, error: message };
+  }
+}
+
 function trayImage() {
   if (process.platform !== "darwin") {
     return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
@@ -701,6 +723,27 @@ async function start() {
     return;
   }
   void (async () => {
+    const upgrade = await runtimeHost.upgradeManagedRuntime();
+    if (upgrade.updated) {
+      const state = stateStore.update({
+        bridgeEnabled: upgrade.bridgeEnabled,
+        coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
+        ...(upgrade.mode === "browser-only" ? {
+          mcpRuntimeInstalled: false,
+          mcpSetupComplete: false,
+          mcpGuideStep: 0,
+        } : {}),
+      });
+      send("launcher:state-changed", state);
+      logger.info("runtime.release_upgraded", {
+        fromVersion: upgrade.fromVersion,
+        toVersion: upgrade.toVersion,
+        mode: upgrade.mode,
+        bridgeEnabled: upgrade.bridgeEnabled,
+      });
+    }
     try {
       const route = await runtimeHost.bridgeStatus();
       if (route.installed) {
@@ -717,7 +760,7 @@ async function start() {
       });
     }
     return runtimeSupervisor.startIfConfigured();
-  })().then((runtime) => {
+  })().then(async (runtime) => {
     if (runtime.status === "bridge-disabled") {
       stopCatalogVerificationMonitor();
       return;
@@ -740,6 +783,7 @@ async function start() {
       return;
     }
     if (runtime.status === "not-configured") {
+      const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
       const current = stateStore.read();
       if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
         const state = stateStore.update({
@@ -751,23 +795,42 @@ async function start() {
         });
         send("launcher:state-changed", state);
       }
+      if (routeRecovery.error) {
+        publishOperation({
+          name: "runtime-start",
+          status: "failed",
+          message: `Local runtime is not configured; restoring the previous Codex route also failed: ${routeRecovery.error}`,
+        });
+      }
       return;
     }
+    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
     if (runtime.status === "external" || runtime.status === "needs-setup") {
+      const detail = runtime.detail || (
+        runtime.status === "external"
+          ? "Another process owns the configured Codex Web GPT runtime"
+          : "The installed runtime configuration must be repaired from Setup"
+      );
       publishOperation({
         name: "runtime-start",
         status: "failed",
-        message: runtime.detail || (
-          runtime.status === "external"
-            ? "Another process owns the configured Codex Web GPT runtime"
-            : "The installed runtime configuration must be repaired from Setup"
-        ),
+        message: routeRecovery.error
+          ? `${detail}; restoring the previous Codex route also failed: ${routeRecovery.error}`
+          : routeRecovery.restored
+            ? `${detail}; the previous Codex route was restored, restart Codex once`
+            : detail,
       });
     }
-  }).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
+  }).catch(async (error) => {
+    const primary = error instanceof Error ? error.message : String(error);
+    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+    const message = routeRecovery.error
+      ? `${primary}; restoring the previous Codex route also failed: ${routeRecovery.error}`
+      : routeRecovery.restored
+        ? `${primary}; the previous Codex route was restored, restart Codex once`
+        : primary;
     logger.error("runtime.startup_failed", { message });
     const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);

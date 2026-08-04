@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, assertChatGptWebPromptWithinInlineTransport, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
+import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
@@ -64,6 +65,34 @@ test("browser turns have no absolute deadline unless one is explicitly configure
     ...provider,
     chatgptWeb: { turnTimeoutMs: 0 },
   })).toThrow("turnTimeoutMs must be a positive finite number");
+});
+
+test("managed Chrome defaults follow the host platform", () => {
+  expect(defaultChromeExecutable("darwin")).toBe("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+  expect(defaultChromeExecutable("linux")).toBe("/usr/bin/google-chrome");
+  expect(defaultChromeExecutable("win32", "D:\\Program Files")).toBe(
+    "D:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  );
+  const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
+  expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
+});
+
+test("oversized inline prompts fail before opening ChatGPT", () => {
+  expect(() => assertChatGptWebPromptWithinInlineTransport(540_000)).not.toThrow();
+  expect(() => assertChatGptWebPromptWithinInlineTransport(540_001)).toThrow(
+    "exceeds the current ChatGPT composer limit",
+  );
+  try {
+    assertChatGptWebPromptWithinInlineTransport(540_001);
+  } catch (error) {
+    expect(error).toMatchObject({
+      name: "ChatGptWebAdapterError",
+      status: 400,
+      errorType: "invalid_request_error",
+      code: "context_length_exceeded",
+      retryable: false,
+    });
+  }
 });
 
 test("browser stage timeout aborts late page acquisition", async () => {
@@ -479,19 +508,21 @@ test("effort selection uses structural menu indices instead of localized labels"
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
 });
 
-test("effort selection handles the known ChatGPT rate-limit dialog before keyboard activation", () => {
+test("effort selection handles the known ChatGPT rate-limit dialog before trusted pointer activation", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
   const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
   const selectionSource = workerSource.slice(selectionStart, selectionEnd);
   const guard = selectionSource.indexOf("throwIfChatGptRateLimitDialog(page)");
-  const activation = selectionSource.indexOf('currentEffort.press("Enter")');
+  const activation = selectionSource.indexOf("currentEffort.click()");
 
   expect(workerSource).toContain("Too many requests");
   expect(workerSource).toContain("making requests too quickly");
   expect(guard).toBeGreaterThan(-1);
   expect(activation).toBeGreaterThan(guard);
-  expect(selectionSource).not.toContain("currentEffort.click");
+  expect(selectionSource).not.toContain('currentEffort.press("Enter")');
+  expect(selectionSource).toContain("effortChoice.click()");
+  expect(selectionSource).not.toContain('effortChoice.press("Enter")');
   expect(selectionSource).not.toContain("is unavailable");
 });
 
@@ -513,7 +544,10 @@ function dialogPage(text: string): { page: Page; pressed: string[] } {
     getByRole: () => button,
   };
   return {
-    page: { locator: () => dialog } as unknown as Page,
+    page: {
+      locator: () => dialog,
+      getByText: (hasText: string | RegExp) => dialog.filter({ hasText }),
+    } as unknown as Page,
     pressed,
   };
 }
@@ -781,6 +815,27 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   };
   expect(empty.update(terminal, 1_000)).toBeUndefined();
   expect(empty.update(terminal, 1_500)).toContain("completed without a final answer");
+
+  const missingCompletionAction = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const completedWithoutMarker = {
+    ...terminal,
+    currentText: "complete answer",
+    completionActionVisible: false,
+  };
+  expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
+  expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
+  expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
+});
+
+test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const start = workerSource.indexOf("private async stalledTurnDiagnostic");
+  const end = workerSource.indexOf("private async runExclusive", start);
+  const diagnosticSource = workerSource.slice(start, end);
+  expect(diagnosticSource).toContain("textChars:");
+  expect(diagnosticSource).toContain("htmlChars:");
+  expect(diagnosticSource).not.toMatch(/\btext:\s*(?:root|candidate)\.innerText/);
+  expect(diagnosticSource).not.toMatch(/\bariaLabel:\s*candidate\.getAttribute/);
 });
 
 test("browser completion requires ChatGPT's response-scoped copy action", () => {

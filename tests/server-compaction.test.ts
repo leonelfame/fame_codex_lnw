@@ -130,6 +130,35 @@ test("rejects Pro-only routed models before opening a browser when the account h
   }
 });
 
+test("preserves a structured browser preflight failure through the v1 compaction endpoint", async () => {
+  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model, input: [] }),
+  }), defaultConfig("browser-only"), () => ({
+    name: "preflight-error",
+    async runTurn(_parsed, _incoming, emit) {
+      emit({
+        type: "error",
+        message: "This task exceeds the ChatGPT Web context window.",
+        status: 400,
+        errorType: "invalid_request_error",
+        code: "context_length_exceeded",
+        retryable: false,
+      });
+    },
+  }));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: {
+      message: "This task exceeds the ChatGPT Web context window.",
+      type: "invalid_request_error",
+      code: "context_length_exceeded",
+    },
+  });
+});
+
 test("refuses a ChatGPT Web continuation when local previous-response state is unavailable", async () => {
   const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",

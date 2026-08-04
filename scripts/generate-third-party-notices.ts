@@ -15,6 +15,9 @@ const argumentsList = process.argv.slice(2);
 const includeLauncher = argumentsList.includes("--include-launcher");
 const destinationArgument = argumentsList.find(argument => argument !== "--include-launcher");
 const visited = new Map<string, { directory: string; manifest: PackageJson }>();
+const bundledLicenseOverrides = new Map([
+  ["tiktoken@1.0.22", join(root, "LICENSES", "tiktoken-MIT.txt")],
+]);
 
 function packageDirectory(name: string, from: string): string | undefined {
   let cursor = from;
@@ -60,12 +63,17 @@ const sections = [...visited.values()]
   .sort((a, b) => `${a.manifest.name}@${a.manifest.version}`.localeCompare(`${b.manifest.name}@${b.manifest.version}`))
   .map(({ directory, manifest }) => {
     const files = licenseFiles(directory);
-    if (files.length === 0) throw new Error(`No license/notice file found for ${manifest.name}@${manifest.version}`);
+    const identity = `${manifest.name}@${manifest.version}`;
+    const override = bundledLicenseOverrides.get(identity);
+    if (files.length === 0 && !override) throw new Error(`No license/notice file found for ${identity}`);
+    if (override && !existsSync(override)) throw new Error(`Bundled license override is missing for ${identity}`);
     const license = typeof manifest.license === "string" ? manifest.license : manifest.license?.type ?? "unknown";
     return [
       "=".repeat(80),
-      `${manifest.name}@${manifest.version} (${license})`,
-      ...files.flatMap(file => ["-".repeat(80), file, "-".repeat(80), readFileSync(join(directory, file), "utf8").trim()]),
+      `${identity} (${license})`,
+      ...(override
+        ? ["-".repeat(80), `bundled license: ${override.slice(root.length + 1)}`, "-".repeat(80), readFileSync(override, "utf8").trim()]
+        : files.flatMap(file => ["-".repeat(80), file, "-".repeat(80), readFileSync(join(directory, file), "utf8").trim()])),
     ].join("\n");
   });
 

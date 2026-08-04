@@ -33,9 +33,9 @@ export const SUMMARY_PREFIX = "Another language model started to solve this prob
 
 export const OPAQUE_COMPACTION_NOTE = "[earlier conversation was compacted; the summary is stored in a format this model cannot read]";
 
-/** Exact framing emitted by this proxy for a readable replayed Codex compaction summary. */
+/** Codex v1 uses one newline after the prefix; the transparent v2 replay uses two. */
 export function isReadableCompactionSummaryText(value: unknown): value is string {
-  return typeof value === "string" && value.startsWith(`${SUMMARY_PREFIX}\n\n`);
+  return typeof value === "string" && value.startsWith(`${SUMMARY_PREFIX}\n`);
 }
 
 export function encodeCompactionSummary(summary: string): string {

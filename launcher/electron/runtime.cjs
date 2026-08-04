@@ -529,6 +529,31 @@ class RuntimeHost {
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
   }
 
+  async restoreBridgeRouteWithinOperation(operationName) {
+    const current = await this.bridgeStatus(operationName);
+    if (!current.installed || !current.active) return current;
+    const disconnected = await this.run(operationName, ["route", "disconnect"], {
+      embedded: true,
+      message: "Restoring the previous Codex route",
+      successMessage: "Previous Codex route restored",
+      timeoutMs: 15_000,
+    });
+    return {
+      ...parseBridgeRouteResult(disconnected.stdout, { expectedActive: false }),
+      installed: true,
+    };
+  }
+
+  async restoreBridgeRoute(operationName = "bridge-route-restore") {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    this.lifecycleOperation = operationName;
+    try {
+      return await this.restoreBridgeRouteWithinOperation(operationName);
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
   async setBridgeEnabled(enabled) {
     const desired = enabled === true;
     const name = desired ? "bridge-connect" : "bridge-disconnect";
@@ -618,26 +643,42 @@ class RuntimeHost {
     const previousRuntime = this.runtimeConfigSnapshot();
     this.lifecycleOperation = name;
     try {
-      if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
-      else await this.supervisor.stopForSetup();
-      return await this.run(name, ["uninstall", "--yes", "--launcher-control"], {
-        embedded: true,
-        env: this.launcherControlEnvironment(),
-        message: "Restoring the previous Codex route",
-        successMessage: "Codex Web GPT integration removed",
-        timeoutMs: UNINSTALL_TIMEOUT_MS,
-      });
-    } catch (error) {
-      let recoveryError;
       try {
-        await this.restorePreviousRuntime(previousRuntime, name);
-      } catch (caught) {
-        recoveryError = caught;
+        if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
+        else await this.supervisor.stopForSetup();
+      } catch (error) {
+        try {
+          await this.restoreBridgeRouteWithinOperation(name);
+        } catch (routeError) {
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}; restoring the previous Codex route also failed:`
+            + ` ${routeError instanceof Error ? routeError.message : String(routeError)}`,
+          );
+        }
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; the previous Codex route was restored,`
+          + " but launcher runtime cleanup did not complete",
+        );
       }
-      if (!recoveryError) throw error;
-      const primary = error instanceof Error ? error.message : String(error);
-      const recovery = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-      throw new Error(`${primary}; restoring the launcher runtime also failed: ${recovery}`);
+      try {
+        return await this.run(name, ["uninstall", "--yes", "--launcher-control"], {
+          embedded: true,
+          env: this.launcherControlEnvironment(),
+          message: "Restoring the previous Codex route",
+          successMessage: "Codex Web GPT integration removed",
+          timeoutMs: UNINSTALL_TIMEOUT_MS,
+        });
+      } catch (error) {
+        try {
+          await this.restoreBridgeRouteWithinOperation(name);
+        } catch (routeError) {
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}; restoring the previous Codex route also failed:`
+            + ` ${routeError instanceof Error ? routeError.message : String(routeError)}`,
+          );
+        }
+        throw error;
+      }
     } finally {
       this.lifecycleOperation = null;
     }
@@ -661,6 +702,38 @@ class RuntimeHost {
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
     });
     return { ...result, mode };
+  }
+
+  async upgradeManagedRuntime() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const existing = this.runtimeConfigSnapshot();
+    const currentVersion = this.app.getVersion();
+    if (existing.owner !== "launcher" || existing.config?.releaseVersion === currentVersion) {
+      return { updated: false };
+    }
+    const route = await this.bridgeStatus("runtime-upgrade-route");
+    const args = [
+      "setup",
+      existing.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor",
+      this.browserDescriptorPath,
+      "--acknowledge-unofficial",
+      "--restart-service",
+    ];
+    const result = await this.runSetup("runtime-upgrade", args, {
+      message: `Upgrading launcher runtime from ${existing.config.releaseVersion} to ${currentVersion}`,
+      successMessage: `Launcher runtime upgraded to ${currentVersion}`,
+      timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+    });
+    if (!route.active) await this.setBridgeEnabled(false);
+    return {
+      updated: true,
+      mode: existing.mode,
+      bridgeEnabled: route.active,
+      fromVersion: existing.config.releaseVersion,
+      toVersion: currentVersion,
+      stdout: result.stdout,
+    };
   }
 
   setupMcp({ tunnelId = "", runtimeKey = "", replace = false } = {}) {

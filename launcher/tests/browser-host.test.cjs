@@ -293,25 +293,27 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
   assert.match(source, /\[role="group"\]:has\(\[role="menuitemradio"\]\)/);
   assert.match(source, /\[role="menuitemradio"\]/);
   assert.match(cdpSource, /Input\.dispatchKeyEvent/);
+  assert.match(cdpSource, /Input\.dispatchMouseEvent/);
   assert.match(cdpSource, /debuggerClient/);
   assert.doesNotMatch(source, /:popover-open/);
   assert.doesNotMatch(source, /data-radix-collection-item/);
 
   let controlReads = 0;
   let menuReads = 0;
+  const trustedClicks = [];
   const trustedKeys = [];
   const inputEvents = [];
   const fixture = {
     pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
     pressTrustedBrowserKey: BrowserHost.prototype.pressTrustedBrowserKey,
+    clickTrustedBrowserPoint: BrowserHost.prototype.clickTrustedBrowserPoint,
     readEffortControl: BrowserHost.prototype.readEffortControl,
-    focusEffortControl: BrowserHost.prototype.focusEffortControl,
     readEffortMenu: BrowserHost.prototype.readEffortMenu,
-    focusEffortMenuItem: BrowserHost.prototype.focusEffortMenuItem,
     waitForEffortControl: BrowserHost.prototype.waitForEffortControl,
     waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
     openEffortMenu: BrowserHost.prototype.openEffortMenu,
     chooseEffortMenuItem: BrowserHost.prototype.chooseEffortMenuItem,
+    dispatchTrustedClick: async (input) => trustedClicks.push(input),
     dispatchTrustedKey: async (input) => trustedKeys.push(input),
     evaluatePage: async ({ expression }) => {
       if (expression.includes("effort-control-read")) {
@@ -333,7 +335,6 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
           url: "https://chatgpt.com/?temporary-chat=true",
         };
       }
-      if (expression.includes("effort-control-focus")) return true;
       if (expression.includes("effort-menu-read")) {
         menuReads += 1;
         if ([1, 3].includes(menuReads)) {
@@ -349,7 +350,6 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
           },
         };
       }
-      if (expression.includes("effort-menu-focus")) return true;
       throw new Error("Unexpected browser script");
     },
     evaluateBrowserPage: BrowserHost.prototype.evaluateBrowserPage,
@@ -370,13 +370,14 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
   });
 
   assert.deepEqual(result, { effort: "High", changed: true });
-  assert.equal(controlReads, 3);
+  assert.equal(controlReads, 5);
   assert.equal(menuReads, 4);
-  assert.deepEqual(trustedKeys, [
-    { debuggerClient: {}, key: "Enter" },
-    { debuggerClient: {}, key: "Enter" },
-    { debuggerClient: {}, key: "Enter" },
+  assert.deepEqual(trustedClicks, [
+    { debuggerClient: {}, point: { x: 120, y: 80 } },
+    { debuggerClient: {}, point: { x: 160, y: 140 } },
+    { debuggerClient: {}, point: { x: 120, y: 80 } },
   ]);
+  assert.deepEqual(trustedKeys, []);
   assert.deepEqual(inputEvents, [
     { type: "keyDown", keyCode: "Escape" },
     { type: "keyUp", keyCode: "Escape" },
@@ -643,8 +644,65 @@ test("connector verification is effort-independent and works while the browser s
 
 test("connector verification has no independent CDP typing or coordinate-click path", () => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/browser-host.cjs"), "utf8");
+  const start = source.indexOf("async runConnectorVerification");
+  const end = source.indexOf("async inspectSession", start);
+  const verificationSource = source.slice(start, end);
   assert.match(source, /verifyConnectorWithBrowserHelper/);
-  assert.doesNotMatch(source, /typeTrustedBrowserText|clickTrustedBrowserPoint|connectorMenuOpen|waitForConnectorSuggestion/);
+  assert.doesNotMatch(verificationSource, /typeTrustedBrowserText|clickTrustedBrowserPoint|connectorMenuOpen|waitForConnectorSuggestion/);
+});
+
+test("a live helper retains exclusive ownership of its running turn", () => {
+  const tab = {
+    id: "tab-live-owner",
+    traceId: "trace_live_owner",
+    helperPid: process.pid,
+    status: "running",
+  };
+  assert.throws(
+    () => BrowserHost.prototype.beginTurn.call({
+      manualOperation: null,
+      turnTabs: new Map([[tab.id, tab]]),
+    }, tab.traceId, false, process.pid + 1),
+    /owned by another helper process/,
+  );
+});
+
+test("a replacement helper takes over only after the previous owner exited", () => {
+  const deadPid = 2_147_483_647;
+  const tab = {
+    id: "tab-dead-owner",
+    surfaceId: "surface-dead-owner",
+    traceId: "trace_dead_owner",
+    helperPid: deadPid,
+    status: "running",
+    loading: true,
+    message: "ChatGPT is working",
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        setBackgroundThrottling() {},
+      },
+    },
+  };
+  const warnings = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[tab.id, tab]]),
+    selectedTabId: "home",
+    syncViewVisibility() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    logger: { info() {}, warn: (event, detail) => warnings.push([event, detail]) },
+  });
+
+  const lease = BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid);
+
+  assert.deepEqual(lease, { surfaceId: tab.surfaceId, tabId: tab.id });
+  assert.equal(tab.helperPid, process.pid);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][0], "browser.stale_turn_owner_replaced");
+  assert.equal(warnings[0][1].previousHelperPid, deadPid);
 });
 
 test("connector verification preserves an already hydrated Temporary Chat page", async () => {

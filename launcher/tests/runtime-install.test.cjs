@@ -6,7 +6,7 @@ const path = require("node:path");
 const { runtimeInvocation } = require("../electron/runtime-command.cjs");
 const { ensurePackagedRuntime } = require("../electron/runtime-install.cjs");
 
-function runtimeFixture(root, version = "0.2.0") {
+function runtimeFixture(root, version = "0.2.0", bundleId = "a".repeat(64)) {
   const source = path.join(root, "resources", "runtime");
   const executable = path.join(source, "runtime", process.platform === "win32" ? "bun.exe" : "bun");
   fs.mkdirSync(path.dirname(executable), { recursive: true });
@@ -18,6 +18,7 @@ function runtimeFixture(root, version = "0.2.0") {
   fs.writeFileSync(path.join(source, "manifest.json"), `${JSON.stringify({
     schemaVersion: 1,
     appVersion: version,
+    bundleId,
     platform: process.platform,
     arch: process.arch,
   })}\n`);
@@ -84,6 +85,29 @@ test("packaged runtime transactionally repairs an incomplete installed bundle", 
       fs.readdirSync(path.dirname(installed)).filter(name => name.includes(".previous-") || name.includes(".tmp-")),
       [],
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("packaged runtime replaces stale files when a release is refreshed under the same version", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-refresh-"));
+  const resourcesPath = runtimeFixture(root, "0.2.0", "a".repeat(64));
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    fs.writeFileSync(path.join(installed, "old-release-marker"), "old");
+
+    const source = path.join(resourcesPath, "runtime");
+    const manifestPath = path.join(source, "manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    fs.writeFileSync(path.join(source, "app", "cli.js"), "new cli");
+    fs.writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, bundleId: "b".repeat(64) })}\n`);
+
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.readFileSync(path.join(installed, "app", "cli.js"), "utf8"), "new cli");
+    assert.equal(fs.existsSync(path.join(installed, "old-release-marker")), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

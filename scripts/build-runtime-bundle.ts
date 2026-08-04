@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { VERSION } from "../src/version";
@@ -96,9 +97,17 @@ writeFileSync(join(binDir, launcherName), launcher, process.platform === "win32"
 if (process.platform !== "win32") chmodSync(join(binDir, launcherName), 0o755);
 
 const playwrightPackage = join(appDir, "node_modules", "playwright-core", "package.json");
+const bundleId = createHash("sha256");
+for (const relativePath of ["app/cli.js", "app/browser-helper.cjs", "app/package.json", "app/bun.lock"]) {
+  bundleId.update(relativePath);
+  bundleId.update("\0");
+  bundleId.update(readFileSync(join(output, relativePath)));
+  bundleId.update("\0");
+}
 writeFileSync(join(output, "manifest.json"), `${JSON.stringify({
   schemaVersion: 1,
   appVersion: VERSION,
+  bundleId: bundleId.digest("hex"),
   bunVersion: Bun.version,
   platform: process.platform,
   arch: process.arch,

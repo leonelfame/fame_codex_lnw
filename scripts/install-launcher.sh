@@ -111,7 +111,7 @@ CORE_HOME="${CODEX_CHATGPT_WEB_HOME:-$HOME/.codex-chatgpt-web}"
 DESCRIPTOR="$CORE_HOME/runtime/launcher-browser.json"
 RUNNING_PID=""
 if [ -f "$DESCRIPTOR" ]; then
-  RUNNING_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' "$DESCRIPTOR" | head -n 1)"
+  RUNNING_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$DESCRIPTOR" | head -n 1)"
 fi
 if { [ -n "$RUNNING_PID" ] && kill -0 "$RUNNING_PID" 2>/dev/null; } \
   || pgrep -f "Codex Web GPT\\.AppImage" >/dev/null 2>&1; then

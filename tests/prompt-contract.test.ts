@@ -36,6 +36,9 @@ test("tool-capable prompts resume the mandatory bind contract after the complete
   expect(resume).toBeGreaterThan(envelopeEnd);
   expect(finalToken).toBeGreaterThan(resume);
   expect(compiled.text.slice(resume)).toContain("first action now must be the actual Codex Native codex_bind_turn call");
+  expect(compiled.text).toContain("turn_token and binding_id are different values");
+  expect(compiled.text).toContain("valid_until outer_turn_end has no time limit");
+  expect(compiled.text).toContain("not the turn_ token");
   expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
   expect(compiled.text).toContain("call codex_bind_turn again with the same turn_token");
 });

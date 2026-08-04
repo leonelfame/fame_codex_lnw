@@ -96,21 +96,29 @@ describe("trusted current Codex environment envelope", () => {
       .toThrow("missing cwd");
   });
 
-  test("selects the primary cwd from Codex project environments", () => {
+  test("accepts Codex auxiliary roots that are intentionally absent from git workspace metadata", () => {
+    const auxiliary = resolve(root, "auxiliary-output");
     const projectEnvironment = `<environment_context>
-  <environments>
-    <environment id="secondary"><cwd>${resolve(root, "secondary")}</cwd></environment>
-    <environment id="primary" primary="true"><cwd>${root}</cwd></environment>
-  </environments>
-  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+  <cwd>${root}</cwd>
+  <filesystem><workspace_roots><root>${root}</root><root>${auxiliary}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
 </environment_context>`;
     expect(extractChatGptTurnEnvironment(currentWire({ environmentXml: projectEnvironment }))).toEqual({
       cwd: root,
-      roots: [root],
-      writableRoots: [root],
+      roots: [root, auxiliary],
+      writableRoots: [root, auxiliary],
       sandboxPolicy: { type: "dangerFullAccess" },
       tools: [],
     });
+  });
+
+  test("rejects an envelope with multiple conflicting cwd declarations", () => {
+    const conflictingEnvironment = `<environment_context>
+  <cwd>${root}</cwd>
+  <cwd>${resolve(root, "other")}</cwd>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+    expect(() => extractChatGptTurnEnvironment(currentWire({ environmentXml: conflictingEnvironment })))
+      .toThrow("missing cwd");
   });
 });
 

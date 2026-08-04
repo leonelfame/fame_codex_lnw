@@ -270,6 +270,13 @@ export class ChatGptTurnSessions {
     return session;
   }
 
+  retire(key: string, session: ChatGptTurnSession): boolean {
+    if (this.entries.get(key) !== session) return false;
+    session.cancel();
+    this.entries.delete(key);
+    return true;
+  }
+
   clear(): number {
     const cancelled = this.entries.size;
     for (const session of this.entries.values()) session.cancel();

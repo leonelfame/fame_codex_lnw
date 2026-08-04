@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
@@ -232,12 +232,15 @@ export function assertDurableRuntimeCommand(command: string[]): void {
   if (!existsSync(executable)) throw new Error(`Runtime executable does not exist: ${executable}`);
 }
 
-function defaultChromeExecutable(): string {
-  if (process.platform === "darwin") {
+export function defaultChromeExecutable(
+  platform = process.platform,
+  programFiles = process.env.PROGRAMFILES,
+): string {
+  if (platform === "darwin") {
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   }
-  if (process.platform === "win32") {
-    return join(process.env.PROGRAMFILES || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe");
+  if (platform === "win32") {
+    return win32.join(programFiles || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe");
   }
   return "/usr/bin/google-chrome";
 }

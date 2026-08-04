@@ -313,6 +313,33 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(second.outstanding()).toEqual([{ callId: "call_1", wireName: "exec_command", freeform: false, arguments: { cmd: "pwd" } }]);
   });
 
+  test("retires a failed session so the next native retry starts a new browser turn", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let starts = 0;
+    let cancellations = 0;
+    const runtime = () => {
+      starts += 1;
+      return {
+        mode: "read-only" as const,
+        browser: Promise.reject(new Error("retryable upstream failure")),
+        trace: new ChatGptTraceFeed(),
+        text: new ChatGptTextFeed(),
+        cancel: () => { cancellations += 1; },
+      };
+    };
+    const failed = sessions.getOrCreate("retryable", runtime);
+    await failed.browserOutcome;
+
+    expect(sessions.retire("retryable", failed)).toBe(true);
+    expect(sessions.retire("retryable", failed)).toBe(false);
+    const retried = sessions.getOrCreate("retryable", runtime);
+
+    expect(retried).not.toBe(failed);
+    expect(starts).toBe(2);
+    expect(cancellations).toBe(1);
+    sessions.clear();
+  });
+
   test("keeps inline images out of the context JSON and prepares native browser attachments", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const request = parsed();
@@ -1004,9 +1031,22 @@ describe("ChatGPT outer-native harness v3", () => {
       const bound = await call("codex_bind_turn", { turn_token: token });
       expect(bound.content).toEqual([{ type: "text", text: expect.stringContaining("binding_") }]);
       expect(bound.isError).not.toBe(true);
-      const binding = bound.structuredContent as { binding_id: string; expires_at: string | null };
+      const binding = bound.structuredContent as {
+        binding_id: string;
+        binding_status: string;
+        valid_until: string;
+        expires_at: string | null;
+        next_action: string;
+      };
       expect(binding.binding_id).toStartWith("binding_");
+      expect(binding.binding_status).toBe("active");
+      expect(binding.valid_until).toBe("outer_turn_end");
       expect(binding.expires_at).toBeNull();
+      expect(binding.next_action).toContain("Never put turn_token in binding_id");
+
+      const confused = await call("codex_exec", { binding_id: token, cmd: "pwd" });
+      expect(confused.isError).toBe(true);
+      expect(JSON.stringify(confused.content)).toContain("never pass turn_token here");
 
       const execPromise = call("codex_exec", { binding_id: binding.binding_id, cmd: "pwd", workdir: tempRoot });
       const [execRequest] = await Promise.race([

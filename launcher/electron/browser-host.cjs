@@ -4,7 +4,9 @@ const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { verifyConnectorWithBrowserHelper } = require("./browser-helper-verifier.cjs");
+const { processRunning } = require("./process-tree.cjs");
 const {
+  dispatchTrustedClick,
   dispatchTrustedKey,
   evaluatePage,
 } = require("./cdp-input.cjs");
@@ -131,6 +133,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
+    this.dispatchTrustedClick = dispatchTrustedClick;
     this.dispatchTrustedKey = dispatchTrustedKey;
     this.evaluatePage = evaluatePage;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
@@ -648,7 +651,16 @@ class BrowserHost {
     const existing = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
     if (existing) {
       if (existing.status === "running" && existing.helperPid !== helperPid) {
-        throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
+        if (processRunning(existing.helperPid)) {
+          throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
+        }
+        this.logger.warn("browser.stale_turn_owner_replaced", {
+          tabId: existing.id,
+          traceId,
+          previousHelperPid: existing.helperPid,
+          helperPid,
+          evidence: "previous helper exited",
+        });
       }
       existing.helperPid = helperPid;
       existing.status = "running";
@@ -910,6 +922,19 @@ class BrowserHost {
     }
   }
 
+  async clickTrustedBrowserPoint(point) {
+    try {
+      await this.dispatchTrustedClick({
+        debuggerClient: this.view.webContents.debugger,
+        point,
+      });
+    } catch (error) {
+      throw new Error(
+        `ChatGPT trusted browser click failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async evaluateBrowserPage(expression) {
     const contents = this.view.webContents;
     try {
@@ -1072,35 +1097,17 @@ class BrowserHost {
           url: location.href,
         };
       }
+      const rect = control.getBoundingClientRect();
       return {
         found: true,
         label: normalize(control.innerText || control.textContent),
         expanded: control.getAttribute('aria-expanded'),
+        point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
         composer: Boolean(composer),
         form: true,
         readyState: document.readyState,
         url: location.href,
       };
-    })()`);
-  }
-
-  async focusEffortControl() {
-    return await this.evaluateBrowserPage(`(() => {
-      /* effort-control-focus */
-      const visible = (element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      const form = composer?.closest('form');
-      const controls = Array.from(form?.querySelectorAll(
-        'button[aria-haspopup="menu"][data-tone="neutral"]'
-      ) || []).filter(visible);
-      const control = controls.at(-1);
-      if (!control) return false;
-      control.focus({ preventScroll: true });
-      return document.activeElement === control;
     })()`);
   }
 
@@ -1150,66 +1157,42 @@ class BrowserHost {
         if (!candidate || !target) {
           return { open: Boolean(candidate), count: candidate?.items.length || 0, target: null };
         }
+        const rect = target.getBoundingClientRect();
         return {
           open: true,
           count: candidate.items.length,
           target: {
             label: normalize(target.innerText || target.textContent),
             checked: target.getAttribute('aria-checked'),
+            point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
           },
         };
       })()`);
   }
 
-  async focusEffortMenuItem(targetIndex) {
-    return await this.evaluateBrowserPage(`(() => {
-      /* effort-menu-focus */
-      const targetIndex = ${targetIndex};
-      const visible = (element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      const control = Array.from(composer?.closest('form')?.querySelectorAll(
-        'button[aria-haspopup="menu"][data-tone="neutral"]'
-      ) || []).filter(visible).at(-1);
-      const controlledId = control?.getAttribute('aria-controls');
-      const controlled = controlledId ? document.getElementById(controlledId) : null;
-      const roots = [
-        ...(controlled ? [controlled] : []),
-        ...Array.from(document.querySelectorAll(${JSON.stringify(EFFORT_MENU_SELECTOR)})),
-      ];
-      const candidates = [...new Set(roots)].filter(visible).map((menu) => (
-        Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible)
-      )).filter(items => items.length > 0)
-        .sort((left, right) => right.length - left.length);
-      const target = candidates[0]?.[targetIndex];
-      if (!target) return false;
-      target.focus({ preventScroll: true });
-      return document.activeElement === target;
-    })()`);
-  }
-
   async openEffortMenu(targetIndex, timeoutMs, pollMs, knownControl) {
-    const control = knownControl?.found ? knownControl : await this.readEffortControl();
+    let control = knownControl?.found ? knownControl : await this.readEffortControl();
     if (!control.found) {
       throw new Error("ChatGPT effort control disappeared before its menu could open");
     }
     if (control.expanded !== "true") {
-      if (!await this.focusEffortControl()) {
-        throw new Error("ChatGPT effort control could not receive focus");
+      // Re-resolve immediately before activation so the click is derived from the current
+      // composer-owned semantic control, never from a stale or hard-coded viewport coordinate.
+      control = await this.readEffortControl();
+      if (!control.found || !control.point) {
+        throw new Error("ChatGPT effort control disappeared before activation");
       }
-      await this.pressTrustedBrowserKey("Enter");
+      await this.clickTrustedBrowserPoint(control.point);
     }
     return await this.waitForEffortMenu(targetIndex, timeoutMs, pollMs);
   }
 
-  async chooseEffortMenuItem(targetIndex) {
-    if (!await this.focusEffortMenuItem(targetIndex)) {
-      throw new Error(`ChatGPT effort item index ${targetIndex} could not receive focus`);
+  async chooseEffortMenuItem(targetIndex, knownMenu) {
+    const menu = knownMenu?.target ? knownMenu : await this.readEffortMenu(targetIndex);
+    if (!menu.target?.point) {
+      throw new Error(`ChatGPT effort item index ${targetIndex} disappeared before activation`);
     }
-    await this.pressTrustedBrowserKey("Enter");
+    await this.clickTrustedBrowserPoint(menu.target.point);
   }
 
   async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
@@ -1247,7 +1230,7 @@ class BrowserHost {
       this.pressBrowserKey("Escape");
       return { effort: "High", changed: false };
     }
-    await this.chooseEffortMenuItem(targetIndex);
+    await this.chooseEffortMenuItem(targetIndex, menu);
 
     const deadline = Date.now() + confirmTimeoutMs;
     let confirmed = menu;

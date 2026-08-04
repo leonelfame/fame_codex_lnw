@@ -15,7 +15,11 @@ interface ResolvedTurn {
   environment: ChatGptTurnEnvironment & { expiresAt?: number };
 }
 
-const bindingSchema = z.string().min(20).max(256).describe("Opaque binding_id returned by codex_bind_turn.");
+const turnTokenSchema = z.string()
+  .regex(/^turn_[A-Za-z0-9_-]{32}$/, "turn_token must be the exact turn_ value supplied in the current Codex task context");
+const bindingSchema = z.string()
+  .regex(/^binding_[A-Za-z0-9_-]{32}$/, "binding_id must be the exact binding_ value returned by codex_bind_turn; never pass turn_token here")
+  .describe("Exact binding_ value returned by codex_bind_turn. This is not the turn_token.");
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 
 function scopeHash(value: string): string {
@@ -179,8 +183,25 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_bind_turn",
     {
       title: "Bind this response to its Codex turn",
-      description: "Idempotently claim the capability for the current outer Codex turn before calling its native tools.",
-      inputSchema: { turn_token: z.string().min(20).max(256) },
+      description: "Idempotently exchange the current turn_token for a distinct binding_id. Copy the returned binding_ value exactly into every later Codex Native call; never reuse the turn_ value as binding_id.",
+      inputSchema: { turn_token: turnTokenSchema },
+      outputSchema: {
+        binding_id: bindingSchema,
+        binding_status: z.literal("active"),
+        valid_until: z.string(),
+        harness_version: z.literal(3),
+        execution: z.literal("outer_codex_native"),
+        cwd: z.string(),
+        roots: z.array(z.string()),
+        writable_roots: z.array(z.string()),
+        sandbox: z.string(),
+        expires_at: z.string().nullable(),
+        tool_count: z.number().int().nonnegative(),
+        command_tool: z.string().nullable(),
+        outer_tool_gateway: z.string().nullable(),
+        capabilities: z.array(z.string()),
+        next_action: z.string(),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ turn_token }, extra) => {
@@ -188,21 +209,25 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, { method: "claim", token: turn_token });
       const commandTool = exactTool(claimed.environment, "exec_command") ?? exactTool(claimed.environment, "shell_command");
       const gateway = execGateway(claimed.environment);
+      const expiresAt = claimed.environment.expiresAt === undefined
+        ? null
+        : new Date(claimed.environment.expiresAt).toISOString();
       return result({
         binding_id: claimed.bindingId,
+        binding_status: "active",
+        valid_until: expiresAt ?? "outer_turn_end",
         harness_version: 3,
         execution: "outer_codex_native",
         cwd: claimed.environment.cwd,
         roots: claimed.environment.roots,
         writable_roots: claimed.environment.writableRoots,
         sandbox: claimed.environment.sandboxPolicy.type,
-        expires_at: claimed.environment.expiresAt === undefined
-          ? null
-          : new Date(claimed.environment.expiresAt).toISOString(),
+        expires_at: expiresAt,
         tool_count: claimed.environment.tools.length,
         command_tool: commandTool ? wireName(commandTool) : gateway ? "exec_command" : null,
         outer_tool_gateway: gateway ? wireName(gateway) : null,
         capabilities: ["native_tool_loop", "session_history", "exec", "apply_patch", "images", "tool_registry"],
+        next_action: "Copy binding_id exactly into the binding_id field of the required Codex Native tool call. Never put turn_token in binding_id.",
       });
     },
   );

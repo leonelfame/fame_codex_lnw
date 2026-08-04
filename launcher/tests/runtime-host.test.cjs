@@ -7,7 +7,10 @@ const { RuntimeHost } = require("../electron/runtime.cjs");
 
 function hostFor(existingConfig) {
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-test") },
+    app: {
+      getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-test"),
+      getVersion: () => "1.1.3",
+    },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -36,6 +39,63 @@ test("core setup starts in browser-only mode when no installation exists", async
   const result = await fixture.host.setupCore();
   assert.equal(result.mode, "browser-only");
   assert.deepEqual(fixture.invocation().args.slice(0, 2), ["setup", "--browser-only"]);
+});
+
+test("launcher update transaction upgrades its owned full runtime with saved configuration", async () => {
+  const fixture = hostFor({
+    mode: "full",
+    browserHost: "launcher",
+    releaseVersion: "1.1.1",
+  });
+  fixture.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
+
+  const result = await fixture.host.upgradeManagedRuntime();
+
+  assert.deepEqual(fixture.invocation().args, [
+    "setup",
+    "--full",
+    "--browser-host-descriptor",
+    "/runtime/launcher-browser.json",
+    "--acknowledge-unofficial",
+    "--restart-service",
+  ]);
+  assert.deepEqual(result, {
+    updated: true,
+    mode: "full",
+    bridgeEnabled: true,
+    fromVersion: "1.1.1",
+    toVersion: "1.1.3",
+    stdout: "",
+  });
+});
+
+test("launcher update transaction preserves a deliberately disconnected Codex route", async () => {
+  const fixture = hostFor({
+    mode: "browser-only",
+    browserHost: "launcher",
+    releaseVersion: "1.1.1",
+  });
+  let disabled = 0;
+  fixture.host.bridgeStatus = async () => ({ installed: true, active: false, errors: [] });
+  fixture.host.setBridgeEnabled = async (enabled) => {
+    assert.equal(enabled, false);
+    disabled += 1;
+  };
+
+  const result = await fixture.host.upgradeManagedRuntime();
+
+  assert.equal(result.bridgeEnabled, false);
+  assert.equal(disabled, 1);
+});
+
+test("launcher update transaction leaves current and externally owned runtimes unchanged", async () => {
+  const current = hostFor({ mode: "browser-only", browserHost: "launcher", releaseVersion: "1.1.3" });
+  const external = hostFor({ mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "1.1.1" });
+
+  assert.deepEqual(await current.host.upgradeManagedRuntime(), { updated: false });
+  assert.deepEqual(await external.host.upgradeManagedRuntime(), { updated: false });
+  assert.equal(current.invocation(), undefined);
+  assert.equal(external.invocation(), undefined);
 });
 
 test("MCP setup reuses valid private credentials without exposing or rewriting them", async () => {
@@ -161,6 +221,49 @@ test("bridge disconnection restarts the existing runtime if restoring the prior 
   };
   await assert.rejects(fixture.host.setBridgeEnabled(false), /synthetic route restore failure/);
   assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect", "runtime:start"]);
+});
+
+test("startup recovery can restore the Codex route without requiring a healthy local runtime", async () => {
+  const fixture = bridgeFixture({ active: true });
+  const result = await fixture.host.restoreBridgeRoute("runtime-start-fail-safe");
+  assert.equal(result.active, false);
+  assert.deepEqual(fixture.calls, ["route status", "route disconnect"]);
+});
+
+test("failed runtime cleanup during removal still restores the previous Codex route", async () => {
+  const calls = [];
+  const config = { mode: "full", browserHost: "launcher", releaseVersion: "1.1.2" };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-uninstall-fail-safe") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {
+      readConfig: () => config,
+      readSetupConfig: () => config,
+      stopForSetup: async () => {
+        calls.push("runtime:stop");
+        throw new Error("Tunnel health probe timed out after 5000ms");
+      },
+    },
+  });
+  host.run = async (_name, args) => {
+    const action = args.join(" ");
+    calls.push(action);
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: true, active: true, errors: [] }) };
+    }
+    if (action === "route disconnect") {
+      return { stdout: JSON.stringify({ changed: true, active: false }) };
+    }
+    throw new Error(`Unexpected command: ${action}`);
+  };
+
+  await assert.rejects(
+    host.uninstallIntegration(),
+    /previous Codex route was restored, but launcher runtime cleanup did not complete/,
+  );
+  assert.deepEqual(calls, ["runtime:stop", "route status", "route disconnect"]);
 });
 
 test("connector verification uses the configured full-mode connector name", () => {

@@ -305,12 +305,13 @@ async function uninstallCommand(args: string[]): Promise<void> {
   if (!config && process.platform === "darwin" && getServiceStatus().installed) {
     throw new Error("Service exists but configuration is missing; refusing an unverifiable uninstall");
   }
-  if (config && process.platform === "darwin") await assertServiceIdle(config);
-  if (config?.mode === "full") {
+  const launcherRuntimeStopped = config?.browserHost === "launcher" && launcherControl;
+  if (config && process.platform === "darwin" && !launcherRuntimeStopped) await assertServiceIdle(config);
+  if (config?.mode === "full" && !launcherRuntimeStopped) {
     if (process.platform === "darwin") await uninstallTunnelService();
     stopTunnel(config);
   }
-  if (config && process.platform === "darwin") await uninstallService(config);
+  if (config && process.platform === "darwin" && !launcherRuntimeStopped) await uninstallService(config);
   uninstallCodexIntegration();
   if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
   stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");

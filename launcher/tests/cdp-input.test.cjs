@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  dispatchTrustedClick,
   dispatchTrustedKey,
   evaluatePage,
 } = require("../electron/cdp-input.cjs");
@@ -82,6 +83,36 @@ test("trusted Enter is dispatched through the owned Electron WebContents target"
     },
   ]);
   assert.equal(detached(), true);
+});
+
+test("trusted pointer activation is dispatched at the resolved DOM point", async () => {
+  const { client, commands, detached } = createDebugger();
+  await dispatchTrustedClick({
+    debuggerClient: client,
+    point: { x: 123.5, y: 88.25 },
+  });
+  assert.deepEqual(commands, [
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseMoved", x: 123.5, y: 88.25, button: "none" },
+    },
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mousePressed", x: 123.5, y: 88.25, button: "left", clickCount: 1 },
+    },
+    {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseReleased", x: 123.5, y: 88.25, button: "left", clickCount: 1 },
+    },
+  ]);
+  assert.equal(detached(), true);
+});
+
+test("trusted pointer activation rejects a missing DOM point", async () => {
+  await assert.rejects(
+    dispatchTrustedClick({ debuggerClient: createDebugger().client, point: null }),
+    /CDP click point is invalid/,
+  );
 });
 
 test("pre-attached WebContents debugger ownership is preserved", async () => {

@@ -96,6 +96,12 @@ function tunnelRuntimeStopped(health) {
     || (health?.state === "stopped" && health?.processRunning === false);
 }
 
+function runtimeOwnershipMayBeLive(state) {
+  if (!state) return false;
+  if (processRunning(state.daemonPid) || processRunning(state.tunnelPid)) return true;
+  return ["starting", "ready", "degraded", "stopping"].includes(state.status);
+}
+
 function conciseTunnelLog(value) {
   if (typeof value !== "string" || !value.trim()) return undefined;
   const tail = value.trim().split(/\r?\n/).slice(-3).join(" | ");
@@ -143,13 +149,18 @@ function tunnelCommandQuoted(value) {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-function managedTunnelMcpCommand(config) {
-  return [...config.runtimeCommand, "mcp", "--broker-socket", config.brokerSocketPath]
+function managedTunnelMcpCommand(invocation) {
+  if (!invocation
+    || typeof invocation.executable !== "string"
+    || !Array.isArray(invocation.args)) {
+    throw new Error("Launcher tunnel MCP command requires an explicit runtime invocation");
+  }
+  return [invocation.executable, ...invocation.args]
     .map(tunnelCommandQuoted)
     .join(" ");
 }
 
-function managedTunnelConnectArgs(config) {
+function managedTunnelConnectArgs(config, invocation) {
   const tunnel = config.tunnel;
   if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
   return [
@@ -160,7 +171,7 @@ function managedTunnelConnectArgs(config) {
     "--tunnel-client-bin", tunnel.binaryPath,
     "--tunnel-id", tunnel.tunnelId,
     "--runtime-api-key", `file:${tunnel.runtimeKeyFile}`,
-    "--mcp-command", managedTunnelMcpCommand(config),
+    "--mcp-command", managedTunnelMcpCommand(invocation),
     "--json",
   ];
 }
@@ -513,11 +524,14 @@ class RuntimeSupervisor {
 
   async readTunnelHealth(config) {
     const tunnel = config.tunnel;
+    // `runtimes status` performs an optional control-plane lookup when the saved runtime key is
+    // available. The cleanup dry run is the official local-only inventory and never removes
+    // entries without `--apply`, so proxy or control-plane failures cannot block supervision.
     const result = await this.runTunnelCommand(
       config,
-      ["runtimes", "status", tunnel.alias, "--json"],
+      ["runtimes", "cleanup", "--json"],
       5_000,
-      "Tunnel health probe",
+      "Local tunnel inventory probe",
     );
     if (result.code !== 0) {
       return {
@@ -526,60 +540,67 @@ class RuntimeSupervisor {
         state: undefined,
         processRunning: undefined,
         healthy: undefined,
-        absent: tunnelRuntimeAbsent(result.output),
-        statusKnown: tunnelRuntimeAbsent(result.output),
+        absent: false,
+        statusKnown: false,
         detail: tunnelControlDiagnostic(result),
       };
     }
     try {
       const parsed = JSON.parse(result.output);
-      const healthBaseUrl = loopbackHealthBaseURL(parsed.health_url ?? parsed.healthUrl);
+      if (!Array.isArray(parsed.entries)) throw new Error("local inventory has no entries array");
+      const entry = parsed.entries.find(candidate => candidate?.alias === tunnel.alias);
+      if (!entry) {
+        return {
+          ready: false,
+          pid: null,
+          state: "stopped",
+          processRunning: false,
+          healthy: false,
+          absent: true,
+          statusKnown: true,
+          detail: `alias=${tunnel.alias}; local_inventory=absent`,
+        };
+      }
+      const runtimeState = entry.runtime_state;
+      if (!["stopped", "starting", "healthy", "ready"].includes(runtimeState)) {
+        throw new Error(`local inventory reported unsupported runtime_state=${String(runtimeState)}`);
+      }
+      const liveRuntime = entry.live_runtime && typeof entry.live_runtime === "object"
+        ? entry.live_runtime
+        : {};
+      const healthBaseUrl = loopbackHealthBaseURL(liveRuntime.base_url);
       if (healthBaseUrl) this.tunnelHealthBaseUrl = healthBaseUrl;
-      const pid = Number.isInteger(parsed.pid) && parsed.pid > 0
-        ? parsed.pid
-        : Number.isInteger(parsed.process?.pid) && parsed.process.pid > 0
-          ? parsed.process.pid
+      const pid = Number.isInteger(liveRuntime.system?.pid) && liveRuntime.system.pid > 0
+        ? liveRuntime.system.pid
+        : Number.isInteger(liveRuntime.status?.pid) && liveRuntime.status.pid > 0
+          ? liveRuntime.status.pid
           : null;
-      const runtimeState = parsed.runtime_state ?? parsed.state ?? parsed.status;
-      const issues = Array.isArray(parsed.local?.issues)
-        ? parsed.local.issues.filter(issue => typeof issue === "string").slice(0, 3)
-        : [];
-      const logTail = typeof parsed.launch_diagnostics?.log_tail === "string"
-        ? parsed.launch_diagnostics.log_tail
-        : typeof parsed.local?.log?.tail === "string"
-          ? parsed.local.log.tail
-          : undefined;
-      const conciseLog = conciseTunnelLog(logTail);
+      const processRunning = runtimeState !== "stopped";
+      const healthy = runtimeState === "healthy" || runtimeState === "ready";
+      const ready = runtimeState === "ready";
       const detail = [
         ["state", runtimeState],
-        ["process_running", parsed.process_running ?? parsed.processRunning],
-        ["healthy", parsed.healthy],
-        ["ready", parsed.ready],
-        ["health_url", parsed.health_url || parsed.healthUrl ? "present" : "missing"],
+        ["process_running", processRunning],
+        ["healthy", healthy],
+        ["ready", ready],
+        ["classification", entry.classification],
+        ["live_admin", liveRuntime.found === true],
         ["pid", pid ?? "missing"],
       ]
         .filter(([, value]) => value !== undefined)
         .map(([key, value]) => `${key}=${String(value)}`)
-        .concat(issues)
-        .concat(conciseLog ? [`runtime_log=${conciseLog}`] : [])
         .join("; ");
       return {
-        ready: parsed.process_running === true
-          && parsed.healthy === true
-          && parsed.ready === true,
+        ready,
         pid,
-        state: typeof runtimeState === "string" ? runtimeState : undefined,
-        processRunning: typeof parsed.process_running === "boolean"
-          ? parsed.process_running
-          : typeof parsed.processRunning === "boolean"
-            ? parsed.processRunning
-            : undefined,
-        healthy: typeof parsed.healthy === "boolean" ? parsed.healthy : undefined,
+        state: runtimeState,
+        processRunning,
+        healthy,
         absent: false,
         statusKnown: true,
-        detail: redactText(detail || "status JSON did not expose tunnel readiness fields").slice(0, 2_000),
+        detail: redactText(detail).slice(0, 2_000),
       };
-    } catch {
+    } catch (error) {
       return {
         ready: false,
         pid: null,
@@ -588,7 +609,8 @@ class RuntimeSupervisor {
         healthy: undefined,
         absent: false,
         statusKnown: false,
-        detail: `status command returned invalid JSON: ${redactText(result.output || "[empty]").slice(0, 500)}`,
+        detail: `local inventory returned invalid JSON: ${errorMessage(error)};`
+          + ` ${redactText(result.output || "[empty]").slice(0, 500)}`,
       };
     }
   }
@@ -804,9 +826,10 @@ class RuntimeSupervisor {
   }
 
   async runTunnelConnectCommand(config) {
+    const invocation = this.runtimeCommand(["mcp", "--broker-socket", config.brokerSocketPath]);
     return await this.runTunnelCommand(
       config,
-      managedTunnelConnectArgs(config),
+      managedTunnelConnectArgs(config, invocation),
       TUNNEL_START_TIMEOUT_MS,
       "Tunnel managed startup",
     );
@@ -956,7 +979,8 @@ class RuntimeSupervisor {
       return { status: "not-configured" };
     }
     if (config.releaseVersion !== this.app.getVersion()) {
-      if (await this.proxyHealth(config) || this.readState()) {
+      const ownershipState = this.readState();
+      if (await this.proxyHealth(config) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
           const recovered = await this.stopStaleOwnedRuntime(config);
           if (!recovered) {
@@ -980,7 +1004,7 @@ class RuntimeSupervisor {
     if (!this.daemon && !this.tunnel) {
       const healthyRuntime = await this.proxyHealth(config);
       const ownershipState = this.readState();
-      if (healthyRuntime || ownershipState) {
+      if (healthyRuntime || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
           const recovered = await this.stopStaleOwnedRuntime(config);
           if (!recovered) {
@@ -1621,19 +1645,23 @@ class RuntimeSupervisor {
     let drained = false;
     let tunnelStopped = false;
     try {
-      if (config?.mode === "full" && !this.tunnel) {
+      const ownershipState = this.readState();
+      const healthyRuntime = config ? await this.proxyHealth(config) : false;
+      const runtimeMayBeLive = healthyRuntime || runtimeOwnershipMayBeLive(ownershipState);
+      if (config?.mode === "full"
+        && !this.tunnel
+        && (runtimeMayBeLive || !ownershipState)) {
         await this.adoptConfiguredTunnelForStop(config);
       }
       if (!this.daemon && !this.tunnel) {
         if (!config) {
-          const ownershipState = this.readState();
           if (ownershipState && (
             processRunning(ownershipState.daemonPid)
             || processRunning(ownershipState.tunnelPid)
           )) {
             throw new Error("runtime configuration is missing while launcher ownership processes are still alive");
           }
-        } else if (await this.proxyHealth(config) || this.readState()) {
+        } else if (runtimeMayBeLive) {
           const recovered = await this.stopStaleOwnedRuntime(config);
           if (!recovered) {
             throw new Error("an existing runtime could not be safely recovered");

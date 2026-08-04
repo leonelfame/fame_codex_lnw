@@ -105,7 +105,8 @@ try {
   );
   if (installedManifest.appVersion !== expectedVersion
     || installedManifest.platform !== process.platform
-    || installedManifest.arch !== process.arch) {
+    || installedManifest.arch !== process.arch
+    || !/^[a-f0-9]{64}$/.test(installedManifest.bundleId)) {
     throw new Error(`Packaged launcher installed the wrong durable runtime: ${JSON.stringify(installedManifest)}`);
   }
   process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);

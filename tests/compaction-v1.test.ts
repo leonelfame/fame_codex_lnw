@@ -2,7 +2,15 @@ import { expect, test } from "bun:test";
 import {
   buildCompactV1Output,
   extractCompactUserMessages,
+  isReadableCompactionSummaryText,
+  SUMMARY_PREFIX,
 } from "../src/responses/compaction";
+
+test("recognizes both Codex v1 and transparent v2 readable compaction summaries", () => {
+  expect(isReadableCompactionSummaryText(`${SUMMARY_PREFIX}\nv1 summary`)).toBe(true);
+  expect(isReadableCompactionSummaryText(`${SUMMARY_PREFIX}\n\nv2 summary`)).toBe(true);
+  expect(isReadableCompactionSummaryText(`${SUMMARY_PREFIX}not a summary boundary`)).toBe(false);
+});
 
 test("v1 compaction keeps only the newest ten structured images without copying them into text", () => {
   const input = Array.from({ length: 12 }, (_, index) => ({

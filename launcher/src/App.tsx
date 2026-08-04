@@ -1383,6 +1383,9 @@ function FieldRow({ children, label }: { children: ReactNode; label: string }) {
 }
 
 function DoctorSummary({ copy, report }: { copy: Copy; report: DoctorReport }) {
+  const visibleChecks = report.ok
+    ? report.checks.slice(-6)
+    : report.checks.filter((check) => check.status !== "ok");
   return (
     <div className={`doctor-summary${report.ok ? " is-healthy" : ""}`}>
       <header>
@@ -1390,7 +1393,7 @@ function DoctorSummary({ copy, report }: { copy: Copy; report: DoctorReport }) {
         <strong>{report.ok ? copy.healthy : copy.needsAttention}</strong>
       </header>
       <div>
-        {report.checks.slice(-6).map((check) => (
+        {visibleChecks.map((check) => (
           <p key={check.id}>
             <StateDot state={check.status === "ok" ? "ready" : check.status === "warning" ? "busy" : "error"} />
             <span>{check.message}</span>
