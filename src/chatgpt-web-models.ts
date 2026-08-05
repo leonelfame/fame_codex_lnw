@@ -4,8 +4,10 @@ export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
 export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export const CHATGPT_WEB_STANDARD_CONTEXT_WINDOW = 205_000;
-export const CHATGPT_WEB_PRO_CONTEXT_WINDOW = 256_000;
+export const CHATGPT_WEB_INSTANT_MEDIUM_CONTEXT_WINDOW = 150_000;
+export const CHATGPT_WEB_HIGH_CONTEXT_WINDOW = 185_000;
+export const CHATGPT_WEB_EXTRA_HIGH_CONTEXT_WINDOW = 256_000;
+export const CHATGPT_WEB_PRO_CONTEXT_WINDOW = 272_000;
 
 export interface ChatGptWebContextLimits {
   contextWindow: number;
@@ -16,9 +18,13 @@ export interface ChatGptWebContextLimits {
 export function resolveChatGptWebContextLimits(
   effort: ChatGptWebAdapterEffort,
 ): ChatGptWebContextLimits {
-  const contextWindow = effort === "xhigh" || effort === "max"
+  const contextWindow = effort === "max"
     ? CHATGPT_WEB_PRO_CONTEXT_WINDOW
-    : CHATGPT_WEB_STANDARD_CONTEXT_WINDOW;
+    : effort === "xhigh"
+      ? CHATGPT_WEB_EXTRA_HIGH_CONTEXT_WINDOW
+      : effort === "high"
+        ? CHATGPT_WEB_HIGH_CONTEXT_WINDOW
+        : CHATGPT_WEB_INSTANT_MEDIUM_CONTEXT_WINDOW;
   return {
     contextWindow,
     // Leave ten percent for Codex to submit and receive the compact checkpoint before the hard cap.

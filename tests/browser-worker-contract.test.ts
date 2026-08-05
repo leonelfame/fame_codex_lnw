@@ -1,15 +1,14 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, assertChatGptWebPromptWithinInlineTransport, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
-import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('composer.fill("")');
-  expect(workerSource).toContain("page.keyboard.insertText(prompt)");
-  expect(workerSource).toContain("page.keyboard.insertText(` ${prompt}`)");
+  expect(workerSource).toContain("this.insertPromptText(page, prompt)");
+  expect(workerSource).toContain("this.insertPromptText(page, ` ${prompt}`)");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
 });
 
@@ -75,24 +74,6 @@ test("managed Chrome defaults follow the host platform", () => {
   );
   const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
-});
-
-test("oversized inline prompts fail before opening ChatGPT", () => {
-  expect(() => assertChatGptWebPromptWithinInlineTransport(540_000)).not.toThrow();
-  expect(() => assertChatGptWebPromptWithinInlineTransport(540_001)).toThrow(
-    "exceeds the current ChatGPT composer limit",
-  );
-  try {
-    assertChatGptWebPromptWithinInlineTransport(540_001);
-  } catch (error) {
-    expect(error).toMatchObject({
-      name: "ChatGptWebAdapterError",
-      status: 400,
-      errorType: "invalid_request_error",
-      code: "context_length_exceeded",
-      retryable: false,
-    });
-  }
 });
 
 test("browser stage timeout aborts late page acquisition", async () => {
@@ -171,8 +152,8 @@ test("active composer resolution waits for exactly one visible editor", async ()
   expect(await activeComposer.call({}, page, 500)).toBe(composer);
 });
 
-test("read-only multiline context is inserted atomically before exact verification", async () => {
-  const prompt = `Act as the model backend for the Codex task encoded below.\n${"x".repeat(44_550)}`;
+test("large read-only context is inserted in bounded edits before exact verification", async () => {
+  const prompt = `Act as the model backend for the Codex task encoded below.\n${"x".repeat(819_343)}`;
   const calls: Array<[string, string?]> = [];
   let asserted = "";
   const composer = {
@@ -187,17 +168,21 @@ test("read-only multiline context is inserted atomically before exact verificati
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
     attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
   }).attachPrompt;
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
 
   await attachPrompt.call({
     activeComposer: async () => composer,
+    insertPromptText,
     assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
   }, page, prompt, false);
 
-  expect(calls).toEqual([
-    ["fill", ""],
-    ["focus"],
-    ["insertText", prompt],
-  ]);
+  const inserted = calls.filter(call => call[0] === "insertText").map(call => call[1] ?? "");
+  expect(calls.slice(0, 2)).toEqual([["fill", ""], ["focus"]]);
+  expect(inserted.every(chunk => chunk.length <= CHATGPT_PROMPT_INSERT_CHUNK_CHARS)).toBeTrue();
+  expect(inserted.length).toBe(5);
+  expect(inserted.join("")).toBe(prompt);
   expect(asserted).toBe(prompt);
 });
 
@@ -393,11 +378,15 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
   }).selectConnector;
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
 
   let activeComposerCalls = 0;
   await attachPrompt.call({
     config: { appName: "Codex Native" },
     selectConnector,
+    insertPromptText,
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -701,11 +690,11 @@ test("explicit connector auto-approval still selects Allow once", async () => {
 });
 
 test("browser preflight fails closed with Codex's native context-window error contract", () => {
-  expect(() => assertChatGptWebInputWithinContextWindow(205_000, "medium")).toThrow(
-    "205,000-token context window",
+  expect(() => assertChatGptWebInputWithinContextWindow(150_000, "medium")).toThrow(
+    "150,000-token context window",
   );
   try {
-    assertChatGptWebInputWithinContextWindow(205_000, "medium");
+    assertChatGptWebInputWithinContextWindow(150_000, "medium");
     throw new Error("expected context-window preflight to fail");
   } catch (error) {
     expect(error).toMatchObject({
@@ -718,7 +707,11 @@ test("browser preflight fails closed with Codex's native context-window error co
     expect(String(error)).toContain("/compact");
   }
 
-  expect(() => assertChatGptWebInputWithinContextWindow(204_999, "high")).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(149_999, "medium")).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(184_999, "high")).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(185_000, "high")).toThrow(
+    "185,000-token context window",
+  );
   expect(() => assertChatGptWebInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
   expect(() => assertChatGptWebInputWithinContextWindow(255_999, "max")).not.toThrow();
 });
@@ -884,6 +877,7 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain('candidate.closest<HTMLElement>("[data-item-anchor]")');
   expect(workerSource).toContain("const traceByKey = new Map<string, ChatGptVisibleTraceBlock>()");
   expect(workerSource).toContain('block.kind === "commentary" ? { complete: index < blocks.length - 1 }');
+  expect(workerSource).toContain('uiControl: candidate.matches("button")');
   expect(workerSource).toContain("!overlapsRenderedAnswer(semantic)");
   expect(workerSource).toContain("!overlapsRenderedAnswer(container)");
   expect(workerSource).not.toContain('fullHtml: rendered?.innerHTML ?? ""');
@@ -925,27 +919,12 @@ test("visible DOM trace waits out animated Pro fragments and appends genuine gro
   }]);
 });
 
-test("visible DOM trace translates the explicit ChatGPT compaction marker once", () => {
-  const tracker = new ChatGptVisibleTraceTracker();
-  expect(tracker.observe([
-    { kind: "answer", text: CHATGPT_INTERNAL_COMPACTION_MARKER },
-  ], false)).toEqual([{ kind: "reasoning", text: "Context automatically compacted" }]);
-  expect(tracker.observe([
-    { kind: "status", text: CHATGPT_INTERNAL_COMPACTION_MARKER },
-  ], false)).toEqual([]);
-  expect(stripChatGptTransportMarkers(
-    `Before\n\n${CHATGPT_INTERNAL_COMPACTION_MARKER}\n\nAfter`,
-  )).toBe("Before\n\nAfter");
-  const partial = "[[CODEX_INTERNAL_CONTEXT_COMPACT";
-  expect(containsChatGptCompactionMarker(partial)).toBe(true);
-  expect(stripChatGptTransportMarkers(partial)).toBe("");
-  expect(new ChatGptVisibleTraceTracker().observe([
-    { kind: "answer", text: partial },
-  ], false)).toEqual([{ kind: "reasoning", text: "Context automatically compacted" }]);
-});
-
 test("trace parsing excludes the Answer now UI control", () => {
   expect(isChatGptTraceControl({ kind: "status", text: "Answer now" })).toBe(true);
+  expect(isChatGptTraceControl({ kind: "status", text: "Thinking" })).toBe(true);
+  expect(isChatGptTraceControl({ kind: "status", text: "Switch model", uiControl: true })).toBe(true);
+  expect(isChatGptTraceControl({ kind: "status", text: "More actions", uiControl: true })).toBe(true);
+  expect(isChatGptTraceControl({ kind: "status", text: "Inspecting models", uiControl: false })).toBe(false);
   expect(isChatGptTraceControl({ kind: "status", text: "Reviewing repository invariants" })).toBe(false);
   expect(isChatGptTraceControl({ kind: "answer", text: "Answer now" })).toBe(false);
 });

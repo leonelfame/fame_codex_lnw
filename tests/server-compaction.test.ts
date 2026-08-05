@@ -5,7 +5,7 @@ import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary } from "../src/
 import { compactRequest, responseRequest } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
 import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
-import { chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
@@ -113,7 +113,7 @@ test("compaction identity accepts a historical source message from the pre-compa
     name: "compaction-identity-check",
     async runTurn(parsed, _incoming, emit) {
       expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
-      expect(() => chatGptTurnExecutionKey(parsed, "response")).not.toThrow();
+      expect(() => chatGptCompactionSourceExecutionKey(parsed)).not.toThrow();
       emit({ type: "text_delta", text: summary, phase: "final_answer" });
       emit({ type: "done", stopReason: "stop", endTurn: true });
     },

@@ -46,19 +46,25 @@ describe("fixed ChatGPT Web model routes", () => {
       .toThrow("Pro is not available for this account");
   });
 
-  test("reserves the larger context window for Extra High and Pro", () => {
-    for (const effort of ["low", "medium", "high"] as const) {
+  test("uses the reduced Plus window only for Instant and Medium", () => {
+    for (const effort of ["low", "medium"] as const) {
       expect(resolveChatGptWebContextLimits(effort)).toEqual({
-        contextWindow: 205_000,
-        autoCompactTokenLimit: 184_500,
+        contextWindow: 150_000,
+        autoCompactTokenLimit: 135_000,
       });
     }
-    for (const effort of ["xhigh", "max"] as const) {
-      expect(resolveChatGptWebContextLimits(effort)).toEqual({
-        contextWindow: 256_000,
-        autoCompactTokenLimit: 230_400,
-      });
-    }
+    expect(resolveChatGptWebContextLimits("high")).toEqual({
+      contextWindow: 185_000,
+      autoCompactTokenLimit: 166_500,
+    });
+    expect(resolveChatGptWebContextLimits("xhigh")).toEqual({
+      contextWindow: 256_000,
+      autoCompactTokenLimit: 230_400,
+    });
+    expect(resolveChatGptWebContextLimits("max")).toEqual({
+      contextWindow: 272_000,
+      autoCompactTokenLimit: 244_800,
+    });
   });
 
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {

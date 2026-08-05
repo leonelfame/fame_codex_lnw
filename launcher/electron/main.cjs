@@ -27,6 +27,8 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
+const { runtimeBundlePaths } = require("./runtime-command.cjs");
+const { createUpdateController } = require("./update.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -90,6 +92,7 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let updateController = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -370,6 +373,7 @@ function registerIpc({ logger, stateStore }) {
     version: app.getVersion(),
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
+    update: updateController?.getState() ?? { status: "disabled" },
   }));
 
   handle("launcher:set-language", (_event, language) => stateStore.update({ language: validateLanguage(language) }));
@@ -568,6 +572,16 @@ function registerIpc({ logger, stateStore }) {
     if (error) throw new Error(`Could not open the launcher log directory: ${error}`);
     return logger.filePath;
   });
+  handle("launcher:update-install", async () => {
+    if (!updateController) throw new Error("Launcher updates are unavailable");
+    const launch = await updateController.beginInstall();
+    const result = await requestQuit();
+    if (!result.ok) {
+      updateController.cancelInstall(launch);
+      throw new Error(result.message);
+    }
+    return true;
+  });
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     return windowStateSnapshot(window);
@@ -582,7 +596,9 @@ function registerIpc({ logger, stateStore }) {
 }
 
 async function requestQuit() {
-  if (shutdownInProgress || exitCommitted) return;
+  if (shutdownInProgress || exitCommitted) {
+    return { ok: false, message: "Launcher shutdown is already in progress" };
+  }
   shutdownInProgress = true;
   try {
     const activeOperation = runtimeHost?.currentOperation();
@@ -596,11 +612,13 @@ async function requestQuit() {
     await browserControl?.close();
     exitCommitted = true;
     app.quit();
+    return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     quitting = false;
     showMainWindow();
     publishOperation({ name: "launcher-quit", status: "failed", message });
+    return { ok: false, message };
   } finally {
     shutdownInProgress = false;
   }
@@ -697,6 +715,20 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
   });
+  const updaterRuntimeRoot = runtimeRootProvider();
+  updateController = createUpdateController({
+    currentVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    packaged: app.isPackaged,
+    executablePath: process.execPath,
+    runtimeExecutable: updaterRuntimeRoot
+      ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
+      : null,
+    logsDirectory: app.getPath("logs"),
+    publish: (state) => send("launcher:update-state", state),
+    logger,
+  });
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
@@ -709,6 +741,7 @@ async function start() {
     });
   }
   await loadRenderer(mainWindow);
+  if (!launcherSmokeTest) void updateController.checkOnce();
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {

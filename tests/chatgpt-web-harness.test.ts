@@ -11,8 +11,8 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../sr
 import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/chatgpt-web/prompt";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
@@ -394,8 +394,16 @@ describe("ChatGPT outer-native harness v3", () => {
         turn_id: "turn_compact_456",
       }),
     };
-    expect(chatGptTurnExecutionKey(newCompactTurn, "response")).toBe(chatGptTurnExecutionKey(first));
+    expect(chatGptCompactionSourceExecutionKey(newCompactTurn)).toBe(chatGptTurnExecutionKey(first));
     expect(chatGptTurnExecutionKey(newCompactTurn)).not.toBe(chatGptTurnExecutionKey(first));
+    const laterCompact = structuredClone(newCompactTurn);
+    ((laterCompact._rawBody as { input: unknown[] }).input).push({
+      type: "function_call_output",
+      call_id: "call_later",
+      output: "later compacted state",
+    });
+    expect(chatGptTurnExecutionKey(laterCompact)).not.toBe(chatGptTurnExecutionKey(newCompactTurn));
+    expect(chatGptCompactionSourceExecutionKey(laterCompact)).toBe(chatGptTurnExecutionKey(first));
     expect(() => chatGptTurnExecutionKey(parsed(environmentXml))).toThrow("requires native Codex turn_id metadata");
   });
 
@@ -448,8 +456,45 @@ describe("ChatGPT outer-native harness v3", () => {
     sessions.clear();
   });
 
+  test("waits for one shared browser retirement before starting the compacted continuation", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let finishBrowser!: (answer: string) => void;
+    const browser = new Promise<string>(resolveBrowser => { finishBrowser = resolveBrowser; });
+    let cancellations = 0;
+    const original = sessions.getOrCreate("replace", () => ({
+      mode: "read-only",
+      browser,
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => { cancellations += 1; },
+    }));
+
+    const firstRetirement = sessions.retireAndWait("replace");
+    const duplicateRetirement = sessions.retireAndWait("replace");
+    let replacementStarts = 0;
+    const replacement = sessions.waitForRetirement("replace").then(() => sessions.getOrCreate("replace", () => {
+      replacementStarts += 1;
+      return {
+        mode: "read-only" as const,
+        browser: Promise.resolve("continued"),
+        trace: new ChatGptTraceFeed(),
+        text: new ChatGptTextFeed(),
+        cancel: () => {},
+      };
+    }));
+
+    expect(cancellations).toBe(1);
+    expect(replacementStarts).toBe(0);
+    finishBrowser("stopped");
+    expect(await Promise.all([firstRetirement, duplicateRetirement])).toEqual([true, true]);
+    expect(await original.browserOutcome).toEqual({ type: "final", answer: "stopped" });
+    expect(await replacement).not.toBe(original);
+    expect(replacementStarts).toBe(1);
+    sessions.clear();
+  });
+
   test("keeps inline images out of the context JSON and prepares native browser attachments", () => {
-    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = parsed();
     request.context.messages[0]!.content = [
       { type: "text", text: "Inspect this image" },
@@ -465,8 +510,32 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(files[0]?.buffer.length).toBeGreaterThan(0);
   });
 
+  test("keeps only the newest complete Codex model-switch contract", () => {
+    const history = [
+      { role: "developer" as const, content: "<model_switch>old contract</model_switch>", timestamp: 1 },
+      { role: "developer" as const, content: "<skills_instructions>old catalog</skills_instructions>", timestamp: 2 },
+      { role: "user" as const, content: "historical user message", timestamp: 3 },
+      { role: "assistant" as const, content: [{ type: "text" as const, text: "historical answer" }], model: "gpt-5.6-sol", timestamp: 4 },
+      { role: "developer" as const, content: "unrelated developer instruction", timestamp: 5 },
+      { role: "developer" as const, content: "<model_switch>current contract</model_switch>", timestamp: 6 },
+      { role: "developer" as const, content: "<skills_instructions>current catalog</skills_instructions>", timestamp: 7 },
+      { role: "user" as const, content: "current request", timestamp: 8 },
+    ];
+
+    const normalized = withoutSupersededModelSwitchContracts(history);
+    const serialized = JSON.stringify(normalized);
+    expect(serialized).not.toContain("old contract");
+    expect(serialized).not.toContain("old catalog");
+    expect(serialized).toContain("historical user message");
+    expect(serialized).toContain("historical answer");
+    expect(serialized).toContain("unrelated developer instruction");
+    expect(serialized).toContain("current contract");
+    expect(serialized).toContain("current catalog");
+    expect(serialized).toContain("current request");
+  });
+
   test("keeps a large context inline and uploads only its referenced images", () => {
-    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = parsed();
     request.context.systemPrompt = ["d".repeat(70_000)];
     request.context.messages[0]!.content = [
@@ -506,7 +575,7 @@ describe("ChatGPT outer-native harness v3", () => {
   });
 
   test("builds a context-complete Pro prompt without exposing any local-tool capability", () => {
-    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = proRequest();
     request.context.systemPrompt = ["system-rule", "repo-rule"];
     request.context.messages = [
@@ -566,7 +635,7 @@ describe("ChatGPT outer-native harness v3", () => {
     const imageRequest = parsed();
     imageRequest.context.messages[0]!.content = [
       { type: "text", text: "Inspect this image" },
-      { type: "image", imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", detail: "high" },
+      { type: "image", imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==", detail: "high" },
     ];
     const imageUsage = estimateChatGptWebUsage(imageRequest, { answer: "done" }, toolCapabilities);
     expect(imageUsage.inputTokens).toBeGreaterThanOrEqual(textUsage.inputTokens + 3_500);
@@ -871,7 +940,7 @@ describe("ChatGPT outer-native harness v3", () => {
     await broker.close();
   });
 
-  test("keeps one browser response alive when Codex compacts mid-tool-loop", async () => {
+  test("replaces the active browser response after Codex compacts mid-tool-loop", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -881,33 +950,60 @@ describe("ChatGPT outer-native harness v3", () => {
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
     let browserStarts = 0;
+    let originalTurnToken = "";
+    let continuationTurnToken = "";
+    let originalBrowserStopped = false;
+    let originalBrowserReceivedToolResult = false;
+    let compactionPrompt = "";
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
       const prepared = await turn.prepare();
       try {
         if (prepared.text.includes("history-compaction checkpoint")) {
+          compactionPrompt = prepared.text;
           const compactSummary = "The project was inspected and the pending command completed.";
           turn.onTextDelta(compactSummary);
           return compactSummary;
         }
-        if (browserStarts > 2) throw new Error("mid-turn compaction started a second task browser session");
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        if (prepared.text.includes("The project was inspected and the pending command completed.")) {
+          continuationTurnToken = token;
+          turn.onReasoningSummary?.("Resumed from the compacted Codex history");
+          const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+            method: "invoke",
+            bindingId: claimed.bindingId,
+            wireName: "exec_command",
+            freeform: false,
+            arguments: { cmd: "git status --short", workdir: tempRoot },
+          }, 30_000);
+          turn.onReasoningSummary?.("Verified the continued task");
+          const answer = `## Browser final\n\nStatus: ${(nativeResult.structuredContent as { output: string }).output}`;
+          turn.onTextDelta("## Browser final");
+          turn.onTextDelta(`\n\nStatus: ${(nativeResult.structuredContent as { output: string }).output}`);
+          return answer;
+        }
+
+        originalTurnToken = token;
         turn.onReasoningSummary?.("Mapped the repository surface");
         turn.onReasoningSummary?.("Inspected the working directory");
-        const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
-          method: "invoke",
-          bindingId: claimed.bindingId,
-          wireName: "exec_command",
-          freeform: false,
-          arguments: { cmd: "pwd", workdir: tempRoot },
-        }, 30_000);
-        turn.onReasoningSummary?.("Verified the command result");
-        const answer = `## Browser final\n\nWorking directory: ${(nativeResult.structuredContent as { output: string }).output}`;
-        turn.onTextDelta("## Browser final");
-        turn.onTextDelta(`\n\nWorking directory: ${(nativeResult.structuredContent as { output: string }).output}`);
-        return answer;
+        try {
+          const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+            method: "invoke",
+            bindingId: claimed.bindingId,
+            wireName: "exec_command",
+            freeform: false,
+            arguments: { cmd: "pwd", workdir: tempRoot },
+          }, 30_000);
+          originalBrowserReceivedToolResult = true;
+          return `stale browser continued with ${(nativeResult.structuredContent as { output: string }).output}`;
+        } catch (error) {
+          originalBrowserStopped = turn.abortSignal?.aborted === true
+            && error instanceof Error
+            && error.message.includes("revoked");
+          throw error;
+        }
       } finally {
         prepared.release();
       }
@@ -973,6 +1069,10 @@ describe("ChatGPT outer-native harness v3", () => {
       const compactEvents: AdapterEvent[] = [];
       await adapter.runTurn!(compactRequest, { headers: new Headers() }, event => compactEvents.push(event));
       expect(compactEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      expect(originalBrowserStopped).toBe(true);
+      expect(originalBrowserReceivedToolResult).toBe(false);
+      expect(compactionPrompt).toContain(`"tool_call_id":"${callStart!.id}"`);
+      expect(compactionPrompt).toContain('"role":"tool_result"');
 
       const secondRequest = rawWireRequest(environmentXml);
       secondRequest.context.messages.push({
@@ -986,25 +1086,72 @@ describe("ChatGPT outer-native harness v3", () => {
         content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\nThe project was inspected and the pending command completed.` }],
       });
       await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
-      expect(browserStarts).toBe(2);
+      expect(browserStarts).toBe(3);
+      expect(continuationTurnToken).not.toBe(originalTurnToken);
       expect(secondEvents.find(event => event.type === "thinking_delta")).toEqual({
         type: "thinking_delta",
-        thinking: "Verified the command result",
+        thinking: "Resumed from the compacted Codex history",
       });
-      expect(secondEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
+      const continuedCall = secondEvents.find(
+        (event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start",
+      );
+      expect(continuedCall?.name).toBe("exec_command");
+      expect(secondEvents.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
+
+      const finalRequest = structuredClone(secondRequest);
+      const continuedToolCall = {
+        role: "assistant" as const,
+        content: [{
+          type: "toolCall" as const,
+          id: continuedCall!.id,
+          name: "exec_command",
+          arguments: { cmd: "git status --short", workdir: tempRoot },
+        }],
+        timestamp: 6,
+      };
+      const continuedResult = {
+        role: "toolResult" as const,
+        toolCallId: continuedCall!.id,
+        toolName: "exec_command",
+        content: JSON.stringify({ output: "clean", exit_code: 0 }),
+        isError: false,
+        timestamp: 7,
+      };
+      finalRequest.context.messages.push(continuedToolCall, continuedResult);
+      ((finalRequest._rawBody as { input: unknown[] }).input).push(
+        {
+          type: "function_call",
+          call_id: continuedCall!.id,
+          name: "exec_command",
+          arguments: JSON.stringify({ cmd: "git status --short", workdir: tempRoot }),
+        },
+        {
+          type: "function_call_output",
+          call_id: continuedCall!.id,
+          output: continuedResult.content,
+        },
+      );
+      const finalEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(finalRequest, { headers: new Headers() }, event => finalEvents.push(event));
+      expect(browserStarts).toBe(3);
+      expect(finalEvents.find(event => event.type === "thinking_delta")).toEqual({
+        type: "thinking_delta",
+        thinking: "Verified the continued task",
+      });
+      expect(finalEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
         .map(event => event.text).join(""))
-        .toBe(`## Browser final\n\nWorking directory: ${tempRoot}`);
-      const secondDone = secondEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
-      expect(secondDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
-      expect(secondDone.usage?.estimated).toBe(true);
-      expect(Number.isFinite(secondDone.usage?.inputTokens)).toBe(true);
-      expect(Number.isFinite(secondDone.usage?.outputTokens)).toBe(true);
-      expect(secondDone.usage!.inputTokens).toBeGreaterThan(firstDone.usage!.inputTokens);
+        .toBe("## Browser final\n\nStatus: clean");
+      const finalDone = finalEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(finalDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      expect(finalDone.usage?.estimated).toBe(true);
+      expect(Number.isFinite(finalDone.usage?.inputTokens)).toBe(true);
+      expect(Number.isFinite(finalDone.usage?.outputTokens)).toBe(true);
+      expect(finalDone.usage!.inputTokens).toBeGreaterThan(firstDone.usage!.inputTokens);
 
       const replayEvents: AdapterEvent[] = [];
-      await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => replayEvents.push(event));
-      expect(browserStarts).toBe(2);
-      expect(replayEvents).toEqual(secondEvents);
+      await adapter.runTurn!(finalRequest, { headers: new Headers() }, event => replayEvents.push(event));
+      expect(browserStarts).toBe(3);
+      expect(replayEvents).toEqual(finalEvents);
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();

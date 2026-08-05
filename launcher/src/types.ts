@@ -76,6 +76,11 @@ export interface OperationState {
   message: string;
 }
 
+export type UpdateState =
+  | { status: "disabled" | "idle" | "checking" | "up-to-date" }
+  | { status: "available" | "downloading" | "installing"; version: string }
+  | { status: "error"; message: string };
+
 export interface LauncherSnapshot {
   state: LauncherState;
   browser: BrowserState | null;
@@ -93,6 +98,7 @@ export interface LauncherSnapshot {
   version: string;
   smokePassed: boolean;
   operation: OperationState | null;
+  update: UpdateState;
 }
 
 export interface LauncherApi {
@@ -129,6 +135,7 @@ export interface LauncherApi {
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
+  installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
@@ -136,6 +143,7 @@ export interface LauncherApi {
   onBrowserState(listener: (state: BrowserState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
+  onUpdateState(listener: (state: UpdateState) => void): () => void;
 }
 
 declare global {

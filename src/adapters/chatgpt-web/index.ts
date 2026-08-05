@@ -10,7 +10,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./env
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
@@ -278,29 +278,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         }
       }
       if (parsed._compactionRequest) {
-        const responseExecutionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed, "response")}`;
-        const responseSession = chatGptTurnSessions.get(responseExecutionKey);
-        if (responseSession?.outstanding().length) {
-          await responseSession.runExclusive(async () => {
-            const outstanding = responseSession.outstanding();
-            const results = currentToolResults(parsed, responseSession);
-            if (results.length !== outstanding.length) {
-              throw new Error(
-                `Codex compaction returned ${results.length} of ${outstanding.length} results for an active ChatGPT tool batch`,
-              );
-            }
-            if (responseSession.runtime.mode !== "tools") {
-              throw new Error("Read-only ChatGPT Web runtime cannot own tool results at a compaction boundary");
-            }
-            const turnToken = await withAbort(responseSession.runtime.token, incoming.abortSignal);
-            for (const message of results) {
-              broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
-              responseSession.markResultDelivered(message.toolCallId);
-            }
-          });
-        }
+        const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
+        await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+      await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,

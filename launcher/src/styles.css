@@ -364,6 +364,21 @@ code {
   color: var(--color-text-primary);
 }
 
+.sidebar-item.is-update {
+  margin-bottom: 5px;
+  background: rgb(51 156 255 / 14%);
+  color: var(--blue-100);
+}
+
+.sidebar-item.is-update:hover {
+  background: rgb(51 156 255 / 22%);
+  color: var(--gray-0);
+}
+
+.sidebar-item.is-update > svg {
+  color: var(--blue-300);
+}
+
 .sidebar-item > svg {
   width: 16px;
   height: 16px;

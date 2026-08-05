@@ -84,10 +84,10 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
 /**
  * Return the latest real user instruction owned by the current native Codex turn.
  *
- * Provider rounds replay the same instruction, steering appends a newer one, and remote
- * compaction adds contextual summary and environment messages without changing that instruction.
- * Hashing the complete revision therefore distinguishes steering without changing the
- * browser-session identity at a compaction boundary.
+ * Provider rounds replay the same instruction and steering appends a newer one. Remote
+ * compaction uses this revision to identify and stop the superseded browser response; once Codex
+ * installs the replacement history, the immediate continuation starts a fresh browser response
+ * under the same logical task revision.
  */
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
@@ -304,7 +304,20 @@ function decodeXmlText(value: string): string {
 }
 
 function environmentCwdMatches(text: string): string[] {
-  return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
+  const sections = [...text.matchAll(/<environments>([\s\S]*?)<\/environments>/gi)];
+  if (sections.length === 0) {
+    return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
+  }
+  if (sections.length !== 1) return [];
+
+  const section = sections[0]!;
+  const outside = text.replace(section[0], "");
+  if (/<cwd>[^<]*<\/cwd>/i.test(outside)) return [];
+
+  const environments = [...section[1]!.matchAll(/<environment\b([^>]*)>([\s\S]*?)<\/environment>/gi)];
+  const primary = environments.filter(match => /\bprimary\s*=\s*["']true["']/i.test(match[1] ?? ""));
+  if (primary.length !== 1) return [];
+  return [...primary[0]![2]!.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
 }
 
 function uniqueAbsolutePaths(values: string[], field: string): string[] {

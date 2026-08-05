@@ -46,3 +46,19 @@ test("v1 compaction keeps only the newest ten structured images without copying 
     .every(block => !block.text?.includes("data:image"))).toBe(true);
   expect(retained.at(-1)?.content.at(-1)).toMatchObject({ detail: "high" });
 });
+
+test("v1 compaction drops persisted one-pixel image sentinels", () => {
+  const placeholder = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  const output = buildCompactV1Output(extractCompactUserMessages([{
+    type: "message",
+    role: "user",
+    content: [
+      { type: "input_text", text: "keep the request" },
+      { type: "input_image", image_url: placeholder },
+      { type: "input_image", image_url: "data:image/png;base64,real-image" },
+    ],
+  }]), "checkpoint");
+
+  expect(JSON.stringify(output)).not.toContain(placeholder);
+  expect(JSON.stringify(output)).toContain("data:image/png;base64,real-image");
+});

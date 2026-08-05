@@ -64,12 +64,16 @@ export function App() {
       if (next.status === "failed") setError(next.message);
     });
     const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
+    const unsubscribeUpdate = api.onUpdateState((update) => {
+      setSnapshot((current) => current ? { ...current, update } : current);
+    });
     return () => {
       cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
       unsubscribeOperation();
       unsubscribeLog();
+      unsubscribeUpdate();
     };
   }, []);
 
@@ -303,6 +307,9 @@ function LauncherShell({
   const needsSetup = !needsBrowser
     && (snapshot.state.coreSetupComplete !== true || snapshot.state.codexCatalogVerified !== true);
   const mcpOptional = snapshot.state.codexCatalogVerified === true && snapshot.state.mcpSetupComplete !== true;
+  const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
+  const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
+  const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -387,6 +394,15 @@ function LauncherShell({
   const navigateSurface = (next: Surface) => {
     setSurface(next);
     if (compactSidebar) setSidebarOpen(false);
+  };
+
+  const installUpdate = async () => {
+    setError(null);
+    try {
+      await api!.installUpdate();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
   };
 
   const dismissSessionReminder = async () => {
@@ -502,6 +518,16 @@ function LauncherShell({
             </nav>
 
             <div className="sidebar-footer">
+              {updateVisible ? (
+                <SidebarItem
+                  active={false}
+                  disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
+                  icon="update"
+                  label={updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
+                  onClick={() => void installUpdate()}
+                  tone="update"
+                />
+              ) : null}
               <SidebarItem
                 active={surface === "settings"}
                 badge={snapshot.state.coreSetupComplete
@@ -618,20 +644,25 @@ function SidebarGroup({ children, label }: { children: ReactNode; label: string 
 function SidebarItem({
   active,
   badge,
+  disabled = false,
   icon,
   label,
   onClick,
+  tone,
 }: {
   active: boolean;
   badge?: ReactNode;
+  disabled?: boolean;
   icon: IconName;
   label: string;
   onClick: () => void;
+  tone?: "update";
 }) {
   return (
     <button
       aria-current={active ? "page" : undefined}
-      className={`sidebar-item${active ? " is-active" : ""}`}
+      className={`sidebar-item${active ? " is-active" : ""}${tone === "update" ? " is-update" : ""}`}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >

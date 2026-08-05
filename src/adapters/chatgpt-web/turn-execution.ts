@@ -125,30 +125,50 @@ export type ChatGptTurnRuntime =
   | (ChatGptTurnRuntimeBase & { mode: "tools"; token: Promise<string> })
   | (ChatGptTurnRuntimeBase & { mode: "read-only" });
 
-export type ChatGptTurnExecutionPurpose = "response" | "compaction";
-
-export function chatGptTurnExecutionKey(
-  parsed: CodexParsedRequest,
-  purpose: ChatGptTurnExecutionPurpose = parsed._compactionRequest ? "compaction" : "response",
-): string {
-  const identity = extractChatGptTurnIdentity(parsed);
-  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
-  const source = parsed._compactionRequest && purpose === "response"
-    ? extractChatGptCompactionSourceRevision(parsed)
-    : undefined;
-  const payload = {
-    threadId: identity.threadId,
-    turnId: source?.turnId ?? identity.turnId,
-    purpose,
-    userRevision: parsed._compactionRequest && purpose === "compaction"
-      ? { type: "remote_compaction" }
-      : source?.content ?? extractChatGptTurnUserRevision(parsed),
-  };
+function executionKey(parsed: CodexParsedRequest, payload: unknown): string {
   return createHash("sha256").update(JSON.stringify({
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
     payload,
   })).digest("hex");
+}
+
+function compactionInputRevision(parsed: CodexParsedRequest): unknown[] {
+  const body = parsed._rawBody;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("ChatGPT web compaction requires the complete native Codex request body");
+  }
+  const input = (body as { input?: unknown }).input;
+  if (!Array.isArray(input)) {
+    throw new Error("ChatGPT web compaction requires the complete native Codex input history");
+  }
+  return input;
+}
+
+export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  return executionKey(parsed, {
+    threadId: identity.threadId,
+    turnId: identity.turnId,
+    purpose: parsed._compactionRequest ? "compaction" : "response",
+    revision: parsed._compactionRequest
+      ? compactionInputRevision(parsed)
+      : extractChatGptTurnUserRevision(parsed),
+  });
+}
+
+/** Locate the browser response that a native mid-turn compaction replaces. */
+export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  const source = extractChatGptCompactionSourceRevision(parsed);
+  return executionKey(parsed, {
+    threadId: identity.threadId,
+    turnId: source.turnId ?? identity.turnId,
+    purpose: "response",
+    revision: source.content,
+  });
 }
 
 export class ChatGptTurnSession {
@@ -257,6 +277,7 @@ export class ChatGptTurnSession {
 
 export class ChatGptTurnSessions {
   private readonly entries = new Map<string, ChatGptTurnSession>();
+  private readonly retirements = new Map<string, Promise<void>>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
@@ -282,11 +303,29 @@ export class ChatGptTurnSessions {
     return session;
   }
 
-  get(key: string): ChatGptTurnSession | undefined {
-    this.prune();
+  async waitForRetirement(key: string): Promise<void> {
+    await this.retirements.get(key);
+  }
+
+  async retireAndWait(key: string): Promise<boolean> {
+    const pending = this.retirements.get(key);
+    if (pending) {
+      await pending;
+      return true;
+    }
     const session = this.entries.get(key);
-    session?.touch();
-    return session;
+    if (!session) return false;
+
+    this.entries.delete(key);
+    session.cancel();
+    const retirement = session.browserOutcome.then(() => undefined);
+    this.retirements.set(key, retirement);
+    try {
+      await retirement;
+    } finally {
+      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
+    }
+    return true;
   }
 
   retire(key: string, session: ChatGptTurnSession): boolean {

@@ -7,8 +7,8 @@ import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "./markdown";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
-import { CHATGPT_INTERNAL_COMPACTION_MARKER, CHATGPT_MAX_INPUT_IMAGES, containsChatGptCompactionMarker, stripChatGptTransportMarkers, type CompiledChatGptWebPrompt, type ChatGptWebPromptImage } from "./prompt";
-import { CHATGPT_WEB_INLINE_PROMPT_LIMIT_CHARS, estimateCompiledChatGptWebInputTokens } from "./usage";
+import { CHATGPT_MAX_INPUT_IMAGES, type CompiledChatGptWebPrompt, type ChatGptWebPromptImage } from "./prompt";
+import { estimateCompiledChatGptWebInputTokens } from "./usage";
 import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
@@ -161,14 +161,6 @@ export function assertChatGptWebInputWithinContextWindow(
   );
 }
 
-export function assertChatGptWebPromptWithinInlineTransport(promptChars: number): void {
-  if (promptChars <= CHATGPT_WEB_INLINE_PROMPT_LIMIT_CHARS) return;
-  throw new ChatGptWebAdapterError(
-    `This task compiles to ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the current ChatGPT composer limit. Switch to a native Codex model, run /compact, then retry this Web model.`,
-    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
-  );
-}
-
 const browserStageTimeouts = {
   browserPage: 60_000,
   navigation: 70_000,
@@ -179,6 +171,15 @@ const browserStageTimeouts = {
   fileAttachment: 120_000,
   send: 20_000,
 } as const;
+
+/**
+ * CDP accepts large Input.insertText payloads, but a single oversized edit can outrun ChatGPT's
+ * Lexical update path. The composer itself accepts substantially larger messages: a live probe on
+ * 2026-08-06 preserved 819,343 characters and kept Send enabled when the same text arrived in
+ * bounded edits. Chunk only the browser input event; the resulting user message remains one exact
+ * prompt and is verified byte-for-byte after insertion.
+ */
+export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 200_000;
 
 export interface BrowserTurn {
   traceId: string;
@@ -317,6 +318,7 @@ export interface ChatGptVisibleTraceBlock {
   text: string;
   key?: string;
   complete?: boolean;
+  uiControl?: boolean;
 }
 
 export interface ChatGptVisibleTraceEvent {
@@ -345,7 +347,6 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
 
 /** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
 export class ChatGptVisibleTraceTracker {
-  private compactionEmitted = false;
   private readonly emittedTrace = new Map<string, string>();
   private readonly traceCandidates = new Map<string, { text: string; changedAt: number }>();
 
@@ -356,17 +357,12 @@ export class ChatGptVisibleTraceTracker {
     let statusSlot = 0;
     let commentarySlot = 0;
     for (const block of blocks) {
-      if (containsChatGptCompactionMarker(block.text)
-        && !this.compactionEmitted) {
-        this.compactionEmitted = true;
-        output.push({ kind: "reasoning", text: "Context automatically compacted" });
-      }
       // Final-answer roots are carried by ChatGptMarkdownBuffer. Only Markdown roots inside
       // ChatGPT's streaming-status container are explicit intermediate commentary.
       if (block.kind === "answer") continue;
       const index = block.kind === "status" ? statusSlot++ : commentarySlot++;
       const slot = block.key ? `${block.kind}:${block.key}` : `${block.kind}:${index}`;
-      const stripped = stripChatGptTransportMarkers(block.text)
+      const stripped = block.text
         .replace(/\r\n/g, "\n")
         .split("\n")
         .map(line => line.replace(/[\t ]+/g, " ").trim())
@@ -403,7 +399,9 @@ export class ChatGptVisibleTraceTracker {
 }
 
 export function isChatGptTraceControl(block: ChatGptVisibleTraceBlock): boolean {
-  return block.kind === "status" && block.text.replace(/\s+/g, " ").trim() === "Answer now";
+  if (block.kind !== "status") return false;
+  const text = block.text.replace(/\s+/g, " ").trim();
+  return block.uiControl === true || text === "Answer now" || text === "Thinking";
 }
 
 export function redactChatGptUiDiagnostic(value: string): string {
@@ -473,6 +471,7 @@ class ChatGptBrowserDiagnostics {
               && rect.width > 0
               && rect.height > 0;
           };
+
           const boundedText = (element: Element): string => (
             ((element as HTMLElement).innerText || element.textContent || "")
               .replace(/\s+/g, " ")
@@ -1054,15 +1053,21 @@ export class ChatGptBrowserWorker {
       // then transport the complete text in one CDP Input.insertText command.
       await composer.fill("");
       await composer.focus();
-      await page.keyboard.insertText(prompt);
+      await this.insertPromptText(page, prompt);
       await this.assertPromptAttached(page, prompt);
       return;
     }
     const selectedComposer = await this.selectConnector(page, captureDiagnostic);
     await selectedComposer.focus();
     await page.keyboard.press("End");
-    await page.keyboard.insertText(` ${prompt}`);
+    await this.insertPromptText(page, ` ${prompt}`);
     await this.assertPromptAttached(page, prompt);
+  }
+
+  private async insertPromptText(page: Page, text: string): Promise<void> {
+    for (let offset = 0; offset < text.length; offset += CHATGPT_PROMPT_INSERT_CHUNK_CHARS) {
+      await page.keyboard.insertText(text.slice(offset, offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS));
+    }
   }
 
   private async verifyConnectorExclusive(): Promise<string> {
@@ -1254,7 +1259,16 @@ export class ChatGptBrowserWorker {
         .sort(([left], [right]) => left === right
           ? 0
           : left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
-        .map(([candidate, kind]) => ({ kind, text: traceText(candidate), key: traceKey(candidate, kind) }))
+        .map(([candidate, kind]) => ({
+          kind,
+          text: traceText(candidate),
+          key: traceKey(candidate, kind),
+          // Footer controls such as the model picker and overflow menu are siblings of the final
+          // Markdown inside the assistant turn. They are UI, not model trace. Real action buttons
+          // are scoped by ChatGPT's streaming-status container.
+          uiControl: candidate.matches("button")
+            && candidate.closest("[data-streaming-response-status]") === null,
+        }))
         .filter(block => block.text.length > 0)
         .forEach((block, index) => {
           const key = block.key ?? `${block.kind}:fallback:${index}`;
@@ -1383,7 +1397,6 @@ export class ChatGptBrowserWorker {
         estimatedInputTokens,
         requestedMode.effort,
       );
-      assertChatGptWebPromptWithinInlineTransport(prepared.text.length);
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
@@ -1489,7 +1502,7 @@ export class ChatGptBrowserWorker {
       let capturedResponse = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer(stripChatGptTransportMarkers);
+      const markdownBuffer = new ChatGptMarkdownBuffer();
       const completionTracker = new ChatGptCompletionTracker();
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       for (;;) {

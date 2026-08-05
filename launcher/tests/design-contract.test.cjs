@@ -209,3 +209,15 @@ test("launcher reminds authenticated users to refresh the private ChatGPT sessio
   assert.match(i18nSource, /signing in again every two days/);
   assert.match(i18nSource, /建议每两天重新登录一次/);
 });
+
+test("launcher checks once at startup and exposes a blue user-triggered update action", () => {
+  assert.match(electronMain, /createUpdateController/);
+  assert.match(electronMain, /void updateController\.checkOnce\(\)/);
+  assert.doesNotMatch(electronMain, /setInterval\([^)]*update/i);
+  assert.match(preloadSource, /installUpdate:[\s\S]*?launcher:update-install/);
+  assert.match(appSource, /tone="update"/);
+  assert.match(appSource, /copy\.updateAvailable/);
+  assert.match(styles, /\.sidebar-item\.is-update\s*\{[^}]*background:\s*rgb\(51 156 255 \/ 14%\)/s);
+  assert.match(i18nSource, /updateAvailable: "Update to"/);
+  assert.match(i18nSource, /updateAvailable: "更新至"/);
+});

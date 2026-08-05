@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  CHATGPT_INTERNAL_COMPACTION_MARKER,
-  compileChatGptWebPrompt,
-} from "../src/adapters/chatgpt-web/prompt";
+import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -39,8 +36,8 @@ test("tool-capable prompts resume the mandatory bind contract after the complete
   expect(compiled.text).toContain("turn_token and binding_id are different values");
   expect(compiled.text).toContain("valid_until outer_turn_end has no time limit");
   expect(compiled.text).toContain("not the turn_ token");
-  expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
-  expect(compiled.text).toContain("call codex_bind_turn again with the same turn_token");
+  expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
+  expect(compiled.text).not.toContain("internally compacts this response");
 });
 
 test("read-only prompts resume without exposing a bind capability", () => {
@@ -57,7 +54,7 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("No local computer tool, MCP app");
   expect(compiled.text).not.toContain("evidence inside");
   expect(compiled.text).toContain("Do not mention this transport contract, context packaging, or capability routing");
-  expect(compiled.text).toContain(CHATGPT_INTERNAL_COMPACTION_MARKER);
+  expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
 test("compaction prompts are isolated summarization turns without local or native tool instructions", () => {
@@ -174,6 +171,32 @@ test("Web compaction attaches the newest ten images as files and never embeds th
   for (const payload of imagePayloads) expect(compiled.text).not.toContain(payload);
   expect(compiled.text.match(/"type":"image_attachment"/g)).toHaveLength(10);
   expect(compiled.text.match(/older image not attached/g)).toHaveLength(3);
+});
+
+test("persisted one-pixel image sentinels are not attached to ChatGPT", () => {
+  const placeholder = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  const parsed: CodexParsedRequest = {
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: {
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "inspect the real image" },
+          ...Array.from({ length: 30 }, () => ({ type: "image" as const, imageUrl: placeholder })),
+          { type: "image", imageUrl: "data:image/png;base64,real-image" },
+        ],
+        timestamp: 1,
+      }],
+    },
+    stream: true,
+    options: { reasoning: "high" },
+  };
+
+  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: false, proAvailable: true });
+
+  expect(compiled.images.map(image => image.imageUrl)).toEqual(["data:image/png;base64,real-image"]);
+  expect(compiled.text.match(/"type":"image_attachment"/g)).toHaveLength(1);
+  expect(compiled.text).not.toContain("older image not attached");
 });
 
 test("the replayed context never carries a finished turn's broker handles", () => {

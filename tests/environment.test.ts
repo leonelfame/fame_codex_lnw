@@ -111,6 +111,45 @@ describe("trusted current Codex environment envelope", () => {
     });
   });
 
+  test("uses the primary cwd from Codex's canonical multi-environment envelope", () => {
+    const secondary = resolve(root, "secondary-environment");
+    const multiEnvironment = `<environment_context>
+  <environments>
+    <environment id="secondary" primary="false">
+      <cwd>${secondary}</cwd>
+      <shell>bash</shell>
+    </environment>
+    <environment id="primary" primary="true">
+      <cwd>${root}</cwd>
+      <shell>bash</shell>
+    </environment>
+  </environments>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(extractChatGptTurnEnvironment(currentWire({ environmentXml: multiEnvironment }))).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test("rejects a multi-environment envelope without exactly one primary environment", () => {
+    const secondary = resolve(root, "secondary-environment");
+    const ambiguousEnvironment = `<environment_context>
+  <environments>
+    <environment id="first" primary="false"><cwd>${root}</cwd></environment>
+    <environment id="second" primary="false"><cwd>${secondary}</cwd></environment>
+  </environments>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(() => extractChatGptTurnEnvironment(currentWire({ environmentXml: ambiguousEnvironment })))
+      .toThrow("missing cwd");
+  });
+
   test("rejects an envelope with multiple conflicting cwd declarations", () => {
     const conflictingEnvironment = `<environment_context>
   <cwd>${root}</cwd>

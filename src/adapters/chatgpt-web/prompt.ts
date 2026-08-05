@@ -1,24 +1,6 @@
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
-import { isReadableCompactionSummaryText } from "../../responses/compaction";
+import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-
-export const CHATGPT_INTERNAL_COMPACTION_MARKER = "[[CODEX_INTERNAL_CONTEXT_COMPACTED]]";
-const CHATGPT_INTERNAL_COMPACTION_PREFIX = "[[CODEX_INTERNAL_CONTEXT_COMPACT";
-
-export function containsChatGptCompactionMarker(text: string): boolean {
-  const trimmed = text.trim();
-  return text.includes(CHATGPT_INTERNAL_COMPACTION_PREFIX)
-    || (trimmed.startsWith("[[CODEX_") && CHATGPT_INTERNAL_COMPACTION_MARKER.startsWith(trimmed));
-}
-
-export function stripChatGptTransportMarkers(text: string): string {
-  let stripped = text.replace(/\[\[CODEX_INTERNAL_CONTEXT_COMPACT(?:ED)?(?:\]\])?/g, "");
-  const trimmed = stripped.trim();
-  if (trimmed.startsWith("[[CODEX_") && CHATGPT_INTERNAL_COMPACTION_MARKER.startsWith(trimmed)) stripped = "";
-  return stripped
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
 
 export interface ChatGptWebPromptImage {
   ref: string;
@@ -66,10 +48,13 @@ function inputContent(
   budget: ImageBudget,
 ): unknown {
   if (typeof content === "string") return content;
-  if (!content.some(part => part.type === "image")) {
-    return content.filter(part => part.type === "text").map(part => part.text).join("\n");
+  const semantic = content.filter(part =>
+    part.type !== "image" || !isOnePixelPngDataUrl(part.imageUrl)
+  );
+  if (!semantic.some(part => part.type === "image")) {
+    return semantic.filter(part => part.type === "text").map(part => part.text).join("\n");
   }
-  return content.map(part => {
+  return semantic.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
     budget.seen += 1;
     if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
@@ -83,7 +68,9 @@ export function countChatGptContextImages(messages: readonly CodexMessage[]): nu
   let total = 0;
   for (const message of messages) {
     if (message.role === "assistant" || typeof message.content === "string") continue;
-    for (const part of message.content) if (part.type === "image") total += 1;
+    for (const part of message.content) {
+      if (part.type === "image" && !isOnePixelPngDataUrl(part.imageUrl)) total += 1;
+    }
   }
   return total;
 }
@@ -94,6 +81,48 @@ function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
     if (part.type === "thinking") return { type: "thinking_summary", text: part.thinking };
     return { type: "tool_call", id: part.id, name: part.name, arguments: part.arguments };
   });
+}
+
+function plainMessageText(message: CodexMessage): string | undefined {
+  if (message.role === "assistant" || message.role === "toolResult") return undefined;
+  if (typeof message.content === "string") return message.content;
+  if (message.content.some(part => part.type !== "text")) return undefined;
+  return message.content.map(part => part.type === "text" ? part.text : "").join("\n");
+}
+
+function startsWithControlBlock(message: CodexMessage, tag: string): boolean {
+  return message.role === "developer" && plainMessageText(message)?.trimStart().startsWith(tag) === true;
+}
+
+/**
+ * Codex appends a complete replacement developer contract whenever the user changes models. On a
+ * later switch the earlier model-switch contract and its adjacent skill catalog are obsolete, but
+ * both remain in the Responses history. Replaying every obsolete copy can exceed ChatGPT's composer
+ * character ceiling even while the actual model token count is comfortably inside its window.
+ *
+ * Keep the newest contract verbatim and remove only older Codex-generated replacement contracts.
+ * Human messages, assistant history, tool results, and unrelated developer instructions are never
+ * touched.
+ */
+export function withoutSupersededModelSwitchContracts(messages: readonly CodexMessage[]): CodexMessage[] {
+  const switchIndices = messages.flatMap((message, index) =>
+    startsWithControlBlock(message, "<model_switch>") ? [index] : []
+  );
+  if (switchIndices.length < 2) return [...messages];
+
+  const newestSwitchIndex = switchIndices.at(-1)!;
+  const dropped = new Set<number>();
+  for (const index of switchIndices.slice(0, -1)) {
+    dropped.add(index);
+    const skillCatalogIndex = index + 1;
+    if (
+      skillCatalogIndex < newestSwitchIndex
+      && startsWithControlBlock(messages[skillCatalogIndex]!, "<skills_instructions>")
+    ) {
+      dropped.add(skillCatalogIndex);
+    }
+  }
+  return messages.filter((_message, index) => !dropped.has(index));
 }
 
 function messageEnvelope(
@@ -148,7 +177,8 @@ export function compileChatGptWebPrompt(
     seen: 0,
     dropped: Math.max(0, countChatGptContextImages(parsed.context.messages) - CHATGPT_MAX_INPUT_IMAGES),
   };
-  const messages = parsed.context.messages.map(message => messageEnvelope(message, images, budget));
+  const messages = withoutSupersededModelSwitchContracts(parsed.context.messages)
+    .map(message => messageEnvelope(message, images, budget));
   const system = parsed.context.systemPrompt ?? [];
   const envelope = {
     version: 3,
@@ -168,7 +198,6 @@ export function compileChatGptWebPrompt(
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to Codex.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
-    `If ChatGPT internally compacts this response, immediately emit the exact standalone visible status ${CHATGPT_INTERNAL_COMPACTION_MARKER} once, then continue the same task. Never include that transport marker in the final answer.`,
   ];
   const transportContract = parsed._compactionRequest
     ? [
@@ -182,7 +211,6 @@ export function compileChatGptWebPrompt(
       `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}. This bind is mandatory on every response, even when the request appears not to need a local operation.`,
       "turn_token and binding_id are different values: copy the exact binding_ value returned by codex_bind_turn into every later Codex Native call, and never put the turn_ value in a binding_id field. Do not reveal either capability value in the answer.",
       "A bind result with binding_status active and valid_until outer_turn_end has no time limit. Never report that it expired unless a real Codex Native call returns that exact error.",
-      `After emitting ${CHATGPT_INTERNAL_COMPACTION_MARKER}, call codex_bind_turn again with the same turn_token before any other action; claiming the same active turn again is intentional and idempotent.`,
       "Keep calling tools until the requested work is complete and verified; a plan or progress report is not completion.",
       "Use codex_apply_patch for targeted edits, codex_exec for commands, and codex_write_stdin for sessions returned by codex_exec.",
       "Use codex_tool_inventory and codex_tool_call for any other tool advertised by the current Codex harness, including configured MCP/apps.",
