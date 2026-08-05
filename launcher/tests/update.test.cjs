@@ -154,7 +154,9 @@ test("verified update is handed to one detached worker", async () => {
   }
 });
 
-test("detached worker replaces an installed Linux AppImage and removes the old version", () => {
+test("detached worker replaces an installed Linux AppImage and removes the old version", {
+  skip: process.platform === "win32" ? "Linux AppImage execution is not meaningful on Windows" : false,
+}, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-worker-test-"));
   const jobRoot = path.join(root, "job");
   const versionsRoot = path.join(root, "versions");

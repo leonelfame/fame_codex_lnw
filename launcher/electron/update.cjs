@@ -140,10 +140,9 @@ function sha256(filePath) {
 }
 
 function macApplicationPath(executablePath) {
-  const marker = `${path.sep}Contents${path.sep}MacOS${path.sep}`;
-  const index = executablePath.lastIndexOf(marker);
-  if (index <= 0) throw new Error(`Could not resolve the macOS application bundle from ${executablePath}`);
-  return executablePath.slice(0, index);
+  const match = /^(.*\.app)[\\/]Contents[\\/]MacOS[\\/][^\\/]+$/.exec(executablePath);
+  if (!match?.[1]) throw new Error(`Could not resolve the macOS application bundle from ${executablePath}`);
+  return match[1];
 }
 
 function findMacApplication(root) {
