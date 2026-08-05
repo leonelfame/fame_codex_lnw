@@ -315,6 +315,8 @@ export class ChatGptTurnDomHealthTracker {
 export interface ChatGptVisibleTraceBlock {
   kind: "answer" | "commentary" | "status";
   text: string;
+  key?: string;
+  complete?: boolean;
 }
 
 export interface ChatGptVisibleTraceEvent {
@@ -347,13 +349,12 @@ export class ChatGptVisibleTraceTracker {
   private readonly emittedTrace = new Map<string, string>();
   private readonly traceCandidates = new Map<string, { text: string; changedAt: number }>();
 
-  constructor(private readonly traceStabilityMs = 0) {}
+  constructor(private readonly traceStabilityMs = 250) {}
 
   observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
     const output: ChatGptVisibleTraceEvent[] = [];
     let statusSlot = 0;
     let commentarySlot = 0;
-    const activeSlots = new Set<string>();
     for (const block of blocks) {
       if (containsChatGptCompactionMarker(block.text)
         && !this.compactionEmitted) {
@@ -364,8 +365,7 @@ export class ChatGptVisibleTraceTracker {
       // ChatGPT's streaming-status container are explicit intermediate commentary.
       if (block.kind === "answer") continue;
       const index = block.kind === "status" ? statusSlot++ : commentarySlot++;
-      const slot = `${block.kind}:${index}`;
-      activeSlots.add(slot);
+      const slot = block.key ? `${block.kind}:${block.key}` : `${block.kind}:${index}`;
       const stripped = stripChatGptTransportMarkers(block.text)
         .replace(/\r\n/g, "\n")
         .split("\n")
@@ -381,6 +381,10 @@ export class ChatGptVisibleTraceTracker {
         this.traceCandidates.set(slot, candidate);
         if (!completionActionVisible && this.traceStabilityMs > 0) continue;
       }
+      // A commentary Markdown root remains mutable until ChatGPT appends the next reasoning item.
+      // Emitting it earlier lets a tool-status boundary split one semantic paragraph into multiple
+      // Codex messages. The next anchored item (or final completion evidence) is the stable boundary.
+      if (block.kind === "commentary" && block.complete === false && !completionActionVisible) continue;
       if (!completionActionVisible && now - candidate.changedAt < this.traceStabilityMs) continue;
 
       const previous = this.emittedTrace.get(slot);
@@ -393,12 +397,6 @@ export class ChatGptVisibleTraceTracker {
       } else {
         output.push({ kind, text });
       }
-    }
-    for (const slot of this.traceCandidates.keys()) {
-      if (!activeSlots.has(slot)) this.traceCandidates.delete(slot);
-    }
-    for (const slot of this.emittedTrace.keys()) {
-      if (!activeSlots.has(slot)) this.emittedTrace.delete(slot);
     }
     return output;
   }
@@ -1206,23 +1204,27 @@ export class ChatGptBrowserWorker {
         candidate.contains(commentary) || commentary.contains(candidate)
       ));
       const statusSemantic = (candidate: HTMLElement): HTMLElement => {
-        const control = candidate.closest<HTMLElement>("button") ?? candidate;
-        const statusContainer = control.closest<HTMLElement>("[data-streaming-response-status]");
-        if (!statusContainer) return control;
-
-        // ChatGPT nests an action label and its count/link button in one transition item. Find
-        // that whole item through the nearest common ancestor with adjacent commentary instead
-        // of returning only the nested button text (for example just `5` from `Searched 5 sites`).
-        const adjacentCommentary = commentaryRoots.find(commentary => statusContainer.contains(commentary));
-        if (!adjacentCommentary) return control;
-        let common: HTMLElement | null = control;
-        while (common && common !== statusContainer && !common.contains(adjacentCommentary)) {
-          common = common.parentElement;
-        }
-        if (!common || common === control) return control;
-        let item = control;
-        while (item.parentElement && item.parentElement !== common) item = item.parentElement;
-        return item;
+        return candidate.closest<HTMLElement>("button") ?? candidate;
+      };
+      const traceText = (candidate: HTMLElement): string => {
+        const ariaLabel = candidate.getAttribute("aria-label")?.trim();
+        if (ariaLabel) return ariaLabel;
+        // Animated ChatGPT action counters visually split a phrase around the changing number, so
+        // `innerText` can become `Searching websites\n3`. The button's screen-reader label already
+        // carries the stable semantic phrase (`Searching 3 websites`) without enclosing unrelated
+        // commentary from the surrounding streaming-status container.
+        const screenReaderText = [...candidate.querySelectorAll<HTMLElement>(".sr-only")]
+          .map(element => element.textContent?.replace(/\s+/g, " ").trim() ?? "")
+          .find(Boolean);
+        return screenReaderText || candidate.innerText.trim();
+      };
+      const traceKey = (candidate: HTMLElement, kind: ChatGptVisibleTraceBlock["kind"]): string | undefined => {
+        const statusContainer = candidate.closest<HTMLElement>("[data-streaming-response-status]");
+        const itemAnchor = candidate.closest<HTMLElement>("[data-item-anchor]");
+        if (!statusContainer || !itemAnchor) return undefined;
+        const anchorIndex = [...statusContainer.querySelectorAll<HTMLElement>("[data-item-anchor]")]
+          .indexOf(itemAnchor);
+        return anchorIndex >= 0 ? `${kind}:anchor:${anchorIndex}` : undefined;
       };
       root.querySelectorAll<HTMLElement>(
         'button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"]',
@@ -1246,16 +1248,23 @@ export class ChatGptBrowserWorker {
           candidates.set(container, "status");
         }
       });
-      const traceBlocks = [...candidates]
+      const traceByKey = new Map<string, ChatGptVisibleTraceBlock>();
+      [...candidates]
         .filter(([candidate]) => visible(candidate))
         .sort(([left], [right]) => left === right
           ? 0
           : left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
-        .map(([candidate, kind]) => ({ kind, text: candidate.innerText.trim() }))
+        .map(([candidate, kind]) => ({ kind, text: traceText(candidate), key: traceKey(candidate, kind) }))
         .filter(block => block.text.length > 0)
-        .filter((block, index, blocks) => (
-          blocks.findIndex(other => other.kind === block.kind && other.text === block.text) === index
-        ));
+        .forEach((block, index) => {
+          const key = block.key ?? `${block.kind}:fallback:${index}`;
+          const previous = traceByKey.get(key);
+          if (!previous || block.text.length > previous.text.length) traceByKey.set(key, block);
+        });
+      const traceBlocks = [...traceByKey.values()].map((block, index, blocks) => ({
+        ...block,
+        ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
+      }));
       return {
         responsePresent: true,
         visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
