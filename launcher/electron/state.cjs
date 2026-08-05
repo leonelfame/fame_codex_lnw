@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
+const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
 
 const DEFAULT_STATE = Object.freeze({
   version: 1,
@@ -18,7 +19,13 @@ const DEFAULT_STATE = Object.freeze({
   sidebarOpen: true,
   sidebarWidth: 252,
   mcpGuideStep: 0,
+  sessionRefreshReminderAt: null,
 });
+
+function nextSessionRefreshReminderAt(now = Date.now()) {
+  if (!Number.isFinite(now)) throw new Error("Session refresh reminder time must be finite");
+  return new Date(now + SESSION_REFRESH_REMINDER_INTERVAL_MS).toISOString();
+}
 
 function readState(filePath) {
   try {
@@ -52,6 +59,11 @@ function readState(filePath) {
     }
     if (!Number.isInteger(state.mcpGuideStep) || state.mcpGuideStep < 0 || state.mcpGuideStep > 2) {
       state.mcpGuideStep = DEFAULT_STATE.mcpGuideStep;
+    }
+    if (state.sessionRefreshReminderAt !== null
+      && (typeof state.sessionRefreshReminderAt !== "string"
+        || !Number.isFinite(Date.parse(state.sessionRefreshReminderAt)))) {
+      state.sessionRefreshReminderAt = DEFAULT_STATE.sessionRefreshReminderAt;
     }
     for (const key of [
       "coreSetupComplete",
@@ -98,8 +110,10 @@ function createStateStore(filePath) {
 }
 
 module.exports = {
+  SESSION_REFRESH_REMINDER_INTERVAL_MS,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   createStateStore,
+  nextSessionRefreshReminderAt,
   validateSidebarState,
 };

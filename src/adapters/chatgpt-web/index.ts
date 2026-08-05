@@ -157,7 +157,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = TurnBroker.forSocket(brokerSocketPath(provider));
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
-  const capabilities: ChatGptWebCapabilities = {
+  const configuredCapabilities: ChatGptWebCapabilities = {
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
@@ -175,8 +175,9 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
+    turnCapabilities: ChatGptWebCapabilities,
   ): ChatGptTurnRuntime => {
-    const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+    const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
@@ -185,8 +186,8 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
-        capabilities,
-        prepare: async () => ({ ...compileChatGptWebPrompt(parsed, capabilities), release: () => {} }),
+        capabilities: turnCapabilities,
+        prepare: async () => ({ ...compileChatGptWebPrompt(parsed, turnCapabilities), release: () => {} }),
         abortSignal: browserAbort.signal,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
@@ -208,7 +209,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
-      capabilities,
+      capabilities: turnCapabilities,
       prepare: async () => {
         const turnToken = await broker.register(
           environment,
@@ -219,7 +220,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         tokenSettled = true;
         token.resolve(turnToken);
         try {
-          const compiled = compileChatGptWebPrompt(parsed, capabilities, turnToken);
+          const compiled = compileChatGptWebPrompt(parsed, turnCapabilities, turnToken);
           return { ...compiled, release: () => {} };
         } catch (error) {
           broker.revoke(turnToken);
@@ -260,7 +261,10 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
-      const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+      const turnCapabilities = parsed._compactionRequest
+        ? { ...configuredCapabilities, localToolsEnabled: false }
+        : configuredCapabilities;
+      const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
@@ -273,9 +277,35 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           throw error;
         }
       }
+      if (parsed._compactionRequest) {
+        const responseExecutionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed, "response")}`;
+        const responseSession = chatGptTurnSessions.get(responseExecutionKey);
+        if (responseSession?.outstanding().length) {
+          await responseSession.runExclusive(async () => {
+            const outstanding = responseSession.outstanding();
+            const results = currentToolResults(parsed, responseSession);
+            if (results.length !== outstanding.length) {
+              throw new Error(
+                `Codex compaction returned ${results.length} of ${outstanding.length} results for an active ChatGPT tool batch`,
+              );
+            }
+            if (responseSession.runtime.mode !== "tools") {
+              throw new Error("Read-only ChatGPT Web runtime cannot own tool results at a compaction boundary");
+            }
+            const turnToken = await withAbort(responseSession.runtime.token, incoming.abortSignal);
+            for (const message of results) {
+              broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
+              responseSession.markResultDelivered(message.toolCallId);
+            }
+          });
+        }
+      }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
-      const session = chatGptTurnSessions.getOrCreate(executionKey, () => startRuntime(parsed, environment, traceId));
+      const session = chatGptTurnSessions.getOrCreate(
+        executionKey,
+        () => startRuntime(parsed, environment, traceId, turnCapabilities),
+      );
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
         emit({ type: "heartbeat" });
@@ -293,7 +323,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 events.push(event);
                 emit(event);
               };
-              if (!parsed._compactionRequest) emitProContextWarning(parsed, capabilities, emitCaptured);
+              if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitCaptured);
               const trace = session.runtime.trace.drain();
               reasoning = trace.map(event => event.text);
               emitTraceEvents(trace, emitCaptured);
@@ -304,7 +334,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
-            emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, capabilities), emit);
+            emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
             return;
           }
 
@@ -320,7 +350,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (results.length === 0) {
                 const reasoning = session.reasoningForOutstandingReplay();
                 replayEvents(session.eventsForOutstandingReplay(), emit);
-                emitToolBatch(outstanding, estimateChatGptWebUsage(parsed, { reasoning, toolRequests: outstanding }, capabilities), emit);
+                emitToolBatch(outstanding, estimateChatGptWebUsage(parsed, { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
                 return;
               }
               if (results.length !== outstanding.length) {
@@ -348,7 +378,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            if (!parsed._compactionRequest) emitProContextWarning(parsed, capabilities, emitRound);
+            if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitRound);
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken
@@ -389,7 +419,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 }
                 emitBrowserCompletion(
                   next.outcome,
-                  estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, capabilities),
+                  estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
                 return;
@@ -402,7 +432,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setOutstanding(next.requests, roundReasoning, roundEvents);
               emitToolBatch(
                 next.requests,
-                estimateChatGptWebUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, capabilities),
+                estimateChatGptWebUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
                 emit,
               );
               return;

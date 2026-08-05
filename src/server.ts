@@ -264,11 +264,7 @@ export async function responseRequest(
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
   }
 
-  const adapterProvider = providerConfig(config);
-  if (compaction && adapterProvider.chatgptWeb) {
-    adapterProvider.chatgptWeb.localToolsEnabled = false;
-  }
-  const adapter = adapterFactory(adapterProvider);
+  const adapter = adapterFactory(providerConfig(config));
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
   if (req.signal.aborted) abort.abort();
@@ -342,6 +338,22 @@ export async function compactRequest(
       "invalid_request_error",
       error instanceof Error ? error.message : "Compaction request body must be a JSON object",
     );
+  }
+  const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
+  if (headerTurnMetadata) {
+    const existingMetadata = raw.client_metadata;
+    const clientMetadata = existingMetadata && typeof existingMetadata === "object" && !Array.isArray(existingMetadata)
+      ? existingMetadata as Record<string, unknown>
+      : {};
+    raw = {
+      ...raw,
+      client_metadata: {
+        ...clientMetadata,
+        // `/responses/compact` carries native turn authority in this canonical Codex header,
+        // unlike ordinary `/responses` payloads where the same value also appears in the body.
+        "x-codex-turn-metadata": headerTurnMetadata,
+      },
+    };
   }
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");

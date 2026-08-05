@@ -65,7 +65,7 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(config.proAvailable);
+  const limits = resolveChatGptWebContextLimits(route.adapterEffort);
   const model: JsonObject = {
     ...structuredClone(template),
     slug: route.slug,

@@ -4,6 +4,8 @@ import { defaultConfig } from "../src/config";
 import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary } from "../src/responses/compaction";
 import { compactRequest, responseRequest } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
+import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
+import { chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
@@ -49,13 +51,75 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
 
   expect(response.status).toBe(200);
   expect(providers).toHaveLength(1);
-  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(false);
+  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(true);
   const body = await response.json() as { output: Array<{ role: string; content: Array<{ text: string }> }> };
   expect(body.output.map(item => item.content[0]!.text)).toEqual([
     "First request",
     "Latest request",
     `${SUMMARY_PREFIX}\n${summary}`,
   ]);
+});
+
+test("preserves canonical Codex turn metadata from the compact endpoint header", async () => {
+  const turnMetadata = { thread_id: "thread_compact", turn_id: "turn_compact" };
+  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-codex-turn-metadata": JSON.stringify(turnMetadata),
+    },
+    body: JSON.stringify({
+      model,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Inspect the project" }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnMetadata.turn_id },
+      }],
+    }),
+  }), defaultConfig("full"), () => ({
+    name: "metadata-check",
+    async runTurn(parsed, _incoming, emit) {
+      expect(extractChatGptTurnIdentity(parsed)).toMatchObject({
+        threadId: turnMetadata.thread_id,
+        turnId: turnMetadata.turn_id,
+      });
+      emit({ type: "text_delta", text: summary, phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  }));
+
+  expect(response.status).toBe(200);
+});
+
+test("compaction identity accepts a historical source message from the pre-compaction turn", async () => {
+  const turnMetadata = { thread_id: "thread_compact", turn_id: "turn_compact" };
+  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-codex-turn-metadata": JSON.stringify(turnMetadata),
+    },
+    body: JSON.stringify({
+      model,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue the existing task" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_before_compaction" },
+      }],
+    }),
+  }), defaultConfig("full"), () => ({
+    name: "compaction-identity-check",
+    async runTurn(parsed, _incoming, emit) {
+      expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
+      expect(() => chatGptTurnExecutionKey(parsed, "response")).not.toThrow();
+      emit({ type: "text_delta", text: summary, phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  }));
+
+  expect(response.status).toBe(200);
 });
 
 test("returns exactly one native compaction item for a ChatGPT Web v2 request", async () => {
@@ -76,7 +140,7 @@ test("returns exactly one native compaction item for a ChatGPT Web v2 request", 
 
   expect(response.status).toBe(200);
   expect(providers).toHaveLength(1);
-  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(false);
+  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(true);
   const body = await response.json() as {
     status: string;
     output: Array<{ type: string; encrypted_content?: string }>;

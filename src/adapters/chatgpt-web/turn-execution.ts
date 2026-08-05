@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { extractChatGptTurnIdentity } from "./environment";
+import {
+  extractChatGptCompactionSourceRevision,
+  extractChatGptTurnIdentity,
+  extractChatGptTurnUserRevision,
+} from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 export type ChatGptBrowserOutcome =
@@ -121,16 +125,24 @@ export type ChatGptTurnRuntime =
   | (ChatGptTurnRuntimeBase & { mode: "tools"; token: Promise<string> })
   | (ChatGptTurnRuntimeBase & { mode: "read-only" });
 
-export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
+export type ChatGptTurnExecutionPurpose = "response" | "compaction";
+
+export function chatGptTurnExecutionKey(
+  parsed: CodexParsedRequest,
+  purpose: ChatGptTurnExecutionPurpose = parsed._compactionRequest ? "compaction" : "response",
+): string {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  const source = parsed._compactionRequest && purpose === "response"
+    ? extractChatGptCompactionSourceRevision(parsed)
+    : undefined;
   const payload = {
     threadId: identity.threadId,
-    turnId: identity.turnId,
-    purpose: parsed._compactionRequest ? "compaction" : "response",
-    userInputs: parsed.context.messages
-      .filter(message => message.role === "user")
-      .map(message => message.content),
+    turnId: source?.turnId ?? identity.turnId,
+    purpose,
+    userRevision: parsed._compactionRequest && purpose === "compaction"
+      ? { type: "remote_compaction" }
+      : source?.content ?? extractChatGptTurnUserRevision(parsed),
   };
   return createHash("sha256").update(JSON.stringify({
     modelId: parsed.modelId,
@@ -267,6 +279,13 @@ export class ChatGptTurnSessions {
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start());
     this.entries.set(key, session);
+    return session;
+  }
+
+  get(key: string): ChatGptTurnSession | undefined {
+    this.prune();
+    const session = this.entries.get(key);
+    session?.touch();
     return session;
   }
 

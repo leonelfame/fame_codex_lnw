@@ -27,7 +27,11 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
-const { createStateStore, validateSidebarState } = require("./state.cjs");
+const {
+  createStateStore,
+  nextSessionRefreshReminderAt,
+  validateSidebarState,
+} = require("./state.cjs");
 const {
   MIN_WINDOW_BOUNDS,
   readWindowState,
@@ -401,7 +405,25 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
-  handle("launcher:browser-login", () => browserHost.openLogin());
+  handle("launcher:browser-login", async () => {
+    const browser = await browserHost.openLogin();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+    }
+    return browser;
+  });
+  handle("launcher:browser-logout", async () => {
+    const browser = await browserHost.logout();
+    const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+    send("launcher:state-changed", state);
+    return { browser, state };
+  });
+  handle("launcher:session-reminder-dismiss", () => {
+    const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+    send("launcher:state-changed", state);
+    return state;
+  });
   handle("launcher:browser-smoke", async () => {
     const result = await browserHost.smokeTest();
     stateStore.update({ browserSmokePassed: true, browserSmokeVersion: app.getVersion() });
@@ -614,6 +636,9 @@ async function start() {
   };
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  if (stateStore.read().sessionRefreshReminderAt === null) {
+    stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+  }
   const persistedState = stateStore.read();
   if (persistedState.coreSetupComplete === true && persistedState.codexCatalogVerified === undefined) {
     stateStore.update({

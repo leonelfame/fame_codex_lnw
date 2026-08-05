@@ -46,15 +46,19 @@ describe("fixed ChatGPT Web model routes", () => {
       .toThrow("Pro is not available for this account");
   });
 
-  test("uses one account-specific context limit for every Web mode with ten-percent compact headroom", () => {
-    expect(resolveChatGptWebContextLimits(false)).toEqual({
-      contextWindow: 225_000,
-      autoCompactTokenLimit: 202_500,
-    });
-    expect(resolveChatGptWebContextLimits(true)).toEqual({
-      contextWindow: 256_000,
-      autoCompactTokenLimit: 230_400,
-    });
+  test("reserves the larger context window for Extra High and Pro", () => {
+    for (const effort of ["low", "medium", "high"] as const) {
+      expect(resolveChatGptWebContextLimits(effort)).toEqual({
+        contextWindow: 205_000,
+        autoCompactTokenLimit: 184_500,
+      });
+    }
+    for (const effort of ["xhigh", "max"] as const) {
+      expect(resolveChatGptWebContextLimits(effort)).toEqual({
+        contextWindow: 256_000,
+        autoCompactTokenLimit: 230_400,
+      });
+    }
   });
 
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {

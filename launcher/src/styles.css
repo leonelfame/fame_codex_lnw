@@ -1325,6 +1325,15 @@ code {
   overflow: auto;
 }
 
+.mcp-step-two-hint {
+  margin: 11px 0 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--color-text-accent);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
 /* Activity */
 
 .activity-heading {
@@ -1927,6 +1936,57 @@ code {
 
 .error-toast button:hover {
   color: var(--color-text-primary);
+}
+
+.session-refresh-reminder {
+  position: fixed;
+  z-index: 500;
+  top: calc(var(--height-titlebar) + 14px);
+  right: 18px;
+  display: grid;
+  width: min(430px, calc(100vw - 36px));
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+  box-shadow: 0 14px 36px -18px rgb(0 0 0 / 80%);
+}
+
+.session-refresh-reminder-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--color-background-status-warning);
+  color: var(--color-text-warning);
+}
+
+.session-refresh-reminder-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.session-refresh-reminder-copy strong {
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.session-refresh-reminder-copy p {
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.session-refresh-reminder-actions {
+  display: flex;
+  grid-column: 2;
+  justify-content: flex-end;
+  gap: 7px;
 }
 
 .launch-loading,

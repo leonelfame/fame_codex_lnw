@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, assertChatGptWebPromptWithinInlineTransport, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, assertChatGptWebPromptWithinInlineTransport, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_INTERNAL_COMPACTION_MARKER, containsChatGptCompactionMarker, stripChatGptTransportMarkers } from "../src/adapters/chatgpt-web/prompt";
 import { defaultChromeExecutable } from "../src/config";
 
@@ -139,7 +139,7 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 
 test("connector verification and real tool turns share one Playwright selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/this\.selectConnector\(page\)/g)?.length).toBe(2);
+  expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
   expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
@@ -587,6 +587,53 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   expect(fixture.pressed).toEqual([]);
 });
 
+test("a failed subscription fetch is retryable and does not falsely invalidate ChatGPT login", async () => {
+  const fixture = dialogPage(
+    "Failed to load subscription: Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
+  );
+
+  await expect(throwIfChatGptSessionFailureAlert(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 503,
+    errorType: "server_error",
+    code: "chatgpt_subscription_unavailable",
+    retryable: true,
+  });
+});
+
+test("terminal model errors are scoped to the new assistant turn instead of global page alerts", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("throwIfChatGptTerminalErrorAlert(responseTurn)");
+  expect(workerSource).not.toContain("throwIfChatGptTerminalErrorAlert(page)");
+});
+
+test("submission acceptance stops when its stage is aborted", async () => {
+  const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
+    waitForSubmissionAccepted(
+      page: Page,
+      userTurns: unknown,
+      responseTurns: unknown,
+      responseTurn: unknown,
+      initialUserTurnCount: number,
+      initialResponseTurnCount: number,
+      signal: AbortSignal,
+    ): Promise<unknown>;
+  }).waitForSubmissionAccepted;
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(waitForSubmissionAccepted.call(
+    {},
+    {} as Page,
+    {},
+    {},
+    {},
+    0,
+    0,
+    controller.signal,
+  )).rejects.toMatchObject({ name: "AbortError" });
+});
+
 test("unrelated ChatGPT alerts are not terminal", async () => {
   const fixture = dialogPage("Your file was uploaded successfully");
 
@@ -654,11 +701,11 @@ test("explicit connector auto-approval still selects Allow once", async () => {
 });
 
 test("browser preflight fails closed with Codex's native context-window error contract", () => {
-  expect(() => assertChatGptWebInputWithinContextWindow(225_000, false)).toThrow(
-    "225,000-token context window",
+  expect(() => assertChatGptWebInputWithinContextWindow(205_000, "medium")).toThrow(
+    "205,000-token context window",
   );
   try {
-    assertChatGptWebInputWithinContextWindow(225_000, false);
+    assertChatGptWebInputWithinContextWindow(205_000, "medium");
     throw new Error("expected context-window preflight to fail");
   } catch (error) {
     expect(error).toMatchObject({
@@ -671,8 +718,9 @@ test("browser preflight fails closed with Codex's native context-window error co
     expect(String(error)).toContain("/compact");
   }
 
-  expect(() => assertChatGptWebInputWithinContextWindow(224_999, false)).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(255_999, true)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(204_999, "high")).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
+  expect(() => assertChatGptWebInputWithinContextWindow(255_999, "max")).not.toThrow();
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {
@@ -684,62 +732,152 @@ test("browser diagnostics redact context envelopes and capability values", () =>
   expect(diagnostic).toContain("<codex_context_json>[redacted]</codex_context_json>");
 });
 
-test("visible DOM trace emits statuses but leaves every Markdown root to the final answer stream", () => {
+test("browser stage diagnostics use safe bounded artifact names", () => {
+  expect(browserDiagnosticCheckpoint("effort menu / before click")).toBe("effort-menu-before-click");
+  expect(browserDiagnosticCheckpoint("../turn_token secret")).toBe("turn_token-secret");
+  expect(browserDiagnosticCheckpoint("x".repeat(200))).toHaveLength(80);
+});
+
+test("browser stage diagnostics preserve every critical local checkpoint", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  for (const checkpoint of [
+    "browser-page-acquired",
+    "temporary-chat-navigation-complete",
+    "composer-ready",
+    "session-verified",
+    "effort-control-ready",
+    "effort-menu-open-requested",
+    "effort-selected",
+    "connector-mention-triggered",
+    "connector-menu-visible",
+    "connector-menu-missing",
+    "connector-selected",
+    "prompt-attachment-complete",
+    "file-attachment-complete",
+    "send-ready",
+    "send-accepted",
+    "tool-confirmation-visible",
+    "response-visible",
+    "response-stalled-30s",
+    "turn-completed",
+    "turn-failed",
+  ]) {
+    expect(workerSource).toContain(`"${checkpoint}"`);
+  }
+  expect(workerSource).toContain('join(getConfigDir(), "diagnostics", "browser-turns")');
+  expect(workerSource).toContain('page.screenshot({ animations: "disabled", caret: "hide"');
+  expect(workerSource).toContain("atomicWriteFile(join(this.directory, `${stem}.png`), screenshot)");
+  expect(workerSource).toContain("CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10");
+});
+
+test("visible DOM trace interleaves statuses and explicit intermediate commentary", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
   const initialBlocks = [
     { kind: "status", text: "Reviewed architecture documentation" },
-    { kind: "markdown", text: "The implementation has a concrete state drift." },
+    { kind: "commentary", text: "The implementation has a concrete state drift." },
+    { kind: "answer", text: "Final answer still streaming" },
   ] as const;
   expect(tracker.observe([...initialBlocks], false, 1_000)).toEqual([]);
   expect(tracker.observe([...initialBlocks], false, 1_100)).toEqual([
     { kind: "reasoning", text: "Reviewed architecture documentation" },
+    { kind: "commentary", text: "The implementation has a concrete state drift." },
   ]);
   const commentaryBlocks = [
     { kind: "status", text: "Reviewed architecture documentation" },
-    { kind: "markdown", text: "The implementation has a concrete state drift." },
+    { kind: "commentary", text: "The implementation has a concrete state drift." },
     { kind: "status", text: "Inspecting runtime evidence" },
-    { kind: "markdown", text: "Final answer still streaming" },
+    { kind: "commentary", text: "The browser DOM confirms the boundary." },
+    { kind: "answer", text: "Final answer still streaming" },
   ] as const;
-  expect(tracker.observe([...commentaryBlocks], false, 1_200)).toEqual([
-  ]);
+  expect(tracker.observe([...commentaryBlocks], false, 1_200)).toEqual([]);
   expect(tracker.observe([...commentaryBlocks], false, 1_300)).toEqual([
     { kind: "reasoning", text: "Inspecting runtime evidence" },
+    { kind: "commentary", text: "The browser DOM confirms the boundary." },
   ]);
   expect(tracker.observe([
-    { kind: "markdown", text: "Final answer complete" },
+    { kind: "answer", text: "Final answer complete" },
   ], true)).toEqual([]);
 });
 
-test("visible DOM trace never reclassifies growing Markdown as commentary", () => {
+test("visible DOM trace emits a repeated reasoning phase after that status disappears", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100);
+  expect(tracker.observe([{ kind: "status", text: "Thinking" }], false, 1_000)).toEqual([]);
+  expect(tracker.observe([{ kind: "status", text: "Thinking" }], false, 1_100)).toEqual([
+    { kind: "reasoning", text: "Thinking" },
+  ]);
+  expect(tracker.observe([], false, 1_150)).toEqual([]);
+  expect(tracker.observe([{ kind: "status", text: "Thinking" }], false, 1_200)).toEqual([]);
+  expect(tracker.observe([{ kind: "status", text: "Thinking" }], false, 1_300)).toEqual([
+    { kind: "reasoning", text: "Thinking" },
+  ]);
+});
+
+test("visible DOM trace emits a short-lived reasoning label on its first observation", () => {
+  const tracker = new ChatGptVisibleTraceTracker();
+  expect(tracker.observe([
+    { kind: "status", text: "Binding Codex turn context" },
+  ], false, 1_000)).toEqual([
+    { kind: "reasoning", text: "Binding Codex turn context" },
+  ]);
+});
+
+test("completed-turn evidence flushes a short-lived reasoning label immediately", () => {
+  const tracker = new ChatGptVisibleTraceTracker(10_000);
+  expect(tracker.observe([
+    { kind: "status", text: "Reviewing ChatGPT Web Prompt and State Handling" },
+  ], true, 1_000)).toEqual([
+    { kind: "reasoning", text: "Reviewing ChatGPT Web Prompt and State Handling" },
+  ]);
+});
+
+test("visible DOM trace streams growing intermediate Markdown as commentary", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
   const initial = [
-    { kind: "markdown", text: "I’m reading" },
+    { kind: "commentary", text: "I’m reading" },
     { kind: "status", text: "Read context file contents" },
   ] as const;
   expect(tracker.observe([...initial], false, 1_000)).toEqual([]);
   const expanded = [
-    { kind: "markdown", text: "I’m reading the repository’s mandatory architecture" },
+    { kind: "commentary", text: "I’m reading the repository’s mandatory architecture" },
     { kind: "status", text: "Read context file contents" },
   ] as const;
   expect(tracker.observe([...expanded], false, 1_050)).toEqual([]);
   expect(tracker.observe([...expanded], false, 1_100)).toEqual([
     { kind: "reasoning", text: "Read context file contents" },
   ]);
-  expect(tracker.observe([...expanded], false, 1_150)).toEqual([]);
+  expect(tracker.observe([...expanded], false, 1_150)).toEqual([
+    { kind: "commentary", text: "I’m reading the repository’s mandatory architecture" },
+  ]);
   expect(tracker.observe([...expanded], false, 1_250)).toEqual([]);
 });
 
-test("response DOM aggregation keeps every top-level Markdown root in the final answer", () => {
+test("response DOM separates streaming commentary from the final Markdown answer", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain('const renderedRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
+  expect(workerSource).toContain('const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
+  expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
+  expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
+  expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join("")');
-  expect(workerSource).toContain("markdownBuffer.observe(snapshot.fullHtml)");
+  expect(workerSource).toContain("const markdownSegments = renderedRoots.flatMap");
+  expect(workerSource).toContain('key: `${rootIndex}:${childIndex}:${tag}:${itemIndex}`');
+  expect(workerSource).toContain("streamable: childIsComplete || itemIndex < listItems.length - 1");
+  expect(workerSource).toContain("markdownBuffer.observe(snapshot.markdownSegments)");
   expect(workerSource).not.toContain("stableHtml:");
   expect(workerSource).not.toContain("observeStableHtml");
   expect(workerSource).toContain("const overlapsRenderedAnswer = (candidate: HTMLElement)");
+  expect(workerSource).toContain("const statusSemantic = (candidate: HTMLElement)");
+  expect(workerSource).toContain("let item = control");
   expect(workerSource).toContain("!overlapsRenderedAnswer(semantic)");
   expect(workerSource).toContain("!overlapsRenderedAnswer(container)");
   expect(workerSource).not.toContain('fullHtml: rendered?.innerHTML ?? ""');
+});
+
+test("visible DOM trace keeps a complete action phrase instead of a nested count", () => {
+  expect(new ChatGptVisibleTraceTracker().observe([
+    { kind: "status", text: "Searched\n5\nsites" },
+  ], false)).toEqual([
+    { kind: "reasoning", text: "Searched 5 sites" },
+  ]);
 });
 
 test("visible DOM trace waits out animated Pro fragments and appends genuine growth", () => {
@@ -773,7 +911,7 @@ test("visible DOM trace waits out animated Pro fragments and appends genuine gro
 test("visible DOM trace translates the explicit ChatGPT compaction marker once", () => {
   const tracker = new ChatGptVisibleTraceTracker();
   expect(tracker.observe([
-    { kind: "markdown", text: CHATGPT_INTERNAL_COMPACTION_MARKER },
+    { kind: "answer", text: CHATGPT_INTERNAL_COMPACTION_MARKER },
   ], false)).toEqual([{ kind: "reasoning", text: "Context automatically compacted" }]);
   expect(tracker.observe([
     { kind: "status", text: CHATGPT_INTERNAL_COMPACTION_MARKER },
@@ -785,14 +923,14 @@ test("visible DOM trace translates the explicit ChatGPT compaction marker once",
   expect(containsChatGptCompactionMarker(partial)).toBe(true);
   expect(stripChatGptTransportMarkers(partial)).toBe("");
   expect(new ChatGptVisibleTraceTracker().observe([
-    { kind: "markdown", text: partial },
+    { kind: "answer", text: partial },
   ], false)).toEqual([{ kind: "reasoning", text: "Context automatically compacted" }]);
 });
 
 test("trace parsing excludes the Answer now UI control", () => {
   expect(isChatGptTraceControl({ kind: "status", text: "Answer now" })).toBe(true);
   expect(isChatGptTraceControl({ kind: "status", text: "Reviewing repository invariants" })).toBe(false);
-  expect(isChatGptTraceControl({ kind: "markdown", text: "Answer now" })).toBe(false);
+  expect(isChatGptTraceControl({ kind: "answer", text: "Answer now" })).toBe(false);
 });
 
 test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {

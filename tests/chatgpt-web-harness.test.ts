@@ -88,6 +88,34 @@ function rawWireRequest(environmentText: string): CodexParsedRequest {
   return request;
 }
 
+function canonicalCurrentWireRequest(environmentText: string): CodexParsedRequest {
+  const request = rawWireRequest(environmentText);
+  const raw = request._rawBody as {
+    client_metadata: Record<string, unknown>;
+    input: Array<Record<string, unknown>>;
+  };
+  raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+    thread_id: "thread_test_123",
+    turn_id: "turn_test_123",
+    request_kind: "turn",
+    sandbox: "none",
+  });
+  raw.input.unshift({
+    type: "message",
+    role: "developer",
+    content: [{ type: "input_text", text: "Follow the repository instructions." }],
+  });
+  raw.input[1]!.id = "msg_environment";
+  raw.input[2]!.id = "msg_instruction";
+  raw.input[1]!.content = [
+    { type: "input_text", text: "<recommended_plugins>none</recommended_plugins>" },
+    { type: "input_text", text: environmentText },
+  ];
+  delete raw.input[1]!.internal_chat_message_metadata_passthrough;
+  delete raw.input[2]!.internal_chat_message_metadata_passthrough;
+  return request;
+}
+
 function proRequest(environmentText = environmentXml): CodexParsedRequest {
   const request = rawWireRequest(environmentText);
   request.options.reasoning = "max";
@@ -162,6 +190,59 @@ describe("ChatGPT outer-native harness v3", () => {
     const request = rawWireRequest(environmentXml);
     delete (request._rawBody as { client_metadata?: unknown }).client_metadata;
     expect(extractChatGptTurnEnvironment(request).cwd).toBe(tempRoot);
+  });
+
+  test("accepts the canonical current-turn environment when Codex omits item turn ids and git metadata", () => {
+    const request = canonicalCurrentWireRequest(environmentXml);
+
+    expect(extractChatGptTurnEnvironment(request)).toEqual({
+      cwd: tempRoot,
+      roots: [tempRoot],
+      writableRoots: [tempRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools,
+    });
+    expect(() => chatGptTurnExecutionKey(request)).not.toThrow();
+  });
+
+  test("rejects canonical environment and user revision when an item conflicts with the current turn", () => {
+    const request = canonicalCurrentWireRequest(environmentXml);
+    const raw = request._rawBody as { input: Array<Record<string, unknown>> };
+    raw.input[2]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_other" };
+
+    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+    expect(() => chatGptTurnExecutionKey(request)).toThrow("conflicts with native Codex turn_id");
+  });
+
+  test("starts a tool-capable browser turn from the current Codex metadata shape", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-canonical-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: "browser://chatgpt-canonical-metadata-test",
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      const prepared = await turn.prepare();
+      expect(prepared.text).toContain("<codex_context_json>");
+      const answer = "Canonical metadata accepted";
+      turn.onTextDelta(answer);
+      return answer;
+    };
+    try {
+      const request = canonicalCurrentWireRequest(environmentXml);
+
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(browserStarts).toBe(1);
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
   });
 
   test("does not trust an environment tag supplied as the active user message", () => {
@@ -284,10 +365,37 @@ describe("ChatGPT outer-native harness v3", () => {
       content: "Stop and review the implementation before continuing",
       timestamp: Date.now(),
     });
+    ((steered._rawBody as { input: unknown[] }).input).push({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Stop and review the implementation before continuing" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+    });
     expect(chatGptTurnExecutionKey(steered)).not.toBe(chatGptTurnExecutionKey(second));
+    const afterCompact = rawWireRequest(environmentXml);
+    afterCompact.context.messages.push({
+      role: "user",
+      content: `${SUMMARY_PREFIX}\nCompacted history`,
+      timestamp: Date.now(),
+    });
+    ((afterCompact._rawBody as { input: unknown[] }).input).push({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\nCompacted history` }],
+    });
+    expect(chatGptTurnExecutionKey(afterCompact)).toBe(chatGptTurnExecutionKey(first));
     const compact = structuredClone(first);
     compact._compactionRequest = true;
     expect(chatGptTurnExecutionKey(compact)).not.toBe(chatGptTurnExecutionKey(first));
+    const newCompactTurn = structuredClone(compact);
+    (newCompactTurn._rawBody as { client_metadata: Record<string, unknown> }).client_metadata = {
+      "x-codex-turn-metadata": JSON.stringify({
+        thread_id: "thread_test_123",
+        turn_id: "turn_compact_456",
+      }),
+    };
+    expect(chatGptTurnExecutionKey(newCompactTurn, "response")).toBe(chatGptTurnExecutionKey(first));
+    expect(chatGptTurnExecutionKey(newCompactTurn)).not.toBe(chatGptTurnExecutionKey(first));
     expect(() => chatGptTurnExecutionKey(parsed(environmentXml))).toThrow("requires native Codex turn_id metadata");
   });
 
@@ -576,21 +684,61 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(tracker.update({ ...state, running: true }, 8_100)).toBe(false);
   });
 
-  test("preserves GFM formatting while buffering mutable rendered Markdown until completion", () => {
+  test("preserves GFM formatting while streaming only completed stable DOM blocks", () => {
     const heading = '<h2 data-start="0" data-end="15">Format Probe</h2>';
     const bold = '<p data-start="16" data-end="24"><strong>bold</strong></p>';
+    const alpha = '<ul><li><p>alpha</p></li></ul>';
+    const beta = '<ul><li><p>beta</p></li></ul>';
     const list = '<ul><li><p>alpha</p></li><li><p>beta</p></li></ul>';
     const html = `${heading}${bold}${list}`;
     expect(chatGptHtmlToMarkdown(html)).toBe("## Format Probe\n\n**bold**\n\n- alpha\n- beta");
 
-    const buffer = new ChatGptMarkdownBuffer();
-    buffer.observe(`${heading}<p>Source</p>`);
-    buffer.observe(`${heading}<p><a href="https://example.com">Source</a></p>`);
-    buffer.observe(html);
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    const first = [
+      { key: "heading", html: heading, text: "Format Probe", streamable: true },
+      { key: "bold", html: bold, text: "bold", streamable: false },
+    ];
+    expect(buffer.observe(first, 0)).toBe("");
+    expect(buffer.observe(first, 100)).toBe("## Format Probe");
+
+    const expanded = [
+      { key: "heading", html: heading, text: "Format Probe", streamable: true },
+      { key: "bold", html: bold, text: "bold", streamable: true },
+      { key: "alpha", html: alpha, text: "alpha", group: "list", streamable: true },
+      { key: "beta", html: beta, text: "beta", group: "list", streamable: false },
+    ];
+    expect(buffer.observe(expanded, 150)).toBe("");
+    expect(buffer.observe(expanded, 250)).toBe("\n\n**bold**\n\n- alpha");
     expect(buffer.finish()).toEqual({
-      delta: "## Format Probe\n\n**bold**\n\n- alpha\n- beta",
+      delta: "\n- beta",
       markdown: "## Format Probe\n\n**bold**\n\n- alpha\n- beta",
     });
+  });
+
+  test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
+    const plain = "<p>Source</p>";
+    const linked = '<p><a href="https://example.com">Source</a></p>';
+    const hydrated = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    expect(hydrated.observe([
+      { key: "source", html: plain, text: "Source", streamable: true },
+    ], 0)).toBe("");
+    expect(hydrated.observe([
+      { key: "source", html: linked, text: "Source", streamable: true },
+    ], 50)).toBe("");
+    expect(hydrated.observe([
+      { key: "source", html: linked, text: "Source", streamable: true },
+    ], 150)).toBe("[Source](https://example.com)");
+    expect(hydrated.observe([
+      { key: "source", html: `${linked}<button>Copy</button>`, text: "Source", streamable: true },
+    ], 200)).toBe("");
+
+    const rewritten = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    const source = [{ key: "source", html: plain, text: "Source", streamable: true }];
+    expect(rewritten.observe(source, 0)).toBe("");
+    expect(rewritten.observe(source, 100)).toBe("Source");
+    expect(() => rewritten.observe([
+      { key: "source", html: "<p>Different</p>", text: "Different", streamable: true },
+    ], 200)).toThrow("completed text block");
   });
 
   test("drops decorative HTML images without removing textual links", () => {
@@ -723,7 +871,7 @@ describe("ChatGPT outer-native harness v3", () => {
     await broker.close();
   });
 
-  test("keeps one browser response alive across the native outer Codex tool loop", async () => {
+  test("keeps one browser response alive when Codex compacts mid-tool-loop", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -737,6 +885,12 @@ describe("ChatGPT outer-native harness v3", () => {
       browserStarts += 1;
       const prepared = await turn.prepare();
       try {
+        if (prepared.text.includes("history-compaction checkpoint")) {
+          const compactSummary = "The project was inspected and the pending command completed.";
+          turn.onTextDelta(compactSummary);
+          return compactSummary;
+        }
+        if (browserStarts > 2) throw new Error("mid-turn compaction started a second task browser session");
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -787,24 +941,52 @@ describe("ChatGPT outer-native harness v3", () => {
         status: "completed",
       });
 
-      const secondRequest = rawWireRequest(environmentXml);
-      secondRequest.context.messages.push(
+      const compactRequest = rawWireRequest(environmentXml);
+      compactRequest._compactionRequest = true;
+      const toolCall = {
+        role: "assistant" as const,
+        content: [{ type: "toolCall" as const, id: callStart!.id, name: "exec_command", arguments: { cmd: "pwd", workdir: tempRoot } }],
+        timestamp: 3,
+      };
+      const result = {
+        role: "toolResult" as const,
+        toolCallId: callStart!.id,
+        toolName: "exec_command",
+        content: JSON.stringify({ output: tempRoot, exit_code: 0 }),
+        isError: false,
+        timestamp: 4,
+      };
+      compactRequest.context.messages.push(toolCall, result);
+      ((compactRequest._rawBody as { input: unknown[] }).input).push(
         {
-          role: "assistant",
-          content: [{ type: "toolCall", id: callStart!.id, name: "exec_command", arguments: { cmd: "pwd", workdir: tempRoot } }],
-          timestamp: 3,
+          type: "function_call",
+          call_id: callStart!.id,
+          name: "exec_command",
+          arguments: JSON.stringify({ cmd: "pwd", workdir: tempRoot }),
         },
         {
-          role: "toolResult",
-          toolCallId: callStart!.id,
-          toolName: "exec_command",
-          content: JSON.stringify({ output: tempRoot, exit_code: 0 }),
-          isError: false,
-          timestamp: 4,
+          type: "function_call_output",
+          call_id: callStart!.id,
+          output: result.content,
         },
       );
+      const compactEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(compactRequest, { headers: new Headers() }, event => compactEvents.push(event));
+      expect(compactEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+
+      const secondRequest = rawWireRequest(environmentXml);
+      secondRequest.context.messages.push({
+        role: "user",
+        content: `${SUMMARY_PREFIX}\nThe project was inspected and the pending command completed.`,
+        timestamp: 5,
+      });
+      ((secondRequest._rawBody as { input: unknown[] }).input).push({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\nThe project was inspected and the pending command completed.` }],
+      });
       await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
-      expect(browserStarts).toBe(1);
+      expect(browserStarts).toBe(2);
       expect(secondEvents.find(event => event.type === "thinking_delta")).toEqual({
         type: "thinking_delta",
         thinking: "Verified the command result",
@@ -821,7 +1003,7 @@ describe("ChatGPT outer-native harness v3", () => {
 
       const replayEvents: AdapterEvent[] = [];
       await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => replayEvents.push(event));
-      expect(browserStarts).toBe(1);
+      expect(browserStarts).toBe(2);
       expect(replayEvents).toEqual(secondEvents);
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;

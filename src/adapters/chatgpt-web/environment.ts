@@ -1,4 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
+import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 
 export type ChatGptSandboxPolicy =
@@ -18,6 +19,11 @@ export interface ChatGptTurnIdentity {
   threadId?: string;
   turnId?: string;
   promptCacheKey?: string;
+}
+
+export interface ChatGptTurnUserRevision {
+  content: unknown;
+  turnId?: string;
 }
 
 export class MissingTrustedCodexEnvironmentError extends Error {
@@ -57,6 +63,64 @@ function clientTurnMetadata(parsed: CodexParsedRequest): Record<string, unknown>
 function itemTurnId(value: unknown): string | undefined {
   const turnId = record(record(value)?.internal_chat_message_metadata_passthrough)?.turn_id;
   return typeof turnId === "string" ? turnId : undefined;
+}
+
+function rawMessageText(value: Record<string, unknown>): string {
+  if (typeof value.content === "string") return value.content;
+  if (!Array.isArray(value.content)) return "";
+  return value.content
+    .map(part => record(part)?.text)
+    .filter((text): text is string => typeof text === "string")
+    .join("\n");
+}
+
+function contextualUserMessage(value: Record<string, unknown>): boolean {
+  const text = rawMessageText(value).trim();
+  return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
+    || isReadableCompactionSummaryText(text)
+    || text === OPAQUE_COMPACTION_NOTE;
+}
+
+/**
+ * Return the latest real user instruction owned by the current native Codex turn.
+ *
+ * Provider rounds replay the same instruction, steering appends a newer one, and remote
+ * compaction adds contextual summary and environment messages without changing that instruction.
+ * Hashing the complete revision therefore distinguishes steering without changing the
+ * browser-session identity at a compaction boundary.
+ */
+export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  const revision = latestChatGptTurnUserRevision(parsed);
+  if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
+  if (revision.turnId !== undefined && revision.turnId !== turnId) {
+    throw new Error("ChatGPT web current user message conflicts with native Codex turn_id metadata");
+  }
+  return revision.content;
+}
+
+function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision | undefined {
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const item = record(input[index]);
+    if (item?.type !== "message" || item.role !== "user") continue;
+    if (contextualUserMessage(item)) continue;
+    const messageTurnId = itemTurnId(item);
+    const serverOwnedId = typeof item.id === "string" && item.id.length > 0;
+    if (messageTurnId === undefined && !serverOwnedId) continue;
+    return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
+  }
+  return undefined;
+}
+
+/** The human instruction summarized by a remote compaction request belongs to an earlier turn. */
+export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
+  if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
+  const revision = latestChatGptTurnUserRevision(parsed);
+  if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
+  return revision;
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string): string | undefined {
@@ -111,23 +175,28 @@ function sandboxTypeFromMetadata(value: unknown): ChatGptSandboxPolicy["type"] |
   }
 }
 
-function workspaceMetadataEnvironmentBeforeUser(
+function canonicalMetadataEnvironmentBeforeUser(
   input: unknown[],
   userIndex: number,
   metadata: Record<string, unknown> | undefined,
 ): string | undefined {
   if (userIndex <= 0 || !metadata) return undefined;
-  const workspaces = record(metadata.workspaces);
+  const metadataTurnId = typeof metadata.turn_id === "string" ? metadata.turn_id.trim() : "";
   const metadataSandbox = sandboxTypeFromMetadata(metadata.sandbox);
-  if (!workspaces || !metadataSandbox) return undefined;
-  const metadataRoots = Object.keys(workspaces);
-  if (metadataRoots.length === 0 || metadataRoots.some(path => !isAbsolute(path))) return undefined;
+  if (!metadataTurnId || !metadataSandbox) return undefined;
+  const workspaces = record(metadata.workspaces);
+  const metadataRoots = workspaces ? Object.keys(workspaces) : [];
+  if (metadataRoots.some(path => !isAbsolute(path))) return undefined;
   const normalizedMetadataRoots = [...new Set(metadataRoots.map(pathIdentity))];
 
   const user = record(input[userIndex]);
   const candidate = record(input[userIndex - 1]);
-  if (user?.type !== "message" || user.role !== "user" || typeof user.id !== "string") return undefined;
-  if (candidate?.type !== "message" || candidate.role !== "user" || typeof candidate.id !== "string") return undefined;
+  if (user?.type !== "message" || user.role !== "user" || typeof user.id !== "string" || !user.id) return undefined;
+  if (candidate?.type !== "message" || candidate.role !== "user" || typeof candidate.id !== "string" || !candidate.id) return undefined;
+  const userTurnId = itemTurnId(user);
+  const candidateTurnId = itemTurnId(candidate);
+  if ((userTurnId !== undefined && userTurnId !== metadataTurnId)
+    || (candidateTurnId !== undefined && candidateTurnId !== metadataTurnId)) return undefined;
 
   const content = Array.isArray(candidate.content) ? candidate.content : [];
   for (const part of content) {
@@ -149,11 +218,12 @@ function workspaceMetadataEnvironmentBeforeUser(
     if (declaredRootValues.some(path => !isAbsolute(path))) continue;
     const declaredRoots = [...new Set(declaredRootValues.map(pathIdentity))];
     const cwd = pathIdentity(cwdMatches[0]!);
-    // Codex 0.146 binds the primary cwd to client_metadata.workspaces, while --add-dir and
-    // desktop-owned auxiliary roots exist only in the adjacent environment envelope. Bind the
-    // envelope to its metadata-authenticated primary workspace without misclassifying those
-    // additional filesystem roots as conflicting or untrusted.
-    if (!normalizedMetadataRoots.some(root => matchesPath(root, cwd))) continue;
+    // Current Codex stamps server-owned item IDs but not per-item turn IDs on the initial request,
+    // and canonical workspaces contains Git enrichment rather than filesystem authority. Bind the
+    // adjacent context to canonical turn/sandbox metadata; when Git roots are present, require the
+    // primary cwd to agree with them as an additional check.
+    if (normalizedMetadataRoots.length > 0
+      && !normalizedMetadataRoots.some(root => matchesPath(root, cwd))) continue;
     if (!declaredRoots.some(root => matchesPath(root, cwd))) continue;
     if (sandboxTypeFromEnvironment(trimmed) !== metadataSandbox) continue;
     return trimmed;
@@ -189,7 +259,7 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
   );
   if (currentByTurn) return currentByTurn;
 
-  const current = workspaceMetadataEnvironmentBeforeUser(input, activeUserIndex, clientTurnMetadata(parsed));
+  const current = canonicalMetadataEnvironmentBeforeUser(input, activeUserIndex, clientTurnMetadata(parsed));
   if (current) return current;
 
   const replayPrefixLen = Math.min(parsed._replayPrefixLen ?? 0, input.length);

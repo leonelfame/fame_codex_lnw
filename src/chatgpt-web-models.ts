@@ -4,7 +4,7 @@ export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
 export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export const CHATGPT_WEB_PLUS_CONTEXT_WINDOW = 225_000;
+export const CHATGPT_WEB_STANDARD_CONTEXT_WINDOW = 205_000;
 export const CHATGPT_WEB_PRO_CONTEXT_WINDOW = 256_000;
 
 export interface ChatGptWebContextLimits {
@@ -12,11 +12,13 @@ export interface ChatGptWebContextLimits {
   autoCompactTokenLimit: number;
 }
 
-/** Resolve the authenticated account's product limit for one visible ChatGPT mode. */
+/** Resolve the product limit for the selected visible ChatGPT mode. */
 export function resolveChatGptWebContextLimits(
-  proAvailable: boolean,
+  effort: ChatGptWebAdapterEffort,
 ): ChatGptWebContextLimits {
-  const contextWindow = proAvailable ? CHATGPT_WEB_PRO_CONTEXT_WINDOW : CHATGPT_WEB_PLUS_CONTEXT_WINDOW;
+  const contextWindow = effort === "xhigh" || effort === "max"
+    ? CHATGPT_WEB_PRO_CONTEXT_WINDOW
+    : CHATGPT_WEB_STANDARD_CONTEXT_WINDOW;
   return {
     contextWindow,
     // Leave ten percent for Codex to submit and receive the compact checkpoint before the hard cap.

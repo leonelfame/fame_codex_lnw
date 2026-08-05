@@ -28,6 +28,9 @@ const SMOKE_COMPLETION_SETTLE_MS = 1_500;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const CHATGPT_PARTITION = "persist:codex-web-gpt-chatgpt";
+const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
+const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
+const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
 const COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -124,6 +127,33 @@ function initializationNavigationWasSuperseded(error, expectedUrl, currentUrl) {
     && isTemporaryChatUrl(currentUrl);
 }
 
+function isChatGptBackendUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.origin === CHATGPT_ORIGIN && parsed.pathname.startsWith("/backend-api/");
+}
+
+function responseHeaderIncludes(responseHeaders, name, expectedValue) {
+  const expected = expectedValue.toLowerCase();
+  return Object.entries(responseHeaders || {}).some(([headerName, rawValues]) => {
+    if (headerName.toLowerCase() !== name.toLowerCase()) return false;
+    const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+    return values.some(value => String(value)
+      .split(",")
+      .some(candidate => candidate.trim().toLowerCase() === expected));
+  });
+}
+
+function isChatGptCloudflareChallengeResponse(details) {
+  return details?.statusCode === 403
+    && isChatGptBackendUrl(details.url)
+    && responseHeaderIncludes(details.responseHeaders, "cf-mitigated", "challenge");
+}
+
 class BrowserHost {
   constructor({ window, descriptorPath, cdpPort, control, helper, logger, publishState }) {
     this.window = window;
@@ -145,6 +175,10 @@ class BrowserHost {
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
+    this.cloudflareChallengeRecovery = null;
+    this.cloudflareChallengeRecoveryArmed = true;
+    this.cloudflareChallengeRecoveryDelayMs = CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS;
+    this.cloudflareChallengeRecoverySettleMs = CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS;
     this.viewportCssKey = null;
     this.authView = null;
     this.boundsReady = false;
@@ -174,6 +208,7 @@ class BrowserHost {
     window.contentView.addChildView(this.view);
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);
+    this.bindChatGptBackendRecovery();
     this.bindWebContents();
     void this.view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
       const currentUrl = this.view.webContents.getURL();
@@ -376,6 +411,79 @@ class BrowserHost {
       this.logger.error("browser.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
       this.setState({ status: "error", message: `Browser renderer stopped: ${details.reason}` });
     });
+  }
+
+  bindChatGptBackendRecovery() {
+    this.view.webContents.session.webRequest.onCompleted(
+      CHATGPT_BACKEND_REQUEST_FILTER,
+      details => this.handleChatGptBackendResponse(details),
+    );
+  }
+
+  handleChatGptBackendResponse(details) {
+    const contents = this.view?.webContents;
+    if (!contents || contents.isDestroyed() || details?.webContentsId !== contents.id) return false;
+    if (!isChatGptBackendUrl(details.url)) return false;
+
+    if (details.statusCode >= 200 && details.statusCode < 400) {
+      this.cloudflareChallengeRecoveryArmed = true;
+      return false;
+    }
+    if (!isChatGptCloudflareChallengeResponse(details)) return false;
+    if (this.cloudflareChallengeRecovery) {
+      this.cloudflareChallengeRecoveryArmed = false;
+      return true;
+    }
+    if (this.activeTraceId || this.manualOperation) {
+      this.logger.warn("browser.cloudflare_challenge_not_reloaded", {
+        reason: this.activeTraceId ? "turn-active" : "manual-operation-active",
+        url: details.url,
+      });
+      return true;
+    }
+    if (!this.cloudflareChallengeRecoveryArmed) {
+      this.logger.warn("browser.cloudflare_challenge_persisted", { url: details.url });
+      return true;
+    }
+    this.cloudflareChallengeRecoveryArmed = false;
+    this.logger.warn("browser.cloudflare_challenge_detected", { url: details.url });
+    const recovery = this.reloadHomeAfterCloudflareChallenge();
+    const tracked = recovery
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error("browser.cloudflare_challenge_recovery_failed", { message });
+        this.setState({ status: "error", message, loading: false });
+      })
+      .finally(() => {
+        if (this.cloudflareChallengeRecovery === tracked) this.cloudflareChallengeRecovery = null;
+      });
+    this.cloudflareChallengeRecovery = tracked;
+    return true;
+  }
+
+  async reloadHomeAfterCloudflareChallenge() {
+    const contents = this.view.webContents;
+    this.setState({
+      status: "loading",
+      message: "Refreshing ChatGPT security check",
+      loading: true,
+    });
+    await sleep(this.cloudflareChallengeRecoveryDelayMs);
+    if (contents.isDestroyed()) throw new Error("ChatGPT browser closed during security-check recovery");
+    const url = contents.getURL();
+    if (!url.startsWith(CHATGPT_ORIGIN)) {
+      throw new Error("ChatGPT security-check recovery lost its owned browser page");
+    }
+
+    // Only responses from this new document may prove that the challenge cleared.
+    this.cloudflareChallengeRecoveryArmed = false;
+    await contents.loadURL(url);
+    await sleep(this.cloudflareChallengeRecoverySettleMs);
+    if (!this.cloudflareChallengeRecoveryArmed) {
+      throw new Error("ChatGPT security check is still blocking backend requests. Reload ChatGPT and retry.");
+    }
+    await this.probeAuthentication();
+    this.logger.info("browser.cloudflare_challenge_recovered", { url });
   }
 
   snapshot() {
@@ -757,6 +865,29 @@ class BrowserHost {
     return tracked;
   }
 
+  async logout() {
+    return await this.withManualOperation("ChatGPT logout", async () => {
+      if (this.authView) this.closeAuthView(this.authView, true, false);
+      const contents = this.view.webContents;
+      await contents.session.clearStorageData();
+      this.setState({
+        authenticated: false,
+        loading: true,
+        message: "Signing out of ChatGPT",
+        status: "loading",
+      });
+      await contents.loadURL(TEMPORARY_CHAT_URL);
+      const browser = await this.probeAuthentication();
+      if (browser.authenticated) {
+        throw new Error("ChatGPT session remained authenticated after local session data was cleared");
+      }
+      this.activateHomeSurface();
+      this.show();
+      this.logger.info("browser.logout_completed");
+      return this.snapshot();
+    });
+  }
+
   async refreshAuthentication() {
     return await this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
@@ -798,6 +929,9 @@ class BrowserHost {
       }
     }
     if (result.composer) {
+      if (this.authView && !this.authView.webContents.isDestroyed()) {
+        this.closeAuthView(this.authView, true, false);
+      }
       const wasAuthenticated = this.state.authenticated;
       const availability = this.activeTraceId
         ? { status: "running", message: "ChatGPT is working" }
@@ -1394,6 +1528,7 @@ module.exports = {
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
   initializationNavigationWasSuperseded,
+  isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   TEMPORARY_CHAT_URL,
 };

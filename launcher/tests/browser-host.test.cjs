@@ -12,6 +12,7 @@ const {
   allowedAuthUrl,
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
+  isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   initializationNavigationWasSuperseded,
 } = require("../electron/browser-host.cjs");
@@ -38,6 +39,77 @@ test("only a proven replacement navigation suppresses initial ERR_ABORTED noise"
     "about:blank#codex-web-gpt-browser-host",
     "https://chatgpt.com/?temporary-chat=true",
   ), false);
+});
+
+test("only an explicit Cloudflare challenge on a ChatGPT backend response triggers recovery", () => {
+  assert.equal(isChatGptCloudflareChallengeResponse({
+    statusCode: 403,
+    url: "https://chatgpt.com/backend-api/subscriptions",
+    responseHeaders: {
+      "Cf-Mitigated": ["challenge"],
+      "Content-Type": ["text/html; charset=UTF-8"],
+    },
+  }), true);
+  assert.equal(isChatGptCloudflareChallengeResponse({
+    statusCode: 403,
+    url: "https://chatgpt.com/backend-api/subscriptions",
+    responseHeaders: { "Content-Type": ["application/json"] },
+  }), false);
+  assert.equal(isChatGptCloudflareChallengeResponse({
+    statusCode: 403,
+    url: "https://example.com/backend-api/subscriptions",
+    responseHeaders: { "cf-mitigated": ["challenge"] },
+  }), false);
+});
+
+test("the idle home browser performs one bounded reload for a Cloudflare challenge burst", async () => {
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(),
+    manualOperation: null,
+    cloudflareChallengeRecovery: null,
+    cloudflareChallengeRecoveryArmed: true,
+    cloudflareChallengeRecoveryDelayMs: 0,
+    cloudflareChallengeRecoverySettleMs: 0,
+    view: {
+      webContents: {
+        id: 42,
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        isDestroyed: () => false,
+        loadURL: async (url) => calls.push(["loadURL", url]),
+      },
+    },
+    logger: {
+      info: (event, detail) => calls.push(["info", event, detail]),
+      warn: (event, detail) => calls.push(["warn", event, detail]),
+      error: (event, detail) => calls.push(["error", event, detail]),
+    },
+    setState: (patch) => calls.push(["setState", patch]),
+    probeAuthentication: async () => calls.push(["probeAuthentication"]),
+  });
+  const challenge = {
+    statusCode: 403,
+    url: "https://chatgpt.com/backend-api/subscriptions",
+    webContentsId: 42,
+    responseHeaders: { "cf-mitigated": ["challenge"] },
+  };
+
+  assert.equal(BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, challenge), true);
+  assert.equal(BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, challenge), true);
+  await fixture.cloudflareChallengeRecovery;
+
+  assert.deepEqual(calls.filter(([name]) => name === "loadURL"), [
+    ["loadURL", "https://chatgpt.com/?temporary-chat=true"],
+  ]);
+  assert.equal(fixture.cloudflareChallengeRecoveryArmed, false);
+
+  BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, {
+    statusCode: 200,
+    url: "https://chatgpt.com/backend-api/subscriptions",
+    webContentsId: 42,
+    responseHeaders: { "content-type": ["application/json"] },
+  });
+  assert.equal(fixture.cloudflareChallengeRecoveryArmed, true);
 });
 
 function createContents() {
@@ -198,6 +270,60 @@ test("concurrent login requests share one authentication operation", async () =>
   assert.deepEqual(await first, { authenticated: true });
 });
 
+test("logout clears only the owned ChatGPT session and returns to the sign-in surface", async () => {
+  const calls = [];
+  let currentUrl = "https://chatgpt.com/?temporary-chat=true";
+  const authView = { webContents: { isDestroyed: () => false } };
+  const fixture = {
+    authView,
+    state: { authenticated: true, status: "ready" },
+    view: {
+      webContents: {
+        getURL: () => currentUrl,
+        loadURL: async (url) => {
+          calls.push(["loadURL", url]);
+          currentUrl = url;
+        },
+        session: {
+          clearStorageData: async () => calls.push(["clearStorageData"]),
+        },
+      },
+    },
+    closeAuthView(view, closeContents, refreshMain) {
+      calls.push(["closeAuthView", view, closeContents, refreshMain]);
+      this.authView = null;
+    },
+    setState(patch) {
+      this.state = { ...this.state, ...patch };
+      calls.push(["setState", patch]);
+    },
+    probeAuthentication: async function () {
+      this.state = { ...this.state, authenticated: false, status: "signed-out" };
+      calls.push(["probeAuthentication"]);
+      return this.snapshot();
+    },
+    activateHomeSurface() { calls.push(["activateHomeSurface"]); },
+    show() { calls.push(["show"]); },
+    snapshot() { return { ...this.state, url: currentUrl }; },
+    logger: { info(event) { calls.push(["log", event]); } },
+    withManualOperation: async (name, action) => {
+      calls.push(["manualOperation", name]);
+      return await action();
+    },
+  };
+
+  const result = await BrowserHost.prototype.logout.call(fixture);
+
+  assert.equal(result.authenticated, false);
+  assert.equal(result.status, "signed-out");
+  assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
+  assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
+  assert.deepEqual(calls[2], ["clearStorageData"]);
+  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
+  assert.ok(calls.some(([name]) => name === "show"));
+});
+
 test("OAuth completion is confirmed on the primary Temporary Chat surface before login succeeds", async () => {
   let primaryReady = false;
   const stateUpdates = [];
@@ -249,6 +375,42 @@ test("OAuth completion is confirmed on the primary Temporary Chat surface before
   assert.equal(result.authenticated, true);
   assert.equal(fixture.authView, null);
   assert.equal(stateUpdates.at(-1).url, "https://chatgpt.com/?temporary-chat=true");
+});
+
+test("an authenticated primary surface closes a stale auth popup before browser automation", async () => {
+  const staleAuthView = {
+    webContents: {
+      isDestroyed: () => false,
+      executeJavaScript: async () => ({ composer: false, readyState: "complete" }),
+    },
+  };
+  const closed = [];
+  const fixture = {
+    activeTraceId: null,
+    manualOperation: "connector verification",
+    authView: staleAuthView,
+    state: { authenticated: true },
+    logger: { info() {} },
+    view: {
+      webContents: {
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        isDestroyed: () => false,
+        executeJavaScript: async () => ({ composer: true, readyState: "complete" }),
+      },
+    },
+    closeAuthView(view, closeContents, refreshMain) {
+      closed.push([view, closeContents, refreshMain]);
+      this.authView = null;
+    },
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return this.state; },
+  };
+
+  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
+
+  assert.equal(result.authenticated, true);
+  assert.equal(fixture.authView, null);
+  assert.deepEqual(closed, [[staleAuthView, true, false]]);
 });
 
 test("browser chrome navigation delegates to WebContents navigation history", () => {

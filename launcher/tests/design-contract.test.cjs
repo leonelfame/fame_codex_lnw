@@ -7,6 +7,8 @@ const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
 const styles = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
+const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 
 test("launcher uses native macOS chrome and controlled window translucency", () => {
@@ -144,6 +146,9 @@ test("MCP copy includes every required account, key, and connector instruction",
   assert.match(i18nSource, /Don't forget to create a ChatGPT workspace\./);
   assert.match(i18nSource, /别忘了创建 ChatGPT 工作区。/);
   assert.match(i18nSource, /same OpenAI account that will use the ChatGPT plugin/);
+  assert.match(i18nSource, /only after this step succeeds and the tunnel is running/);
+  assert.match(i18nSource, /只有此步骤成功且 Tunnel 正在运行后/);
+  assert.match(appSource, /className="mcp-step-two-hint"/);
   assert.match(i18nSource, /enable Developer Mode[\s\S]*?choose Tunnel[\s\S]*?set Authentication to None/);
   assert.match(appSource, /<NoticeRow icon="alert" tone="warning">/);
   assert.doesNotMatch(appSource, /icon="spark"/);
@@ -189,4 +194,18 @@ test("launcher refreshes persisted ChatGPT authentication before presenting setu
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
   assert.match(i18nSource, /checkingSignIn: "Checking saved session"/);
+});
+
+test("launcher reminds authenticated users to refresh the private ChatGPT session every 48 hours", () => {
+  assert.match(electronMain, /sessionRefreshReminderAt:\s*nextSessionRefreshReminderAt\(\)/);
+  assert.match(electronMain, /launcher:session-reminder-dismiss/);
+  assert.match(electronMain, /launcher:browser-logout[\s\S]*?browserHost\.logout\(\)/);
+  assert.match(preloadSource, /dismissSessionReminder:[\s\S]*?launcher:session-reminder-dismiss/);
+  assert.match(preloadSource, /logoutChatGpt:[\s\S]*?launcher:browser-logout/);
+  assert.match(browserHostSource, /session\.clearStorageData\(\)/);
+  assert.match(appSource, /browser\?\.authenticated !== true/);
+  assert.match(appSource, /window\.setTimeout\(\(\) => setSessionReminderDue\(true\), delay\)/);
+  assert.match(appSource, /copy\.dismiss[\s\S]*?copy\.logOut/);
+  assert.match(i18nSource, /signing in again every two days/);
+  assert.match(i18nSource, /建议每两天重新登录一次/);
 });

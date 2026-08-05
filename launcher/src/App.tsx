@@ -295,6 +295,8 @@ function LauncherShell({
   const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
+  const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
+  const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser" && !(compactSidebar && sidebarOpen);
   const needsBrowser = browser?.authenticated !== true;
@@ -348,6 +350,23 @@ function LauncherShell({
     return () => media.removeEventListener("change", apply);
   }, []);
 
+  useEffect(() => {
+    const reminderAt = snapshot.state.sessionRefreshReminderAt;
+    const reminderTime = reminderAt === null ? Number.NaN : Date.parse(reminderAt);
+    if (browser?.authenticated !== true || !Number.isFinite(reminderTime)) {
+      setSessionReminderDue(false);
+      return;
+    }
+    const delay = reminderTime - Date.now();
+    if (delay <= 0) {
+      setSessionReminderDue(true);
+      return;
+    }
+    setSessionReminderDue(false);
+    const timer = window.setTimeout(() => setSessionReminderDue(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [browser?.authenticated, snapshot.state.sessionRefreshReminderAt]);
+
   const activateBrowser = useCallback(async (show = false) => {
     setSurface("browser");
     await api!.setBrowserSurfaceActive(true);
@@ -368,6 +387,35 @@ function LauncherShell({
   const navigateSurface = (next: Surface) => {
     setSurface(next);
     if (compactSidebar) setSidebarOpen(false);
+  };
+
+  const dismissSessionReminder = async () => {
+    if (sessionReminderBusy) return;
+    setSessionReminderBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.dismissSessionReminder());
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setSessionReminderBusy(false);
+    }
+  };
+
+  const logoutChatGpt = async () => {
+    if (sessionReminderBusy) return;
+    setSessionReminderBusy(true);
+    setError(null);
+    try {
+      const result = await api!.logoutChatGpt();
+      updateState(result.state);
+      navigateSurface("browser");
+      await api!.setBrowserSurfaceActive(true);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setSessionReminderBusy(false);
+    }
   };
 
   return (
@@ -521,6 +569,17 @@ function LauncherShell({
           </motion.div>
         </AnimatePresence>
       </section>
+
+      <AnimatePresence>
+        {sessionReminderDue ? (
+          <SessionRefreshReminder
+            busy={sessionReminderBusy}
+            copy={copy}
+            onDismiss={() => void dismissSessionReminder()}
+            onLogout={() => void logoutChatGpt()}
+          />
+        ) : null}
+      </AnimatePresence>
     </motion.main>
   );
 }
@@ -1019,6 +1078,7 @@ function McpSurface({
                 </div>
               )
             ) : null}
+            {step === 1 ? <p className="mcp-step-two-hint">{copy.mcpStepTwoHint}</p> : null}
             {step === 2 ? (
               <div className="connector-actions">
                 <div className="connector-name">
@@ -1637,6 +1697,43 @@ function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string;
       </span>
       <button onClick={onDismiss} type="button">{copy.dismiss}</button>
     </motion.div>
+  );
+}
+
+function SessionRefreshReminder({
+  busy,
+  copy,
+  onDismiss,
+  onLogout,
+}: {
+  busy: boolean;
+  copy: Copy;
+  onDismiss: () => void;
+  onLogout: () => void;
+}) {
+  return (
+    <motion.aside
+      animate={{ opacity: 1, y: 0 }}
+      aria-live="polite"
+      className="session-refresh-reminder"
+      exit={{ opacity: 0, y: -8 }}
+      initial={{ opacity: 0, y: -8 }}
+      transition={PANEL_TRANSITION}
+    >
+      <span className="session-refresh-reminder-icon"><Icon name="alert" /></span>
+      <div className="session-refresh-reminder-copy">
+        <strong>{copy.sessionReminderTitle}</strong>
+        <p>{copy.sessionReminderBody}</p>
+      </div>
+      <div className="session-refresh-reminder-actions">
+        <button className="text-button" disabled={busy} onClick={onDismiss} type="button">
+          {copy.dismiss}
+        </button>
+        <button className="button-primary" disabled={busy} onClick={onLogout} type="button">
+          {copy.logOut}
+        </button>
+      </div>
+    </motion.aside>
   );
 }
 

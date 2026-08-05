@@ -56,7 +56,7 @@ describe("native /models augmentation", () => {
     expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
     for (const [index, model] of web.entries()) {
       const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-      const limits = resolveChatGptWebContextLimits(true);
+      const limits = resolveChatGptWebContextLimits(route.adapterEffort);
       expect(model).toMatchObject({
         slug: route.slug,
         display_name: route.displayName,
@@ -115,9 +115,9 @@ describe("native /models augmentation", () => {
       contextWindow: model.context_window,
       autoCompactTokenLimit: model.auto_compact_token_limit,
     }))).toEqual([
-      { contextWindow: 225_000, autoCompactTokenLimit: 202_500 },
-      { contextWindow: 225_000, autoCompactTokenLimit: 202_500 },
-      { contextWindow: 225_000, autoCompactTokenLimit: 202_500 },
+      { contextWindow: 205_000, autoCompactTokenLimit: 184_500 },
+      { contextWindow: 205_000, autoCompactTokenLimit: 184_500 },
+      { contextWindow: 205_000, autoCompactTokenLimit: 184_500 },
     ]);
   });
 
@@ -140,8 +140,9 @@ describe("native /models augmentation", () => {
       { ...originalModels[2], max_context_window: 371_851 },
     ]);
     expect(models[1]!.context_window).toBe(300_000);
-    for (const model of models.slice(3)) {
-      const limits = resolveChatGptWebContextLimits(false);
+    for (const [index, model] of models.slice(3).entries()) {
+      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+      const limits = resolveChatGptWebContextLimits(route.adapterEffort);
       expect(model.context_window).toBe(limits.contextWindow);
       expect(model.max_context_window).toBe(limits.contextWindow);
       expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);

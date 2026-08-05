@@ -57,7 +57,7 @@ export function estimateChatGptWebInputTokens(
     mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
   );
   const modelTokens = estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
-  const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(capabilities.proAvailable);
+  const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(mode.effort);
   const transportPressureTokens = Math.ceil(
     compiled.text.length * autoCompactTokenLimit / CHATGPT_WEB_INLINE_PROMPT_AUTO_COMPACT_CHARS,
   );

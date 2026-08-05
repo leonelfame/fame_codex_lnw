@@ -21,6 +21,7 @@ export interface LauncherState {
   mcpRuntimeInstalled?: boolean;
   codexRestartRequired?: boolean;
   mcpGuideStep: number;
+  sessionRefreshReminderAt: string | null;
 }
 
 export interface BrowserState {
@@ -108,6 +109,8 @@ export interface LauncherApi {
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;
+  logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
+  dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;

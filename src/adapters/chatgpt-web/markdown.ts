@@ -41,24 +41,122 @@ export function chatGptHtmlToMarkdown(html: string): string {
   return html.trim() ? turndown.turndown(html).trim() : "";
 }
 
+export interface ChatGptMarkdownSegment {
+  key: string;
+  html: string;
+  text: string;
+  group?: string;
+  streamable: boolean;
+}
+
+interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
+  changedAt: number;
+  streamableAt?: number;
+}
+
+interface CommittedChatGptMarkdownSegment {
+  key: string;
+  text: string;
+}
+
 /**
- * Buffers ChatGPT's mutable rendered answer until terminal DOM evidence is stable.
+ * Converts structurally completed ChatGPT DOM blocks into an append-only Markdown stream.
  *
- * The Web UI may rewrite an already-visible paragraph while hydrating citations, links, lists, or
- * a replacement renderer. Responses text deltas cannot be retracted, so no final-answer Markdown
- * is emitted before `finish`; live reasoning/status events remain a separate append-only stream.
+ * ChatGPT can rewrite old HTML while hydrating citations and controls, so a character prefix is
+ * not a safe commit boundary. The browser supplies semantic blocks and marks a block streamable
+ * only after a following block exists. Each completed block must then remain byte-stable for the
+ * configured window. Once committed, presentation-only HTML rewrites are harmless; changing its
+ * visible text is an explicit protocol error because Responses deltas cannot be retracted.
  */
 export class ChatGptMarkdownBuffer {
-  private html = "";
+  private readonly candidates = new Map<number, ChatGptMarkdownCandidate>();
+  private readonly committed: CommittedChatGptMarkdownSegment[] = [];
+  private latest: ChatGptMarkdownSegment[] = [];
+  private markdown = "";
+  private lastGroup: string | undefined;
 
-  constructor(private readonly transform: (markdown: string) => string = markdown => markdown) {}
+  constructor(
+    private readonly transform: (markdown: string) => string = markdown => markdown,
+    private readonly stabilityMs = 750,
+  ) {
+    if (!Number.isFinite(stabilityMs) || stabilityMs < 0) {
+      throw new Error("ChatGPT Markdown stability window must be a non-negative finite number");
+    }
+  }
 
-  observe(html: string): void {
-    this.html = html;
+  observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
+    this.assertCommittedPrefix(segments);
+    this.latest = segments.map(segment => ({ ...segment }));
+
+    for (let index = this.committed.length; index < segments.length; index += 1) {
+      const segment = segments[index]!;
+      const previous = this.candidates.get(index);
+      const unchanged = previous
+        && previous.key === segment.key
+        && previous.html === segment.html
+        && previous.text === segment.text
+        && previous.group === segment.group;
+      this.candidates.set(index, {
+        ...segment,
+        changedAt: unchanged ? previous.changedAt : now,
+        ...(segment.streamable ? {
+          streamableAt: unchanged && previous.streamableAt !== undefined
+            ? previous.streamableAt
+            : now,
+        } : {}),
+      });
+    }
+    for (const index of this.candidates.keys()) {
+      if (index >= segments.length) this.candidates.delete(index);
+    }
+
+    let delta = "";
+    while (this.committed.length < segments.length) {
+      const index = this.committed.length;
+      const candidate = this.candidates.get(index);
+      if (!candidate?.streamable || candidate.streamableAt === undefined) break;
+      if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
+      delta += this.commit(candidate);
+      this.committed.push({ key: candidate.key, text: candidate.text });
+      this.candidates.delete(index);
+    }
+    return delta;
   }
 
   finish(): { markdown: string; delta: string } {
-    const markdown = this.transform(chatGptHtmlToMarkdown(this.html));
-    return { markdown, delta: markdown };
+    this.assertCommittedPrefix(this.latest);
+    let delta = "";
+    for (let index = this.committed.length; index < this.latest.length; index += 1) {
+      const segment = this.latest[index]!;
+      delta += this.commit(segment);
+      this.committed.push({ key: segment.key, text: segment.text });
+    }
+    this.candidates.clear();
+    return { markdown: this.markdown, delta };
+  }
+
+  private assertCommittedPrefix(segments: ChatGptMarkdownSegment[]): void {
+    if (segments.length < this.committed.length) {
+      throw new Error("ChatGPT removed a completed text block that was already streamed to Codex");
+    }
+    for (let index = 0; index < this.committed.length; index += 1) {
+      const previous = this.committed[index]!;
+      const current = segments[index]!;
+      if (current.key !== previous.key || current.text !== previous.text) {
+        throw new Error("ChatGPT changed a completed text block that was already streamed to Codex");
+      }
+    }
+  }
+
+  private commit(segment: ChatGptMarkdownSegment): string {
+    const block = this.transform(chatGptHtmlToMarkdown(segment.html));
+    if (!block) return "";
+    const separator = this.markdown
+      ? segment.group !== undefined && segment.group === this.lastGroup ? "\n" : "\n\n"
+      : "";
+    const delta = `${separator}${block}`;
+    this.markdown += delta;
+    this.lastGroup = segment.group;
+    return delta;
   }
 }

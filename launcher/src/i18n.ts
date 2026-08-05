@@ -75,6 +75,7 @@ const en = {
   openKeys: "Create API key",
   mcpStepTwo: "Connect the local harness",
   mcpStepTwoBody: "Paste the Tunnel ID and API key. The tunnel must belong to the same OpenAI account that will use the ChatGPT plugin. The key stays in private local storage and is never written to launcher logs.",
+  mcpStepTwoHint: "You can add the MCP connector in ChatGPT only after this step succeeds and the tunnel is running.",
   tunnelId: "Tunnel ID",
   runtimeKey: "API key (not Admin key)",
   connect: "Connect harness",
@@ -124,6 +125,9 @@ const en = {
   notConfigured: "Not configured",
   error: "Something went wrong",
   dismiss: "Dismiss",
+  sessionReminderTitle: "Refresh your ChatGPT session",
+  sessionReminderBody: "We recommend signing in again every two days. A stale ChatGPT session can interrupt Web model turns and MCP tools.",
+  logOut: "Log out",
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
@@ -201,6 +205,7 @@ const zh: Record<keyof typeof en, string> = {
   openKeys: "创建 API key",
   mcpStepTwo: "连接本地 Harness",
   mcpStepTwoBody: "粘贴 Tunnel ID 和 API key。Tunnel 必须属于将使用该 ChatGPT 插件的同一 OpenAI 账户。密钥只保存在本机私有存储中，绝不会写入启动器日志。",
+  mcpStepTwoHint: "只有此步骤成功且 Tunnel 正在运行后，才能在 ChatGPT 中添加 MCP 连接器。",
   tunnelId: "Tunnel ID",
   runtimeKey: "API key（不是 Admin key）",
   connect: "连接 Harness",
@@ -250,6 +255,9 @@ const zh: Record<keyof typeof en, string> = {
   notConfigured: "未配置",
   error: "出现错误",
   dismiss: "关闭",
+  sessionReminderTitle: "刷新 ChatGPT 会话",
+  sessionReminderBody: "建议每两天重新登录一次。失效的 ChatGPT 会话可能会中断 Web 模型任务和 MCP 工具。",
+  logOut: "退出登录",
 };
 
 export type Copy = typeof en;
