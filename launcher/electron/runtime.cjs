@@ -860,6 +860,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       "--refresh-account-capabilities",
+      "--replace-codex-route",
       "--acknowledge-unofficial",
       "--restart-service",
     ];
@@ -928,6 +929,7 @@ class RuntimeHost {
       this.browserDescriptorPath,
       "--app-name",
       this.browserConnectorName(),
+      "--replace-codex-route",
     ];
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");

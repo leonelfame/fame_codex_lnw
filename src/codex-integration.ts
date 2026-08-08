@@ -665,6 +665,92 @@ function restoreManagedFeatures(
   );
 }
 
+function restoreOwnedManagedFeatures(text: string, journal: ManagedRouteJournal): string {
+  let restored = text;
+  if (journal.version === 6) {
+    const current = findMultiAgentV2Assignment(splitLines(restored));
+    const managedLine = journal.previousMultiAgentV2.tableName === "features.multi_agent_v2"
+      ? MANAGED_MULTI_AGENT_V2_TABLE_LINE
+      : MANAGED_MULTI_AGENT_V2_LINE;
+    if (current.rawLine === managedLine && current.value === "false") {
+      restored = restoreMultiAgentV2Feature(restored, journal.previousMultiAgentV2);
+    }
+  }
+  if (journal.version === 5 || journal.version === 6) {
+    const multiAgent = findFeatureAssignment(splitLines(restored), "multi_agent");
+    if (multiAgent.rawLine === MANAGED_MULTI_AGENT_LINE && multiAgent.value === "true") {
+      restored = restoreBooleanFeature(
+        restored,
+        "multi_agent",
+        "true",
+        MANAGED_MULTI_AGENT_LINE,
+        journal.previousMultiAgent,
+      );
+    }
+    const compaction = findFeatureAssignment(splitLines(restored), "remote_compaction_v2");
+    if (compaction.rawLine === MANAGED_REMOTE_COMPACTION_LINE && compaction.value === "false") {
+      restored = restoreBooleanFeature(
+        restored,
+        "remote_compaction_v2",
+        "false",
+        MANAGED_REMOTE_COMPACTION_LINE,
+        journal.previousRemoteCompactionV2,
+      );
+    }
+  }
+  return restored;
+}
+
+function restoreStillManagedRouteAssignments(text: string, journal: ManagedRouteJournal): string {
+  const document = parseDocument(text);
+  removeManagedComment(document);
+  const current = assignments(document.lines);
+  const target = Object.fromEntries(
+    (Object.keys(current) as ManagedAssignmentKey[]).map(key => {
+      const stillManaged = key === "openai_base_url"
+        ? current[key].present && current[key].value === journal.installed.openai_base_url
+        : !current[key].present;
+      return [key, stillManaged ? journal.previous[key] : current[key]];
+    }),
+  ) as Record<ManagedAssignmentKey, PreviousAssignment>;
+  const currentIndices = Object.values(current)
+    .flatMap(assignment => assignment.index === undefined ? [] : [assignment.index])
+    .sort((left, right) => right - left);
+  for (const index of currentIndices) removeDocumentLine(document, index);
+
+  const previous = (Object.entries(target) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
+    .filter(([, assignment]) => assignment.present)
+    .sort(([, left], [, right]) => (left.index ?? Number.MAX_SAFE_INTEGER) - (right.index ?? Number.MAX_SAFE_INTEGER));
+  for (const [key, assignment] of previous) {
+    if (!assignment.rawLine) throw new Error(`Codex integration journal is missing the prior ${key} line`);
+    const index = Math.min(assignment.index ?? firstTableIndex(document.lines), firstTableIndex(document.lines));
+    insertDocumentLine(document, index, assignment.rawLine);
+  }
+  return renderDocument(document);
+}
+
+function managedJournalIsActive(journal: ManagedRouteJournal): boolean {
+  return journal.version === 3 || journal.active;
+}
+
+function verifyManagedJournalState(text: string, journal: ManagedRouteJournal): void {
+  if (journal.version === 3 || journal.active) verifyInstalledRoute(text, journal);
+  else verifyRestoredRoute(text, journal);
+}
+
+function replacementBaseline(
+  currentText: string,
+  configExists: boolean,
+  journal: ManagedRouteJournal,
+): string {
+  if (!configExists) return "";
+  if (!managedJournalIsActive(journal)) return currentText;
+
+  let baseline = restoreOwnedManagedFeatures(currentText, journal);
+  baseline = restoreStillManagedRouteAssignments(baseline, journal);
+  return baseline;
+}
+
 function installIntegrationConfig(
   text: string,
   installedUrl: string,
@@ -928,15 +1014,29 @@ export function preflightCodexIntegration(
   options: InstallCodexIntegrationOptions = {},
 ): void {
   const configPath = getCodexConfigPath();
-  const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+  const configExists = existsSync(configPath);
+  const currentText = configExists ? readFileSync(configPath, "utf8") : "";
   const existing = readJournal();
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
   if (existing?.version === 3 || existing?.version === 4 || existing?.version === 5 || existing?.version === 6) {
-    if ((existing.version === 4 || existing.version === 5 || existing.version === 6) && !existing.active) {
-      verifyRestoredRoute(currentText, existing);
+    if (!configExists) {
+      if (options.replaceExistingRoute !== true) {
+        throw new Error(`Codex config is missing: ${configPath}`);
+      }
+      installIntegrationConfig("", installedUrl, true);
+      return;
     }
-    else verifyInstalledRoute(currentText, existing);
+    try {
+      verifyManagedJournalState(currentText, existing);
+    } catch (error) {
+      if (options.replaceExistingRoute !== true) throw error;
+      installIntegrationConfig(
+        replacementBaseline(currentText, configExists, existing),
+        installedUrl,
+        true,
+      );
+    }
     return;
   }
   let baseline = currentText;
@@ -955,10 +1055,56 @@ export function installCodexIntegration(
 ): CodexIntegrationJournal {
   const configPath = getCodexConfigPath();
   mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+  const configExists = existsSync(configPath);
+  const currentText = configExists ? readFileSync(configPath, "utf8") : "";
   const existing = readJournal();
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
+
+  const hasManagedJournal = existing?.version === 3
+    || existing?.version === 4
+    || existing?.version === 5
+    || existing?.version === 6;
+  if (hasManagedJournal && !configExists && options.replaceExistingRoute !== true) {
+    throw new Error(`Codex config is missing: ${configPath}`);
+  }
+
+  if (hasManagedJournal
+    && options.replaceExistingRoute === true) {
+    let consistent = configExists;
+    if (consistent) {
+      try {
+        verifyManagedJournalState(currentText, existing);
+      } catch {
+        consistent = false;
+      }
+    }
+    if (!consistent) {
+      const baseline = replacementBaseline(currentText, configExists, existing);
+      const patched = installIntegrationConfig(baseline, installedUrl, true);
+      const replacement: CodexIntegrationJournal = {
+        version: 6,
+        active: true,
+        configPath,
+        installed: {
+          openai_base_url: installedUrl,
+          remote_compaction_v2: false,
+          multi_agent: true,
+          multi_agent_v2: false,
+        },
+        previous: patched.previous,
+        previousRemoteCompactionV2: patched.previousRemoteCompactionV2,
+        previousMultiAgent: patched.previousMultiAgent,
+        previousMultiAgentV2: patched.previousMultiAgentV2,
+        format: textFormat(baseline),
+      };
+      writeFilesWithCompensation([
+        { path: configPath, data: patched.text },
+        { path: getCodexJournalPath(), data: `${JSON.stringify(replacement, null, 2)}\n` },
+      ], [getCodexModelsCachePath()]);
+      return replacement;
+    }
+  }
 
   if (existing?.version === 6) {
     let installedText: string;
