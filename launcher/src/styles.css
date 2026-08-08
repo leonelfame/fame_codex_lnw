@@ -659,6 +659,37 @@ code {
   white-space: nowrap;
 }
 
+.browser-zoom-controls {
+  display: flex;
+  height: 28px;
+  flex: none;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+}
+
+.browser-zoom-controls .icon-button {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+}
+
+.browser-zoom-reset {
+  min-width: 42px;
+  height: 26px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.browser-zoom-reset:hover {
+  background: var(--color-background-control-hover);
+  color: var(--color-text-primary);
+}
+
 .toolbar-text-button {
   height: 28px;
   padding: 0 10px;

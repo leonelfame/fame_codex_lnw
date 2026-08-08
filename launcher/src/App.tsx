@@ -693,6 +693,13 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
+  const zoom = async (action: "in" | "out" | "reset") => {
+    try {
+      await api!.zoomBrowser(action);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
   const toggle = async () => {
     try {
       if (visible) await api!.hideBrowser();
@@ -768,6 +775,19 @@ function BrowserSurface({
         <div className="browser-address" title={browser?.url || copy.browserAddress}>
           <Icon name="globe" />
           <span>{formatBrowserAddress(browser?.url, copy)}</span>
+        </div>
+        <div className="browser-zoom-controls">
+          <IconButton icon="minus" label={copy.zoomOut} onClick={() => void zoom("out")} />
+          <button
+            aria-label={copy.zoomReset}
+            className="browser-zoom-reset"
+            onClick={() => void zoom("reset")}
+            title={copy.zoomReset}
+            type="button"
+          >
+            {Math.round((browser?.zoomFactor ?? 1) * 100)}%
+          </button>
+          <IconButton icon="plus" label={copy.zoomIn} onClick={() => void zoom("in")} />
         </div>
         <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}

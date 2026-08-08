@@ -69,6 +69,16 @@ ChatGPT DOM and labels are not a stable API. Selectors are narrow and completion
 completed-turn evidence. UI drift fails the turn; it never chooses another model, starts another
 transport, or returns a fabricated success.
 
+### Login-state transfer
+
+Platform passkeys and identity verification run only in a configured system Google Chrome or
+Chromium process with a dedicated temporary profile. The launcher does not treat opening that
+browser as authentication evidence. A helper first proves a real ChatGPT Temporary Chat composer;
+the launcher then imports only allowlisted ChatGPT/OpenAI cookies and ChatGPT local storage into its
+private Electron partition and proves the composer again. Third-party identity-provider state is
+not copied. Invalid or oversized state, a partial import, failed embedded verification, or failed
+temporary-state cleanup clears the imported Electron state and fails closed.
+
 ### Cross-turn data leakage
 
 Browser turns use at most five independent task-bound tabs in one private login partition. Every
@@ -84,6 +94,8 @@ response; the bridge does not fabricate or install a Codex history checkpoint.
 - Responses and health listeners bind to `127.0.0.1` only.
 - Full mode uses OpenAI's outbound HTTPS Secure MCP Tunnel; it opens no public listener or inbound
   firewall rule.
+- The dedicated system Chrome/Chromium login profile connects to ChatGPT and its selected identity
+  provider only during an explicit sign-in operation.
 - The embedded browser connects to ChatGPT and user-authorized attachment URLs through normal
   browser networking.
 

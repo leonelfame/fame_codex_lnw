@@ -203,7 +203,7 @@ export async function runDoctor(): Promise<DoctorReport> {
       id: "connector",
       status: "warning",
       message: `Local checks cannot prove that ChatGPT connector ${JSON.stringify(config.appName)} is attached to this tunnel`,
-      detail: "Verify it once at https://chatgpt.com/#settings/Connectors while the tunnel is ready.",
+      detail: "Verify it once at https://chatgpt.com/#settings/Plugins while the tunnel is ready.",
     });
   } else {
     checks.push({ id: "tools", status: "warning", message: "Browser-only mode intentionally has no local tools or MCP tunnel" });

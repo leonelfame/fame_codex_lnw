@@ -98,12 +98,12 @@ export async function loginToChatGpt(
   options: { timeoutMs?: number } = {},
 ): Promise<BrowserLoginResult> {
   if (!existsSync(config.chromeExecutablePath)) {
-    throw new Error(`Google Chrome was not found at ${config.chromeExecutablePath}. Pass --chrome with its executable path.`);
+    throw new Error(`Chrome/Chromium was not found at ${config.chromeExecutablePath}. Pass --chrome with its executable path.`);
   }
   const profileDir = join(dirname(config.storageStatePath), "login-profile");
   mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   process.stdout.write(
-    "A normal Chrome window is open. Sign in to ChatGPT, confirm that the composer is visible, then quit this dedicated Chrome instance completely.\n",
+    "A system Chrome/Chromium window is open. Sign in to ChatGPT, confirm that the composer is visible, then quit this dedicated browser instance completely.\n",
   );
   const loginBrowser = spawn(config.chromeExecutablePath, [
     `--user-data-dir=${profileDir}`,
@@ -174,7 +174,7 @@ export function browserLoginStateExists(config: AppConfig): boolean {
 }
 
 export async function checkBrowserEngine(config: AppConfig): Promise<void> {
-  if (!existsSync(config.chromeExecutablePath)) throw new Error(`Google Chrome was not found at ${config.chromeExecutablePath}`);
+  if (!existsSync(config.chromeExecutablePath)) throw new Error(`Chrome/Chromium was not found at ${config.chromeExecutablePath}`);
   const browser = await chromium.launch({
     executablePath: config.chromeExecutablePath,
     headless: true,
