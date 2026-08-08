@@ -58,7 +58,7 @@ const BROWSER_HELPER_PATH = app.isPackaged
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
 const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
 const X_URL = "https://x.com/miu21590";
-const CONNECTORS_URL = "https://chatgpt.com/#settings/Connectors";
+const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
@@ -408,6 +408,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-show", () => browserHost.reveal());
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
+  handle("launcher:browser-zoom", (_event, action) => browserHost.zoom(action));
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
   handle("launcher:browser-login", async () => {
@@ -617,7 +618,7 @@ async function requestQuit() {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation();
+    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
@@ -731,6 +732,7 @@ async function start() {
     getConnectorName: () => runtimeHost.browserConnectorName(),
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
+    loginWithSystemBrowser: () => runtimeHost.captureSystemBrowserLogin(),
     publishState: (state) => send("launcher:browser-state", state),
   });
   await browserHost.ready();

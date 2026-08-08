@@ -35,6 +35,7 @@ export interface BrowserState {
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  zoomFactor: number;
   activeTabId: string;
   maxTabs: number;
   tabs: BrowserTabState[];
@@ -113,6 +114,7 @@ export interface LauncherApi {
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
+  zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;

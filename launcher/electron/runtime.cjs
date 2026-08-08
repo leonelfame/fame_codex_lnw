@@ -21,6 +21,7 @@ const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_LOGIN_STATE_FILE_BYTES = 16 * 1024 * 1024;
 function collect(stream, chunks, onLine, onError) {
   let buffered = "";
   let bytes = 0;
@@ -53,6 +54,71 @@ function resolveUserPath(value) {
     return path.resolve(os.homedir(), value.slice(2));
   }
   return path.resolve(value);
+}
+
+function browserLoginCandidates(platform = process.platform, env = process.env) {
+  if (platform === "darwin") {
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ];
+  }
+  if (platform === "win32") {
+    const roots = [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter(Boolean);
+    return roots.flatMap((root) => [
+      path.win32.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+      path.win32.join(root, "Chromium", "Application", "chrome.exe"),
+    ]);
+  }
+  return [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/opt/google/chrome/google-chrome",
+  ];
+}
+
+function executablePathIsAbsolute(candidate, platform = process.platform) {
+  return platform === "win32" ? path.win32.isAbsolute(candidate) : path.posix.isAbsolute(candidate);
+}
+
+function usableBrowserExecutable(candidate, platform = process.platform) {
+  if (typeof candidate !== "string" || !candidate || !executablePathIsAbsolute(candidate, platform)) return false;
+  try {
+    if (!fs.statSync(candidate).isFile()) return false;
+    if (platform !== "win32") fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveBrowserLoginExecutable({
+  configuredPath,
+  platform = process.platform,
+  candidates = browserLoginCandidates(platform),
+  isUsable = (candidate) => usableBrowserExecutable(candidate, platform),
+} = {}) {
+  if (configuredPath !== undefined && configuredPath !== null) {
+    if (typeof configuredPath !== "string" || !configuredPath.trim() || !executablePathIsAbsolute(configuredPath, platform)) {
+      throw new Error(`Configured Chrome/Chromium executable path is invalid: ${String(configuredPath)}`);
+    }
+    if (!isUsable(configuredPath)) {
+      throw new Error(
+        `Configured Chrome/Chromium executable is unavailable: ${configuredPath}. Set chromeExecutablePath to an absolute`
+        + " Google Chrome or Chromium executable path and retry; the launcher will not substitute another browser.",
+      );
+    }
+    return configuredPath;
+  }
+  for (const candidate of [...new Set(candidates)]) {
+    if (isUsable(candidate)) return candidate;
+  }
+  throw new Error(
+    `No supported system Chrome/Chromium executable was found. Install Google Chrome or Chromium, or configure`
+    + ` chromeExecutablePath explicitly. Checked: ${candidates.join(", ")}`,
+  );
 }
 
 function captureRegularFile(filePath) {
@@ -157,6 +223,15 @@ class RuntimeHost {
     this.activeChild = null;
     this.lifecycleOperation = null;
     this.cleanupEphemeralSecrets();
+    this.browserLoginCleanupError = null;
+    try {
+      this.cleanupBrowserLoginTransfers();
+    } catch (error) {
+      this.browserLoginCleanupError = error;
+      this.logger.warn("runtime.browser_login_cleanup_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   currentOperation() {
@@ -180,6 +255,21 @@ class RuntimeHost {
           message: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+  }
+
+  cleanupBrowserLoginTransfers() {
+    const parent = path.join(this.app.getPath("userData"), "browser-login");
+    let entries;
+    try {
+      entries = fs.readdirSync(parent, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!/^transfer-[A-Za-z0-9]+$/.test(entry.name)) continue;
+      fs.rmSync(path.join(parent, entry.name), { recursive: true, force: true });
     }
   }
 
@@ -207,6 +297,73 @@ class RuntimeHost {
       throw new Error("Launcher browser ownership descriptor does not belong to this launcher process");
     }
     return { CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token };
+  }
+
+  resolveBrowserLoginExecutable() {
+    const setupConfig = this.supervisor.readSetupConfig
+      ? this.supervisor.readSetupConfig()
+      : this.supervisor.readConfig();
+    return resolveBrowserLoginExecutable({
+      configuredPath: setupConfig?.chromeExecutablePath,
+      platform: this.platform,
+    });
+  }
+
+  async captureSystemBrowserLogin() {
+    try {
+      this.cleanupBrowserLoginTransfers();
+      this.browserLoginCleanupError = null;
+    } catch (error) {
+      this.browserLoginCleanupError = error;
+      throw new Error(
+        `Refusing to start system-browser login because stale private transfer state could not be removed:`
+        + ` ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const executable = this.resolveBrowserLoginExecutable();
+    const parent = path.join(this.app.getPath("userData"), "browser-login");
+    fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(parent, 0o700); } catch {}
+    const transferRoot = fs.mkdtempSync(path.join(parent, "transfer-"));
+    try { fs.chmodSync(transferRoot, 0o700); } catch {}
+    const storageStatePath = path.join(transferRoot, "storage-state.json");
+    const cleanup = async () => fs.rmSync(transferRoot, { recursive: true, force: true });
+    try {
+      await this.run(
+        "browser-login",
+        [
+          "login",
+          "--launcher-control",
+          "--chrome",
+          executable,
+          "--storage-state",
+          storageStatePath,
+        ],
+        {
+          env: this.launcherControlEnvironment(),
+          message: "Sign in to ChatGPT in the system Chrome/Chromium window, then close that window",
+          successMessage: "System-browser ChatGPT login verified",
+        },
+      );
+      const stateStat = fs.lstatSync(storageStatePath);
+      if (!stateStat.isFile() || stateStat.size <= 0 || stateStat.size > MAX_LOGIN_STATE_FILE_BYTES) {
+        throw new Error("System-browser login returned an invalid storage-state file");
+      }
+      const markerPath = `${storageStatePath}.verified.json`;
+      const markerStat = fs.lstatSync(markerPath);
+      if (!markerStat.isFile() || markerStat.size <= 0 || markerStat.size > 64 * 1024) {
+        throw new Error("System-browser login returned an invalid verification marker");
+      }
+      const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+      if (marker?.version !== 1 || marker?.authenticated !== true || typeof marker?.verifiedAt !== "string") {
+        throw new Error("System-browser login did not return authenticated verification evidence");
+      }
+      const storageState = JSON.parse(fs.readFileSync(storageStatePath, "utf8"));
+      return { storageState, cleanup };
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
   }
 
   runtimeConfigSnapshot() {
@@ -706,6 +863,7 @@ class RuntimeHost {
       "--acknowledge-unofficial",
       "--restart-service",
     ];
+    if (!existing.configured) args.push("--chrome", this.resolveBrowserLoginExecutable());
     if (mode === "full") args.push("--app-name", this.browserConnectorName());
     const result = await this.runSetup("core-setup", args, {
       message: "Installing ChatGPT Web models into Codex",
@@ -870,4 +1028,4 @@ class RuntimeHost {
   }
 }
 
-module.exports = { CURRENT_CONNECTOR_NAME, RuntimeHost };
+module.exports = { CURRENT_CONNECTOR_NAME, resolveBrowserLoginExecutable, RuntimeHost };

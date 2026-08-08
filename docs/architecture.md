@@ -47,17 +47,25 @@ the legacy connector. Future public schema changes require another explicit conn
 
 The desktop launcher owns one persistent Electron partition and up to five task-bound browser
 tabs. Each Codex task is leased an independent `WebContentsView` and surface ID; Playwright attaches
-to that exact surface through a launcher-owned loopback CDP endpoint. It does not launch another
-browser or copy authentication state. Each tab opens a fresh Temporary Chat, shares only the local
-login partition, and keeps its own document and lifecycle. Completed tabs remain inspectable until
-closed. Closing a running tab destroys its page and terminates that browser turn. A sixth concurrent
-turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
-controls.
+to that exact surface through a launcher-owned loopback CDP endpoint. Model turns never launch a
+second browser or copy state between turn tabs. Each tab opens a fresh Temporary Chat, shares only
+the local login partition, and keeps its own document and lifecycle. Completed tabs remain
+inspectable until closed. Closing a running tab destroys its page and terminates that browser turn.
+A sixth concurrent turn fails explicitly; the cap avoids excessive parallel traffic that could
+trigger account abuse controls.
 
-The complete serialized Codex task is inserted as one inline JSON envelope. Image bytes stay out of
-the JSON and are attached natively with stable references. The runtime does not create a context
-JSONL file, upload a synthetic context document, include prompt hashes, or truncate the envelope.
-Attachment acceptance and send readiness are verified before the turn begins.
+Sign-in is the deliberate exception. The launcher opens the configured system Google Chrome or
+Chromium in a dedicated temporary profile so platform passkeys and identity verification remain
+available. After that browser exits, the runtime independently proves an authenticated Temporary
+Chat composer, filters the captured state to ChatGPT/OpenAI cookies plus ChatGPT local storage,
+imports it into the launcher-owned Electron partition, proves the embedded composer again, and
+deletes the temporary transfer. Any validation, import, verification, or cleanup failure clears the
+partial Electron session and fails explicitly.
+
+The current compiled Codex task context is inserted as one inline JSON envelope. Image bytes stay
+out of the JSON and are attached natively with stable references. The runtime does not create a
+context JSONL file, upload a synthetic context document, include prompt hashes, or silently truncate
+the envelope. Attachment acceptance and send readiness are verified before the turn begins.
 
 The appended models advertise the authenticated account's context window and a ten-percent
 auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
@@ -75,9 +83,10 @@ reasoning summaries, while stable prose between rows becomes native Codex commen
 
 Each native desktop package contains Electron, a platform-matched pinned Bun executable, the
 Responses bridge, Playwright client code, MCP server, setup, doctor, and the browser helper.
-Browser-only mode downloads no browser and requires no system Node/Bun. Full mode separately
-downloads the official pinned `openai/tunnel-client` build for the current OS/architecture and
-verifies it against the release SHA-256 manifest.
+Browser-only mode downloads no browser and requires no system Node/Bun. It uses an installed system
+Google Chrome or Chromium only for the passkey-compatible sign-in handoff; model turns remain in
+Electron. Full mode separately downloads the official pinned `openai/tunnel-client` build for the
+current OS/architecture and verifies it against the release SHA-256 manifest.
 
 On first launch, the embedded runtime is identity-checked and copied atomically into a private
 versioned directory under the application home. Daemon and MCP commands use that durable copy,

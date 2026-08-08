@@ -14,6 +14,7 @@ const {
   CHATGPT_VIEWPORT_CSS,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  validateChatGptStorageState,
 } = require("../electron/browser-host.cjs");
 
 test("only an explicit Cloudflare challenge on a ChatGPT backend response triggers recovery", () => {
@@ -89,6 +90,7 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
 
 function createContents() {
   const calls = [];
+  let zoomFactor = 1;
   const history = {
     canGoBack: () => true,
     canGoForward: () => false,
@@ -102,7 +104,12 @@ function createContents() {
     isDestroyed: () => false,
     isLoading: () => false,
     focus: () => calls.push("focus"),
+    getZoomFactor: () => zoomFactor,
     reload: () => calls.push("reload"),
+    setZoomFactor: (next) => {
+      zoomFactor = next;
+      calls.push(["zoom", next]);
+    },
   };
   return { calls, webContents };
 }
@@ -242,32 +249,87 @@ test("browser bounds are clipped to the launcher content area", () => {
   );
 });
 
-test("authentication windows stay in the owned browser surface", () => {
+test("authentication windows are denied and routed through the supported system-browser login", () => {
   assert.equal(allowedAuthUrl("https://accounts.google.com/o/oauth2/v2/auth"), true);
   assert.equal(allowedAuthUrl("https://chatgpt.com/auth/login"), true);
   assert.equal(allowedAuthUrl("https://platform.openai.com/settings/organization/tunnels"), false);
   assert.equal(allowedAuthUrl("https://example.com/login"), false);
   const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
-  assert.match(source, /createWindow:\s*\(options\)\s*=>\s*this\.createAuthView\(options,\s*url\)/);
-  assert.match(source, /webContents:\s*options\.webContents/);
-  assert.doesNotMatch(source, /overrideBrowserWindowOptions/);
+  assert.match(
+    source,
+    /if \(allowedAuthUrl\(url\)\) \{\s*this\.routeAuthenticationToSystemBrowser\(url\);\s*return \{ action: "deny" \};/,
+  );
+  assert.match(source, /contents\.on\("will-navigate", routeNavigation\)/);
+  assert.match(source, /contents\.on\("will-redirect", routeNavigation\)/);
+  assert.doesNotMatch(source, /createAuthView|authView|createWindow/);
 });
 
-test("concurrent login requests share one authentication operation", async () => {
+test("authentication routing is explicit and never opens provider auth as a generic external link", async () => {
+  let logins = 0;
+  const fixture = {
+    openLogin: async (options) => {
+      assert.deepEqual(options, { force: true });
+      logins += 1;
+    },
+    logger: { error() {} },
+  };
+  assert.equal(
+    BrowserHost.prototype.routeAuthenticationToSystemBrowser.call(
+      fixture,
+      "https://accounts.google.com/o/oauth2/v2/auth",
+    ),
+    true,
+  );
+  assert.equal(
+    BrowserHost.prototype.routeAuthenticationToSystemBrowser.call(fixture, "https://example.com/login"),
+    false,
+  );
+  await Promise.resolve();
+  assert.equal(logins, 1);
+});
+
+test("an auth redirect forces system-browser login even when cached state says authenticated", async () => {
   let resolveLogin;
-  let waits = 0;
+  let logins = 0;
+  const fixture = {
+    state: { authenticated: true },
+    loginOperation: null,
+    show() {},
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return { ...this.state }; },
+    logger: { info() {} },
+    loginWithSystemBrowser: async () => {
+      logins += 1;
+      return await new Promise((resolve) => { resolveLogin = resolve; });
+    },
+    installSystemBrowserLogin: async (transfer) => transfer.browser,
+    activateHomeSurface() {},
+    withManualOperation: async (_name, action) => await action(),
+  };
+
+  const login = BrowserHost.prototype.openLogin.call(fixture, { force: true });
+  await Promise.resolve();
+  assert.equal(logins, 1);
+  assert.equal(fixture.state.authenticated, false);
+  resolveLogin({ browser: { authenticated: true }, storageState: {}, cleanup() {} });
+  assert.deepEqual(await login, { authenticated: true });
+});
+
+test("concurrent login requests share one system-browser authentication operation", async () => {
+  let resolveLogin;
+  let logins = 0;
   const fixture = {
     state: { authenticated: false },
     loginOperation: null,
     show() {},
+    setState(patch) { this.state = { ...this.state, ...patch }; },
     snapshot() { return { authenticated: false }; },
     logger: { info() {} },
-    view: { webContents: { getURL: () => "https://chatgpt.com/", loadURL: async () => {} } },
-    probeAuthentication: async () => {},
-    waitForAuthenticated: async () => {
-      waits += 1;
+    loginWithSystemBrowser: async () => {
+      logins += 1;
       return await new Promise((resolve) => { resolveLogin = resolve; });
     },
+    installSystemBrowserLogin: async (transfer) => transfer.browser,
     activateHomeSurface() {},
     withManualOperation: async (_name, action) => await action(),
   };
@@ -275,17 +337,25 @@ test("concurrent login requests share one authentication operation", async () =>
   const second = BrowserHost.prototype.openLogin.call(fixture);
   assert.equal(first, second);
   await Promise.resolve();
-  assert.equal(waits, 1);
-  resolveLogin({ authenticated: true });
+  assert.equal(logins, 1);
+  assert.equal(BrowserHost.prototype.currentOperation.call(fixture), "ChatGPT login");
+  resolveLogin({ browser: { authenticated: true }, storageState: {}, cleanup() {} });
   assert.deepEqual(await first, { authenticated: true });
+  assert.equal(BrowserHost.prototype.currentOperation.call(fixture), null);
+});
+
+test("launcher quit remains gated through Electron import and transfer cleanup", () => {
+  const source = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
+  assert.match(
+    source,
+    /runtimeHost\?\.currentOperation\(\) \|\| browserHost\?\.currentOperation\(\)/,
+  );
 });
 
 test("logout clears only the owned ChatGPT session and returns to the sign-in surface", async () => {
   const calls = [];
   let currentUrl = "https://chatgpt.com/?temporary-chat=true";
-  const authView = { webContents: { isDestroyed: () => false } };
   const fixture = {
-    authView,
     state: { authenticated: true, status: "ready" },
     view: {
       webContents: {
@@ -298,10 +368,6 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
           clearStorageData: async () => calls.push(["clearStorageData"]),
         },
       },
-    },
-    closeAuthView(view, closeContents, refreshMain) {
-      calls.push(["closeAuthView", view, closeContents, refreshMain]);
-      this.authView = null;
     },
     setState(patch) {
       this.state = { ...this.state, ...patch };
@@ -327,9 +393,8 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.equal(result.authenticated, false);
   assert.equal(result.status, "signed-out");
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
-  assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
-  assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  assert.deepEqual(calls[1], ["clearStorageData"]);
+  assert.deepEqual(calls[3], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });
@@ -353,93 +418,151 @@ test("launcher shutdown persists ChatGPT DOM storage and cookies before browser 
   assert.deepEqual(calls, ["storage", "cookies"]);
 });
 
-test("OAuth completion is confirmed on the primary Temporary Chat surface before login succeeds", async () => {
-  let primaryReady = false;
-  const stateUpdates = [];
-  const completedAuthView = {
-    webContents: {
-      isDestroyed: () => false,
-      executeJavaScript: async () => ({ composer: true, readyState: "complete" }),
+test("system-browser storage transfer imports only allowlisted ChatGPT/OpenAI state", async () => {
+  const validated = validateChatGptStorageState({
+    cookies: [
+      {
+        name: "session",
+        value: "secret-session",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      },
+      {
+        name: "provider",
+        value: "must-not-cross",
+        domain: ".google.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+      },
+      {
+        name: "__Host-session",
+        value: "host-only-session",
+        domain: "chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      },
+    ],
+    origins: [
+      { origin: "https://chatgpt.com", localStorage: [{ name: "theme", value: "dark" }] },
+      { origin: "https://accounts.google.com", localStorage: [{ name: "provider", value: "secret" }] },
+    ],
+  });
+
+  assert.equal(validated.cookies[0].domain, ".chatgpt.com");
+  assert.equal(Object.hasOwn(validated.cookies[1], "domain"), false);
+  assert.deepEqual(validated.localStorage, [{ name: "theme", value: "dark" }]);
+});
+
+test("system-browser login proves the Electron composer and cleans transfer state", async () => {
+  const calls = [];
+  const browserSession = {
+    clearStorageData: async () => calls.push("clear"),
+    flushStorageData: () => calls.push("flush-storage"),
+    cookies: {
+      set: async (cookie) => calls.push(["cookie", cookie]),
+      flushStore: async () => calls.push("flush-cookies"),
     },
   };
-  const fixture = {
-    activeTraceId: null,
-    manualOperation: "ChatGPT login",
-    authView: completedAuthView,
-    state: { authenticated: false },
-    logger: { info() {} },
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(),
     view: {
       webContents: {
-        getURL: () => primaryReady
-          ? "https://chatgpt.com/?temporary-chat=true"
-          : "https://chatgpt.com/auth/login",
         isDestroyed: () => false,
-        executeJavaScript: async () => ({
-          composer: primaryReady,
-          readyState: "complete",
-        }),
-        loadURL: async (url) => {
-          assert.equal(url, "https://chatgpt.com/?temporary-chat=true");
-          primaryReady = true;
+        session: browserSession,
+        loadURL: async (url) => calls.push(["load", url]),
+        executeJavaScript: async (script) => calls.push(["script", script]),
+      },
+    },
+    waitForAuthenticated: async () => ({ authenticated: true }),
+    persistSession: async () => calls.push("persist"),
+    activateHomeSurface: () => calls.push("activate"),
+    show: () => calls.push("show"),
+    logger: { info: (event) => calls.push(["log", event]) },
+  });
+  const transfer = {
+    storageState: {
+      cookies: [{
+        name: "session",
+        value: "secret-session",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      }],
+      origins: [{ origin: "https://chatgpt.com", localStorage: [{ name: "theme", value: "dark" }] }],
+    },
+    cleanup: async () => calls.push("cleanup"),
+  };
+
+  const result = await BrowserHost.prototype.installSystemBrowserLogin.call(fixture, transfer);
+
+  assert.equal(result.authenticated, true);
+  assert.equal(calls.filter((call) => call === "clear").length, 1);
+  assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "cookie"));
+  assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "script" && call[1].includes("theme")));
+  assert.equal(calls.at(-1), "cleanup");
+});
+
+test("failed Electron session import clears partial state and cleans the transfer", async () => {
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { authenticated: false },
+    turnTabs: new Map(),
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        loadURL: async (url) => calls.push(["load", url]),
+        session: {
+          clearStorageData: async () => calls.push("clear"),
+          flushStorageData: () => calls.push("flush-storage"),
+          cookies: {
+            set: async () => { throw new Error("synthetic cookie failure"); },
+            flushStore: async () => calls.push("flush-cookies"),
+          },
         },
       },
     },
-    closeAuthView(view, closeContents, refreshMain) {
-      assert.equal(view, completedAuthView);
-      assert.equal(closeContents, true);
-      assert.equal(refreshMain, false);
-      this.authView = null;
-    },
-    setState(patch) {
-      this.state = { ...this.state, ...patch };
-      stateUpdates.push(patch);
-    },
-    snapshot() {
-      return this.state;
-    },
-  };
-
-  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
-
-  assert.equal(result.authenticated, true);
-  assert.equal(fixture.authView, null);
-  assert.equal(stateUpdates.at(-1).url, "https://chatgpt.com/?temporary-chat=true");
-});
-
-test("an authenticated primary surface closes a stale auth popup before browser automation", async () => {
-  const staleAuthView = {
-    webContents: {
-      isDestroyed: () => false,
-      executeJavaScript: async () => ({ composer: false, readyState: "complete" }),
-    },
-  };
-  const closed = [];
-  const fixture = {
-    activeTraceId: null,
-    manualOperation: "connector verification",
-    authView: staleAuthView,
-    state: { authenticated: true },
-    logger: { info() {} },
-    view: {
-      webContents: {
-        getURL: () => "https://chatgpt.com/?temporary-chat=true",
-        isDestroyed: () => false,
-        executeJavaScript: async () => ({ composer: true, readyState: "complete" }),
-      },
-    },
-    closeAuthView(view, closeContents, refreshMain) {
-      closed.push([view, closeContents, refreshMain]);
-      this.authView = null;
-    },
     setState(patch) { this.state = { ...this.state, ...patch }; },
-    snapshot() { return this.state; },
+  });
+  const transfer = {
+    storageState: {
+      cookies: [{
+        name: "session",
+        value: "secret-session",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      }],
+      origins: [],
+    },
+    cleanup: async () => calls.push("cleanup"),
   };
 
-  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
-
-  assert.equal(result.authenticated, true);
-  assert.equal(fixture.authView, null);
-  assert.deepEqual(closed, [[staleAuthView, true, false]]);
+  await assert.rejects(
+    BrowserHost.prototype.installSystemBrowserLogin.call(fixture, transfer),
+    /synthetic cookie failure/,
+  );
+  assert.equal(calls.filter((call) => call === "clear").length, 2);
+  assert.ok(calls.some((call) => Array.isArray(call)
+    && call[0] === "load"
+    && call[1] === "about:blank#codex-web-gpt-browser-host"));
+  assert.equal(fixture.state.authenticated, false);
+  assert.equal(calls.at(-1), "cleanup");
 });
 
 test("browser chrome navigation delegates to WebContents navigation history", () => {
@@ -450,6 +573,37 @@ test("browser chrome navigation delegates to WebContents navigation history", ()
 
   assert.deepEqual(calls, ["back", "reload"]);
   assert.throws(() => navigateBrowser(webContents, "unknown"), /Unknown browser navigation action/);
+});
+
+test("browser zoom in, out, and reset are symmetric across owned views", () => {
+  const home = createContents();
+  const turn = createContents();
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { zoomFactor: 1 },
+    view: { webContents: home.webContents },
+    turnTabs: new Map([["turn", { view: { webContents: turn.webContents } }]]),
+    snapshot() { return { zoomFactor: this.state.zoomFactor }; },
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    publishState() {},
+  });
+
+  assert.equal(BrowserHost.prototype.zoom.call(fixture, "in").zoomFactor, 1.1);
+  assert.equal(BrowserHost.prototype.zoom.call(fixture, "out").zoomFactor, 1);
+  BrowserHost.prototype.zoom.call(fixture, "in");
+  assert.equal(BrowserHost.prototype.zoom.call(fixture, "reset").zoomFactor, 1);
+  assert.deepEqual(home.calls.filter((call) => Array.isArray(call) && call[0] === "zoom"), [
+    ["zoom", 1.1],
+    ["zoom", 1],
+    ["zoom", 1.1],
+    ["zoom", 1],
+  ]);
+  assert.deepEqual(turn.calls.filter((call) => Array.isArray(call) && call[0] === "zoom"), [
+    ["zoom", 1.1],
+    ["zoom", 1],
+    ["zoom", 1.1],
+    ["zoom", 1],
+  ]);
+  assert.throws(() => BrowserHost.prototype.zoom.call(fixture, "fit"), /Unknown browser zoom action/);
 });
 
 test("browser chrome state is read from the owned WebContents", () => {
@@ -870,7 +1024,6 @@ test("selecting a task tab shows and focuses its owned Playwright surface", () =
   const second = { id: "tab-second", view: makeView("second") };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     view: makeView("home"),
-    authView: null,
     turnTabs: new Map([[first.id, first], [second.id, second]]),
     selectedTabId: first.id,
     visible: true,

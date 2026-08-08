@@ -20,11 +20,11 @@
 
 Free 和 Go 账户会在 Codex 原生模型选择器中看到 **ChatGPT Web — Luna**。具有推理选择器的
 账户仍会按订阅权限看到 **Instant**、**Medium**、**High**、**Extra High** 和 **Pro**。
-桥接程序会把完整的 Codex 任务上下文发送到一个全新的 ChatGPT 临时聊天，附加图片，并将
-可见的推理过程、工具活动和 Markdown 流式传回同一个 Codex 任务。
+桥接程序会把当前编译后的 Codex 任务上下文发送到一个全新的 ChatGPT 临时聊天，附加图片，
+并将可见的推理过程、工具活动和 Markdown 流式传回同一个 Codex 任务。
 
 <p align="center">
-  <img src="assets/demo.gif" alt="ChatGPT Web 在原生 Codex harness 中运行" width="960">
+  <img src="assets/demo.gif" alt="ChatGPT Web 实时轮次正在使用原生 Codex harness" width="960">
 </p>
 
 ```text
@@ -39,21 +39,23 @@ Codex 任务的工具。
 
 ## 亮点
 
-- **精致的跨平台启动器。** 一条命令即可安装原生 macOS、Windows 或 Linux 应用。登录、设置、
+- **精致的跨平台启动器。** 一条命令即可安装原生 macOS、Windows 或 Linux 应用。登录流程、设置、
   冒烟测试、MCP 指南、运行状态和本地日志都集中在同一处；内置浏览器还能让你实时看到每个
   ChatGPT 轮次的执行过程。最多可同时运行五个与 Codex 任务绑定的浏览器标签页；此上限用于避免
   对 ChatGPT 账户产生过多并行流量。
 - **ChatGPT 就是所选模型。** 它作为 Codex 原生模型运行，而不是由另一个宿主模型调用的工具。
   原有的模型选择器、任务生命周期、流式输出、追踪和工具界面保持不变。
 - **本地优先的任务会话。** Codex 仍然是电脑上任务历史的真实来源。每个浏览器轮次都会从一个
-  全新的 ChatGPT 临时聊天开始，并接收完整的累计 Codex 上下文，因此浏览器聊天不会在任务之间
-  复用，也不会加入普通 ChatGPT 历史记录。
+  全新的 ChatGPT 临时聊天开始，并接收当前编译后的上下文。达到实测浏览器上限时会触发压缩，
+  Luna 则通过自适应滚动检查点携带已完成的状态。浏览器聊天不会在任务之间复用，也不会加入普通
+  ChatGPT 历史记录。
 - **通过 MCP 使用完整 Codex harness。** 在完整模式下，Instant 到 Extra High 可以通过 MCP
   使用当前 Codex 任务的文件系统、shell、图片、审批以及已配置的工具和应用。调用及其真实结果
   会留在同一个浏览器响应中，不会被模拟成文本。
 - **Pro 仍然实用。** Pro 是唯一的例外：ChatGPT 当前的 Pro 模式不会暴露此桥接程序所需的自定义
   MCP 连接器。它的原生能力（包括网页搜索和研究）仍然可用。你可以先用 Instant 到 Extra High
-  收集本地工作区上下文，再切换到 Pro；Pro 会收到完整的累计 Codex 任务，用于更深入的分析。
+  收集本地工作区上下文，再切换到 Pro；Pro 会收到当前编译后的 Codex 上下文，用于更深入的分析，
+  同时仍受实测浏览器上限和压缩规则约束。
 - **故障时明确失败，并经过人工测试。** 模型选择、超长内联上下文、图片、流式输出、可见追踪、
   上下文压缩、原生工具轮次、取消操作和 Pro 均已在 macOS 和 Windows 11 上完成端到端测试。
   UI 变化或能力缺失会产生明确错误，而不是静默回退。
@@ -81,7 +83,8 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 然后在应用中完成三项检查：
 
-1. 在内置浏览器中登录 ChatGPT。
+1. 在启动器打开的系统 Chrome/Chromium 窗口中登录，然后关闭该专用窗口。启动器会先验证会话，
+   再将其导入私有的内置浏览器 profile。
 2. 运行浏览器冒烟测试。
 3. 点击 **安装模型**，重启一次 Codex，然后选择一个 **ChatGPT Web — …** 模型。
 
@@ -89,7 +92,9 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令的情况下引导你
 完成完整 harness 设置。
 
-打包后的仅浏览器模式不需要 Google Chrome、模型 API 密钥、系统级 Node/Bun 或单独下载浏览器。
+打包后的启动器只在兼容 passkey 的登录交接过程中使用已安装的 Google Chrome 或 Chromium。
+ChatGPT 模型轮次仍在启动器的内置浏览器中运行，不需要模型 API 密钥、系统级 Node/Bun，也不会
+由本项目另行下载浏览器。
 
 **从源码运行**
 
@@ -109,7 +114,7 @@ bun run app
 | **完整 harness** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 非 Pro 模型：连接器可用时支持；Pro：只读 | OpenAI 隧道 + ChatGPT 连接器 |
 
 模型选择器中的每一项都对应一个固定的 ChatGPT 模式。Codex 仍会显示内置的 Effort 和 Speed
-选项，但更改它们不会在后台静默切换所选的浏览器模型。Pro 会收到 Codex 已经收集的完整上下文，
+选项，但更改它们不会在后台静默切换所选的浏览器模型。Pro 会收到 Codex 当前编译后的上下文，
 但 ChatGPT Pro 无法主动发起本地 MCP/工具调用。
 
 ## 完整 harness
@@ -147,6 +152,9 @@ bun run app
 
 - 这是非官方浏览器自动化，并非 OpenAI API。ChatGPT UI 变更可能破坏选择器；发生变化时会明确
   失败，而不是静默切换模型或传输方式。
+- ChatGPT 针对不同账户设置的输入框上限小于某些底层模型的上下文窗口。实测边界以及实现更大且
+  确定性传输的要求记录在
+  [#76](https://github.com/miuuyy/codex-chatgpt-web/issues/76) 中。
 - 浏览器状态是敏感的登录凭据，loopback 监听器也可被同一本地用户运行的进程访问。切勿共享
   启动器 profile，并仅在可信工作站上使用。
 - 发布包目前支持 macOS 13+（arm64/x64）、Windows x64 和 Linux x64。浏览器流程已在 macOS

@@ -20,12 +20,12 @@
 
 Free and Go accounts get **ChatGPT Web — Luna** in Codex's native model picker. Accounts that
 expose the reasoning selector keep **Instant**, **Medium**, **High**, **Extra High**, and **Pro** as
-their subscription allows. The bridge sends the complete Codex task context to a fresh ChatGPT
-Temporary Chat, attaches images, and streams visible reasoning, tool activity, and Markdown back
-into the same Codex task.
+their subscription allows. The bridge sends the current compiled Codex task context to a fresh
+ChatGPT Temporary Chat, attaches images, and streams visible reasoning, tool activity, and Markdown
+back into the same Codex task.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="ChatGPT Web running inside the native Codex harness" width="960">
+  <img src="assets/demo.gif" alt="A live ChatGPT Web turn using the native Codex harness" width="960">
 </p>
 
 ```text
@@ -41,23 +41,26 @@ connects ChatGPT back to the tools of that same Codex task.
 ## Highlights
 
 - **A polished cross-platform launcher.** One command installs the native macOS, Windows, or Linux
-  app. It keeps sign-in, setup, smoke testing, MCP guidance, runtime health, and local logs in one
-  place, while the embedded browser lets you watch every ChatGPT turn as it happens. Up to five
-  task-bound browser tabs can run in parallel; the cap avoids excessive parallel account traffic.
+  app. It keeps sign-in orchestration, setup, smoke testing, MCP guidance, runtime health, and local
+  logs in one place, while the embedded browser lets you watch every ChatGPT turn as it happens. Up
+  to five task-bound browser tabs can run in parallel; the cap avoids excessive parallel account
+  traffic.
 - **ChatGPT is the selected model.** It runs as a native Codex model, not as a tool called by
   another host model. The original model picker, task lifecycle, streaming, tracing, and tool UI
   remain intact.
 - **Local-first task sessions.** Codex remains the source of truth for task history on your
-  computer. Every browser turn starts in a fresh ChatGPT Temporary Chat and receives the complete
-  accumulated Codex context, so browser chats are not reused across tasks or added to normal
-  ChatGPT history.
+  computer. Every browser turn starts in a fresh ChatGPT Temporary Chat and receives the current
+  compiled context. Measured browser ceilings trigger compaction, while Luna carries completed
+  state through an adaptive rolling checkpoint. Browser chats are never reused across tasks or
+  added to normal ChatGPT history.
 - **The full Codex harness over MCP.** In full mode, Instant through Extra High can use the active
   Codex task's filesystem, shell, images, approvals, and configured tools/apps through MCP. Calls
   and real results stay inside the same browser response—nothing is simulated as text.
 - **Pro stays useful.** Pro is the one exception: ChatGPT's current Pro mode does not expose the
   custom MCP connector this bridge needs. Its native capabilities, including web search and
   research, remain available. Gather local workspace context with Instant through Extra High,
-  switch to Pro, and Pro receives the complete accumulated Codex task for deeper analysis.
+  switch to Pro, and Pro receives the current compiled Codex context for deeper analysis, subject
+  to the same measured browser ceiling and compaction rules.
 - **Fail-closed and manually tested.** Model selection, long inline context, images, streaming,
   visible trace, compaction, native tool rounds, cancellation, and Pro were exercised end-to-end on
   macOS and Windows 11. UI drift and missing capabilities produce explicit errors rather than
@@ -89,7 +92,9 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 Then complete the three checks in the app:
 
-1. Sign in to ChatGPT in the embedded browser.
+1. Sign in through the system Chrome/Chromium window opened by the launcher, then close that
+   dedicated window. The launcher verifies the session before importing it into its private
+   embedded-browser profile.
 2. Run the browser smoke test.
 3. Press **Install models**, restart Codex once, and select a **ChatGPT Web — …** model.
 
@@ -97,8 +102,9 @@ The launcher detects the current account's ChatGPT controls during setup: Free/G
 only Luna, while Pro appears only when the signed-in account exposes it. The separate **MCP** page
 is optional and guides the full-harness setup without terminal commands.
 
-A packaged browser-only install needs no Google Chrome, model API key, system Node/Bun, or separate
-browser download.
+The packaged launcher uses an installed Google Chrome or Chromium only for the passkey-compatible
+sign-in handoff. ChatGPT model turns still run in the launcher's embedded browser and need no model
+API key, system Node/Bun, or project-managed browser download.
 
 **Run from source**
 
@@ -118,8 +124,8 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 | **Full harness** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | Non-Pro models: yes when the connector is available; Pro: read-only | OpenAI tunnel + ChatGPT connector |
 
 Every picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and Speed
-rows, but changing them cannot silently change the selected browser model. Pro receives the full
-context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
+rows, but changing them cannot silently change the selected browser model. Pro receives the current
+compiled context from Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
 
 ## Full harness
 
@@ -164,6 +170,9 @@ capture a screenshot at every checkpoint during an investigation.
 
 - This is unofficial browser automation, not an OpenAI API. ChatGPT UI changes can break selectors;
   drift fails explicitly instead of silently switching model or transport.
+- ChatGPT's account-specific composer ceilings are smaller than some underlying model windows.
+  The measured boundaries and requirements for a larger deterministic transport are tracked in
+  [#76](https://github.com/miuuyy/codex-chatgpt-web/issues/76).
 - Browser state is a sensitive login artifact, and the loopback listener is reachable by processes
   running as the same local user. Never share the launcher profile; use a trusted workstation.
 - Release packages currently target macOS 13+ (arm64/x64), Windows x64, and Linux x64. The browser

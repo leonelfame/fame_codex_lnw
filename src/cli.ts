@@ -3,9 +3,10 @@ import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { CHATGPT_CONNECTOR_NAME, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
+import { CHATGPT_CONNECTOR_NAME, defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 import {
   activateCodexIntegration,
@@ -115,6 +116,52 @@ function assertNoArgs(args: string[]): void {
   if (args.length > 0) throw new Error(`Unknown arguments: ${args.join(" ")}`);
 }
 
+function authorizeLauncherControl(operation: string): void {
+  const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+  const supplied = process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN?.trim();
+  delete process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN;
+  if (!descriptorPath || !supplied) {
+    throw new Error(`Launcher-controlled ${operation} requires a live launcher authorization`);
+  }
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const expectedBytes = Buffer.from(descriptor.control.token);
+  const suppliedBytes = Buffer.from(supplied);
+  if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
+    throw new Error(`Launcher-controlled ${operation} authorization is invalid`);
+  }
+}
+
+async function loginCommand(args: string[]): Promise<void> {
+  const launcherControl = takeFlag(args, "--launcher-control");
+  if (!launcherControl) {
+    assertNoArgs(args);
+    const config = loadConfig();
+    if (config.browserHost === "launcher") {
+      throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
+    }
+    const result = await loginToChatGpt(config);
+    stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
+    return;
+  }
+
+  const chromeExecutablePath = takeOption(args, "--chrome");
+  const storageStatePath = takeOption(args, "--storage-state");
+  assertNoArgs(args);
+  authorizeLauncherControl("login");
+  if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
+    throw new Error("Launcher-controlled login requires --chrome with an absolute executable path");
+  }
+  if (!storageStatePath || !isAbsolute(storageStatePath)) {
+    throw new Error("Launcher-controlled login requires --storage-state with an absolute path");
+  }
+  await loginToChatGpt({
+    ...defaultConfig(),
+    chromeExecutablePath,
+    storageStatePath,
+  });
+  stdout.write("Launcher-controlled ChatGPT login captured and verified.\n");
+}
+
 async function setupCommand(args: string[]): Promise<void> {
   const browserOnly = takeFlag(args, "--browser-only");
   const full = takeFlag(args, "--full");
@@ -175,7 +222,7 @@ async function setupCommand(args: string[]): Promise<void> {
   stdout.write(`Config: ${result.configPath}\n`);
   if (result.connectorSetupRequired) {
     stdout.write("One account-level step remains: attach the tunnel to the ChatGPT connector named in config.\n");
-    stdout.write("Open: https://chatgpt.com/#settings/Connectors\n");
+    stdout.write("Open: https://chatgpt.com/#settings/Plugins\n");
   }
   stdout.write("Restart the Codex app once so its native model catalog refreshes through the installed route.\n");
 }
@@ -265,7 +312,7 @@ async function openCommand(args: string[]): Promise<void> {
   const urls: Record<string, string> = {
     tunnels: "https://platform.openai.com/settings/organization/tunnels",
     "runtime-keys": "https://platform.openai.com/settings/organization/api-keys",
-    connectors: "https://chatgpt.com/#settings/Connectors",
+    connectors: "https://chatgpt.com/#settings/Plugins",
   };
   const url = target ? urls[target] : undefined;
   if (!url) throw new Error("Choose one of: tunnels, runtime-keys, connectors");
@@ -282,20 +329,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
   const keepData = takeFlag(args, "--keep-data");
   const launcherControl = takeFlag(args, "--launcher-control");
   assertNoArgs(args);
-  if (launcherControl) {
-    const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
-    const supplied = process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN?.trim();
-    if (!descriptorPath || !supplied) {
-      throw new Error("Launcher-controlled uninstall requires a live launcher authorization");
-    }
-    const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-    const expectedBytes = Buffer.from(descriptor.control.token);
-    const suppliedBytes = Buffer.from(supplied);
-    if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
-      throw new Error("Launcher-controlled uninstall authorization is invalid");
-    }
-    delete process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN;
-  }
+  if (launcherControl) authorizeLauncherControl("uninstall");
   if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
     throw new Error("Uninstall cancelled");
   }
@@ -335,15 +369,8 @@ async function main(): Promise<void> {
   const command = args.shift() ?? "help";
   if (command === "help") stdout.write(HELP);
   else if (command === "setup") await setupCommand(args);
-  else if (command === "login") {
-    assertNoArgs(args);
-    const config = loadConfig();
-    if (config.browserHost === "launcher") {
-      throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
-    }
-    const result = await loginToChatGpt(config);
-    stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
-  } else if (command === "doctor" || command === "status") await doctorCommand(args);
+  else if (command === "login") await loginCommand(args);
+  else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "route") await routeCommand(args);
   else if (command === "browser") {
     const action = args.shift();

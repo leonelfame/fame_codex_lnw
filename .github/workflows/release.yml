@@ -89,7 +89,7 @@ jobs:
         run: |
           expected="v$(jq -r .version package.json)"
           test "$GITHUB_REF_NAME" = "$expected"
-      - name: Add licenses and installers
+      - name: Add licenses, installers, and demo
         run: |
           cp LICENSE release-assets/LICENSE
           cp LICENSES/NOTICE.md release-assets/NOTICE.md
@@ -99,6 +99,7 @@ jobs:
           cp scripts/install.sh release-assets/install.sh
           cp scripts/install-launcher.sh release-assets/install-launcher.sh
           cp scripts/install-launcher.ps1 release-assets/install-launcher.ps1
+          cp assets/demo.gif "release-assets/codex-web-gpt-${GITHUB_REF_NAME#v}-demo.gif"
       - name: Flatten release assets
         run: |
           cd release-assets
