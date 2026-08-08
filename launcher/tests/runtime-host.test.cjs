@@ -66,6 +66,7 @@ test("core setup preserves an existing full-harness installation", async () => {
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
     "--refresh-account-capabilities",
+    "--replace-codex-route",
     "--acknowledge-unofficial",
     "--restart-service",
     "--app-name",
@@ -85,6 +86,7 @@ test("core setup starts in browser-only mode when no installation exists", async
   assert.equal(result.mode, "browser-only");
   assert.deepEqual(fixture.invocation().args.slice(0, 2), ["setup", "--browser-only"]);
   assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
+  assert.equal(fixture.invocation().args.includes("--replace-codex-route"), true);
   assert.deepEqual(fixture.invocation().args.slice(-2), ["--chrome", "/usr/bin/chromium"]);
 });
 
@@ -283,10 +285,12 @@ test("MCP setup reuses valid private credentials without exposing or rewriting t
       "/runtime/launcher-browser.json",
       "--app-name",
       "Codex Native2",
+      "--replace-codex-route",
       "--acknowledge-unofficial",
       "--restart-service",
     ]);
     assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), false);
+    assert.equal(fixture.invocation().args.includes("--replace-codex-route"), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

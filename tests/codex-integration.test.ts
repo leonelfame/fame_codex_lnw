@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -450,6 +450,137 @@ describe("reversible native Codex route integration", () => {
     writeFileSync(configPath, changed);
     expect(() => uninstallCodexIntegration()).toThrow("changed after setup");
     expect(readFileSync(configPath, "utf8")).toBe(changed);
+  });
+
+  test("explicit replacement adopts a newer Codex route as the reversible baseline", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = [
+      'model = "gpt-5.6-sol"',
+      'openai_base_url = "https://first.example/v1"',
+      "",
+      "[features]",
+      "remote_compaction_v2 = true # user choice",
+      "multi_agent = false # user choice",
+      "multi_agent_v2 = true # user choice",
+      "goals = true",
+      "",
+    ].join("\n");
+    writeFileSync(configPath, original);
+    const config = defaultConfig("full");
+
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    const changed = readFileSync(configPath, "utf8")
+      .replace('openai_base_url = "http://127.0.0.1:17841/v1"', 'openai_base_url = "https://newer.example/v1"');
+    writeFileSync(configPath, changed);
+
+    expect(() => preflightCodexIntegration(config)).toThrow("changed after setup");
+    expect(() => preflightCodexIntegration(config, { replaceExistingRoute: true })).not.toThrow();
+    expect(readFileSync(configPath, "utf8")).toBe(changed);
+
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    expect(readFileSync(configPath, "utf8")).toContain(
+      'openai_base_url = "http://127.0.0.1:17841/v1"',
+    );
+    expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
+    expect(readFileSync(configPath, "utf8")).toBe(
+      original.replace("https://first.example/v1", "https://newer.example/v1"),
+    );
+  });
+
+  test("explicit replacement recovers a stale journal after Codex config was deleted", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    const config = defaultConfig("browser-only");
+    installCodexIntegration(config);
+    rmSync(configPath);
+
+    expect(() => preflightCodexIntegration(config)).toThrow("Codex config is missing");
+    expect(() => preflightCodexIntegration(config, { replaceExistingRoute: true })).not.toThrow();
+    expect(() => readFileSync(configPath, "utf8")).toThrow();
+
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
+    expect(readFileSync(configPath, "utf8")).toBe("");
+  });
+
+  test("plain setup stays fail-closed when a disconnected integration config was deleted", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    const config = defaultConfig("browser-only");
+    installCodexIntegration(config);
+    deactivateCodexIntegration();
+    rmSync(configPath);
+
+    expect(() => preflightCodexIntegration(config)).toThrow("Codex config is missing");
+    expect(() => installCodexIntegration(config)).toThrow("Codex config is missing");
+    expect(existsSync(configPath)).toBe(false);
+  });
+
+  test("explicit replacement restores still-owned provider fields while adopting a changed URL", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = [
+      'model = "gpt-5.6-sol"',
+      'openai_base_url = "https://first.example/v1"',
+      'model_provider = "openai"',
+      'model_catalog_json = "/tmp/original-models.json"',
+      "",
+      "[features]",
+      "goals = true",
+      "",
+    ].join("\n");
+    writeFileSync(configPath, original);
+    const config = defaultConfig("browser-only");
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    writeFileSync(
+      configPath,
+      readFileSync(configPath, "utf8").replace(
+        'openai_base_url = "http://127.0.0.1:17841/v1"',
+        'openai_base_url = "https://newer.example/v1"',
+      ),
+    );
+
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    deactivateCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(
+      original.replace("https://first.example/v1", "https://newer.example/v1"),
+    );
+  });
+
+  test("explicit replacement adopts a new provider while restoring the still-owned URL and catalog", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = [
+      'model = "gpt-5.6-sol"',
+      'openai_base_url = "https://first.example/v1"',
+      'model_provider = "openai"',
+      'model_catalog_json = "/tmp/original-models.json"',
+      "",
+      "[features]",
+      "goals = true",
+      "",
+    ].join("\n");
+    writeFileSync(configPath, original);
+    const config = defaultConfig("browser-only");
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    writeFileSync(
+      configPath,
+      readFileSync(configPath, "utf8").replace(
+        "\n[features]",
+        '\nmodel_provider = "custom-provider"\n\n[features]',
+      ),
+    );
+
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    deactivateCodexIntegration();
+    const restored = readFileSync(configPath, "utf8");
+    expect(restored).toContain('openai_base_url = "https://first.example/v1"');
+    expect(restored).toContain('model_provider = "custom-provider"');
+    expect(restored).toContain('model_catalog_json = "/tmp/original-models.json"');
+    expect(restored).not.toContain("127.0.0.1:17841");
   });
 
   test("fails closed when the managed compaction feature changes after setup", () => {

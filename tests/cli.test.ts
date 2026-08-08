@@ -28,6 +28,10 @@ test("setup validates the port before performing runtime work", async () => {
     const result = await runCli([
       "setup",
       "--browser-only",
+      "--chrome",
+      process.execPath,
+      "--browser-host-descriptor",
+      join(root, "launcher-browser.json"),
       "--port",
       "0",
       "--acknowledge-unofficial",
@@ -39,6 +43,7 @@ test("setup validates the port before performing runtime work", async () => {
     const { stderr } = result;
     expect(result.exitCode).toBe(1);
     expect(stderr).toContain("--port must be an integer from 1 to 65535");
+    expect(stderr).not.toContain("Choose either --chrome or --browser-host-descriptor");
     expect(stderr).not.toContain("Unknown arguments");
   } finally {
     rmSync(root, { recursive: true, force: true });
