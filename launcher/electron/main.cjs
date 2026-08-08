@@ -365,6 +365,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:snapshot", async () => ({
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
+    connectorName: runtimeHost.browserConnectorName(),
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
@@ -444,6 +445,8 @@ function registerIpc({ logger, stateStore }) {
         .map((check) => check.message)
         .filter(Boolean)
         .join("; ") || "The local MCP runtime is not healthy";
+      const state = stateStore.update({ mcpSetupComplete: false });
+      send("launcher:state-changed", state);
       publishOperation({ name: operationName, status: "failed", message });
       return report;
     }
@@ -456,6 +459,8 @@ function registerIpc({ logger, stateStore }) {
       return report;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const state = stateStore.update({ mcpSetupComplete: false });
+      send("launcher:state-changed", state);
       publishOperation({ name: operationName, status: "failed", message });
       throw error;
     }
@@ -513,7 +518,9 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:setup-core", async () => {
     const browser = await browserHost.probeAuthentication();
     if (!browser.authenticated) throw new Error("Sign in to ChatGPT before installing the Codex integration");
-    if (!(smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()))) {
+    const setupState = stateStore.read();
+    if (!setupState.coreSetupComplete
+      && !(smokePassedThisSession || smokePassedForCurrentVersion(setupState))) {
       throw new Error("Run the browser smoke test before installing the Codex integration");
     }
     const result = await runtimeHost.setupCore();
@@ -522,11 +529,15 @@ function registerIpc({ logger, stateStore }) {
       coreSetupComplete: true,
       codexCatalogVerified: false,
       codexRestartRequired: true,
-      ...(result.mode === "browser-only" ? {
+      ...(result.mode === "full" ? {
+        mcpRuntimeInstalled: true,
+        mcpSetupComplete: false,
+        mcpGuideStep: 2,
+      } : {
         mcpSetupComplete: false,
         mcpRuntimeInstalled: false,
         mcpGuideStep: 0,
-      } : {}),
+      }),
     });
     await browserHost.returnToIdle().catch((error) => {
       logger.warn("browser.idle_cleanup_failed", {
@@ -543,7 +554,12 @@ function registerIpc({ logger, stateStore }) {
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
       replace: input?.replace === true,
     });
-    stateStore.update({ mcpRuntimeInstalled: true, mcpGuideStep: 2, codexRestartRequired: true });
+    stateStore.update({
+      mcpRuntimeInstalled: true,
+      mcpSetupComplete: false,
+      mcpGuideStep: 2,
+      codexRestartRequired: true,
+    });
     return { ok: true, stdout: result.stdout };
   });
   handle("launcher:set-mcp-step", (_event, step) => {
@@ -608,6 +624,7 @@ async function requestQuit() {
     await runtimeSupervisor?.shutdown();
     stopCatalogVerificationMonitor();
     quitting = true;
+    await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
     exitCommitted = true;
@@ -686,15 +703,6 @@ async function start() {
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
   }).start();
-  browserHost = new BrowserHost({
-    window: mainWindow,
-    descriptorPath: BROWSER_DESCRIPTOR_PATH,
-    cdpPort,
-    control: browserControl.descriptor(),
-    helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
-    logger,
-    publishState: (state) => send("launcher:browser-state", state),
-  });
   runtimeSupervisor = new RuntimeSupervisor({
     app,
     logger,
@@ -715,6 +723,17 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
   });
+  browserHost = new BrowserHost({
+    window: mainWindow,
+    descriptorPath: BROWSER_DESCRIPTOR_PATH,
+    cdpPort,
+    control: browserControl.descriptor(),
+    getConnectorName: () => runtimeHost.browserConnectorName(),
+    helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
+    logger,
+    publishState: (state) => send("launcher:browser-state", state),
+  });
+  await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),
@@ -788,11 +807,15 @@ async function start() {
         coreSetupComplete: true,
         codexCatalogVerified: false,
         codexRestartRequired: true,
-        ...(upgrade.mode === "browser-only" ? {
+        ...(upgrade.mode === "full" ? {
+          mcpRuntimeInstalled: true,
+          mcpSetupComplete: false,
+          mcpGuideStep: 2,
+        } : {
           mcpRuntimeInstalled: false,
           mcpSetupComplete: false,
           mcpGuideStep: 0,
-        } : {}),
+        }),
       });
       send("launcher:state-changed", state);
       logger.info("runtime.release_upgraded", {
@@ -800,6 +823,7 @@ async function start() {
         toVersion: upgrade.toVersion,
         mode: upgrade.mode,
         bridgeEnabled: upgrade.bridgeEnabled,
+        connectorMigrated: upgrade.connectorMigrated,
       });
     }
     try {

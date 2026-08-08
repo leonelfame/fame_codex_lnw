@@ -18,10 +18,11 @@
   <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
 </p>
 
-Pick **ChatGPT Web — Instant**, **Medium**, **High**, **Extra High**, or **Pro** in Codex's native
-model picker. The bridge sends the complete Codex task context to a fresh ChatGPT Temporary Chat,
-attaches images, and streams visible reasoning, tool activity, and Markdown back into the same
-Codex task.
+Free and Go accounts get **ChatGPT Web — Luna** in Codex's native model picker. Accounts that
+expose the reasoning selector keep **Instant**, **Medium**, **High**, **Extra High**, and **Pro** as
+their subscription allows. The bridge sends the complete Codex task context to a fresh ChatGPT
+Temporary Chat, attaches images, and streams visible reasoning, tool activity, and Markdown back
+into the same Codex task.
 
 <p align="center">
   <img src="assets/demo.gif" alt="ChatGPT Web running inside the native Codex harness" width="960">
@@ -92,8 +93,9 @@ Then complete the three checks in the app:
 2. Run the browser smoke test.
 3. Press **Install models**, restart Codex once, and select a **ChatGPT Web — …** model.
 
-Pro appears only when the signed-in account exposes it. The separate **MCP** page is optional and
-guides the full-harness setup without terminal commands.
+The launcher detects the current account's ChatGPT controls during setup: Free/Go accounts expose
+only Luna, while Pro appears only when the signed-in account exposes it. The separate **MCP** page
+is optional and guides the full-harness setup without terminal commands.
 
 A packaged browser-only install needs no Google Chrome, model API key, system Node/Bun, or separate
 browser download.
@@ -112,8 +114,8 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 
 | Mode | Models | Local Codex tools | Extra setup |
 | --- | --- | --- | --- |
-| **Browser-only** | Plus: Instant–High; Pro: adds Extra High and Pro | No; Codex shows a warning | None |
-| **Full harness** | Plus: Instant–High; Pro: adds Extra High and Pro | Instant–Extra High: yes; Pro: read-only | OpenAI tunnel + ChatGPT connector |
+| **Browser-only** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | No; Codex shows a warning | None |
+| **Full harness** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | Non-Pro models: yes when the connector is available; Pro: read-only | OpenAI tunnel + ChatGPT connector |
 
 Every picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and Speed
 rows, but changing them cannot silently change the selected browser model. Pro receives the full
@@ -130,14 +132,18 @@ not expose a public IP, open an inbound port, or require router forwarding.
    that will use the ChatGPT connector; creating the key is free and does not consume model API
    credits.
 3. Paste the Tunnel ID and API key, then press **Connect harness**.
-4. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
-   exact Tunnel, set **Authentication** to **None**, and name it exactly `Codex Native`.
-5. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
-   types and accepts the full `@Codex Native` mention, then confirms the connector pill.
+4. Enable **Developer Mode** in ChatGPT settings. Create a **new** connector using **Tunnel**, select
+   that exact Tunnel, set **Authentication** to **None**, and name it exactly **Codex Native2**.
+5. If an older **Codex Native** connector exists, leave it untouched. Do not rename or refresh it:
+   ChatGPT caches the public MCP contract by connector identity, and this release uses a new direct
+   turn-token contract. Under **Permissions** on **Codex Native2**, choose **Allow all actions**;
+   **Allow low-risk actions** blocks commands and patches before they reach this runtime. The outer
+   Codex harness still enforces its sandbox and approvals.
+6. Run **Verify runtime**. It selects **Codex Native2** exactly. If only **Codex Native** is found,
+   verification fails with an explicit migration error instead of accepting the legacy connector.
 
-Write/modify actions require a ChatGPT workspace and admin policy that permit them. OpenAI
-currently documents those actions for Business and Enterprise/Edu workspaces; personal Pro is
-limited to read/fetch MCP permissions. See
+Write/modify actions also require the ChatGPT workspace and its administrator policy to permit
+them. See
 [developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
 Unexpected approval prompts fail closed unless `--auto-approve-tool-calls` is explicitly enabled;
 that option clicks **Allow once**, never a permanent grant.
@@ -148,6 +154,11 @@ Use **Activity** for structured local logs and **Settings → Run doctor** for e
 checks. Use **Settings → Cancel retained browser turn** if a stopped task leaves ChatGPT working,
 and **Settings → Remove Codex integration** before deleting the launcher so the previous Codex
 route is restored.
+
+Browser turn diagnostics save bounded JSON state at each checkpoint. Screenshots are captured for
+stalled and failed turns, where the visible UI is needed to diagnose DOM drift without slowing every
+successful step. Set `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` before starting the runtime to also
+capture a screenshot at every checkpoint during an investigation.
 
 ## Limitations and security
 

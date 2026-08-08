@@ -9,6 +9,38 @@ import { VERSION } from "./version";
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
 
+/**
+ * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
+ * contract therefore has a new identity instead of mutating the retired connector in place.
+ */
+export const CHATGPT_CONNECTOR_NAME = "Codex Native2";
+export const LEGACY_CHATGPT_CONNECTOR_NAMES = ["Codex Native"] as const;
+
+export function isLegacyChatGptConnectorName(value: string): boolean {
+  return (LEGACY_CHATGPT_CONNECTOR_NAMES as readonly string[]).includes(value);
+}
+
+export function legacyChatGptConnectorMigrationMessage(legacyName: string): string {
+  return `Legacy ChatGPT connector ${JSON.stringify(legacyName)} was found, but this release requires`
+    + ` a newly created connector named ${JSON.stringify(CHATGPT_CONNECTOR_NAME)}. Create`
+    + ` ${JSON.stringify(CHATGPT_CONNECTOR_NAME)} against the same tunnel with Authentication set to None;`
+    + ` do not rename or refresh ${JSON.stringify(legacyName)}.`;
+}
+
+export function resolveSetupConnectorName(existingName?: string, requestedName?: string): string {
+  if (requestedName !== undefined) {
+    const requested = requestedName.trim();
+    if (!requested || requested.length > 80) throw new Error("Connector name is invalid");
+    if (isLegacyChatGptConnectorName(requested)) {
+      throw new Error(legacyChatGptConnectorMigrationMessage(requested));
+    }
+    return requested;
+  }
+  const existing = existingName?.trim();
+  if (!existing || isLegacyChatGptConnectorName(existing)) return CHATGPT_CONNECTOR_NAME;
+  return existing;
+}
+
 export interface TunnelConfig {
   binaryPath: string;
   tunnelId: string;
@@ -32,6 +64,7 @@ export interface AppConfig {
   storageStatePath: string;
   brokerSocketPath: string;
   headed: boolean;
+  solAvailable: boolean;
   proAvailable: boolean;
   autoApproveToolCalls: boolean;
   controlToken: string;
@@ -116,12 +149,13 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
-    appName: "Codex Native",
+    appName: CHATGPT_CONNECTOR_NAME,
     browserHost: "managed-chrome",
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
     headed: true,
+    solAvailable: true,
     proAvailable: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
@@ -337,7 +371,15 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
-  return { ...parsed, proAvailable: parsed.proAvailable === true } as AppConfig;
+  if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
+    throw new Error(`Invalid solAvailable in ${path}`);
+  }
+  const solAvailable = parsed.solAvailable !== false;
+  const proAvailable = parsed.proAvailable === true;
+  if (proAvailable && !solAvailable) {
+    throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
+  }
+  return { ...parsed, solAvailable, proAvailable } as AppConfig;
 }
 
 export function saveConfig(config: AppConfig): void {
@@ -345,18 +387,21 @@ export function saveConfig(config: AppConfig): void {
 }
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
-  const models = ["gpt-5.6-sol"];
-  const efforts = ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])];
+  const model = config.solAvailable ? "gpt-5.6-sol" : "gpt-5.6-luna";
+  const models = [model];
+  const efforts = config.solAvailable
+    ? ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])]
+    : ["low"];
   return {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
     models,
     liveModels: false,
-    defaultModel: "gpt-5.6-sol",
+    defaultModel: model,
     contextWindow: config.contextWindow,
     modelInputModalities: Object.fromEntries(models.map(model => [model, ["text", "image"]])),
-    modelReasoningEfforts: { "gpt-5.6-sol": efforts },
-    modelDefaultReasoningEfforts: { "gpt-5.6-sol": "high" },
+    modelReasoningEfforts: { [model]: efforts },
+    modelDefaultReasoningEfforts: { [model]: config.solAvailable ? "high" : "low" },
     noReasoningModels: [],
     chatgptWeb: {
       appName: config.appName,
@@ -366,8 +411,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
+      lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
+      solAvailable: config.solAvailable,
       proAvailable: config.proAvailable,
       autoApproveToolCalls: config.autoApproveToolCalls,
     },

@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertDurableRuntimeCommand,
+  CHATGPT_CONNECTOR_NAME,
   defaultBrokerEndpoint,
   defaultConfig,
   expandUserPath,
@@ -13,6 +14,7 @@ import {
   loadConfigForSetup,
   providerConfig,
   resolveBrokerEndpoint,
+  resolveSetupConnectorName,
   runtimeCommandForProcess,
 } from "../src/config";
 import { removeLegacyRuntimeArtifacts } from "../src/service";
@@ -84,6 +86,15 @@ test("user-home expansion accepts native Unix and Windows separators", () => {
   expect(expandUserPath("~\\runtime")).toBe(join(homedir(), "runtime"));
 });
 
+test("the direct-turn connector identity migrates known legacy setup without overwriting custom names", () => {
+  expect(defaultConfig("full").appName).toBe(CHATGPT_CONNECTOR_NAME);
+  expect(resolveSetupConnectorName("Codex Native")).toBe("Codex Native2");
+  expect(resolveSetupConnectorName("Team Codex Harness")).toBe("Team Codex Harness");
+  expect(resolveSetupConnectorName(undefined, "Team Codex Harness")).toBe("Team Codex Harness");
+  expect(() => resolveSetupConnectorName(undefined, "Codex Native"))
+    .toThrow(/requires a newly created connector named "Codex Native2"/);
+});
+
 test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", () => {
   const root = join(tmpdir(), `codex-chatgpt-web-config-migration-${process.pid}-${Date.now()}`);
   roots.push(root);
@@ -108,7 +119,12 @@ test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", 
   })}\n`);
 
   expect(() => loadConfig()).toThrow("rerun setup to migrate");
-  expect(loadConfigForSetup()).toMatchObject({ version: 3, mode: "browser-only", browserHost: "managed-chrome" });
+  expect(loadConfigForSetup()).toMatchObject({
+    version: 3,
+    mode: "browser-only",
+    browserHost: "managed-chrome",
+    solAvailable: true,
+  });
 });
 
 test("legacy temp-path wrapper and vendor are removed only after runtime ownership changes", () => {
@@ -139,5 +155,16 @@ test("launcher browser ownership is explicit in provider configuration", () => {
   expect(providerConfig(config).chatgptWeb).toMatchObject({
     browserHost: "launcher",
     browserHostDescriptorPath: config.browserHostDescriptorPath,
+    solAvailable: true,
   });
+});
+
+test("Luna-only provider configuration exposes only the Luna backend", () => {
+  const config = defaultConfig("browser-only");
+  config.solAvailable = false;
+  const provider = providerConfig(config);
+  expect(provider.models).toEqual(["gpt-5.6-luna"]);
+  expect(provider.defaultModel).toBe("gpt-5.6-luna");
+  expect(provider.modelReasoningEfforts).toEqual({ "gpt-5.6-luna": ["low"] });
+  expect(provider.chatgptWeb).toMatchObject({ solAvailable: false, proAvailable: false });
 });

@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
-import { defaultChromeExecutable } from "../src/config";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable } from "../src/config";
+import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
@@ -32,7 +33,7 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
   const browserTurn = (traceId: string) => ({
     traceId,
     modelId: "chatgpt-web/high",
-    capabilities: { localToolsEnabled: false, proAvailable: true },
+    capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
     prepare: async () => ({ text: traceId, images: [], release() {} }),
     onTextDelta() {},
   });
@@ -74,6 +75,37 @@ test("managed Chrome defaults follow the host platform", () => {
   );
   const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
+  expect(resolveBrowserConfig(provider).appName).toBe(CHATGPT_CONNECTOR_NAME);
+});
+
+test("browser configuration rejects the retired connector identity before opening a turn", () => {
+  expect(() => resolveBrowserConfig({
+    adapter: "chatgpt-web",
+    baseUrl: "browser://chatgpt",
+    chatgptWeb: { appName: "Codex Native" },
+  })).toThrow(/requires a newly created connector named "Codex Native2".*do not rename or refresh/s);
+});
+
+test("connector verification reports a legacy-only ChatGPT menu as a migration error", async () => {
+  const connectorMentionFailure = (ChatGptBrowserWorker.prototype as unknown as {
+    connectorMentionFailure(menuRows: unknown, triggerAttempts: number): Promise<string>;
+  }).connectorMentionFailure;
+  const message = await connectorMentionFailure.call({
+    config: { appName: CHATGPT_CONNECTOR_NAME },
+    connectorMentionRowTitles: async () => ["Codex Native", "Another connector"],
+  }, {}, 4);
+
+  expect(message).toContain('Legacy ChatGPT connector "Codex Native" was found');
+  expect(message).toContain('newly created connector named "Codex Native2"');
+  expect(message).toContain('do not rename or refresh "Codex Native"');
+  expect(message).not.toContain("Another connector");
+
+  const mixedMessage = await connectorMentionFailure.call({
+    config: { appName: CHATGPT_CONNECTOR_NAME },
+    connectorMentionRowTitles: async () => ["Codex Native", "Codex Native2"],
+  }, {}, 4);
+  expect(mixedMessage).not.toContain("Legacy ChatGPT connector");
+  expect(mixedMessage).toContain('no row named "Codex Native2"');
 });
 
 test("browser stage timeout aborts late page acquisition", async () => {
@@ -121,13 +153,30 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 test("connector verification and real tool turns share one Playwright selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
+  expect(workerSource.match(/this\.prepareTemporaryChatSurface\(\s*page/g)?.length).toBe(4);
+  expect(workerSource).toContain('"temporary_chat_preparation"');
+  expect(workerSource).toContain('if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL)');
   expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
-  expect(workerSource).toContain('appResult.dispatchEvent("click")');
-  expect(workerSource).not.toContain('composer.press("Enter")');
+  expect(workerSource).toContain("await appResult.click({ force: true, timeout: 10_000 })");
+  expect(workerSource).not.toContain("highlightConnectorMenuRow");
+  expect(workerSource).not.toContain('await appResult.dispatchEvent("click")');
+  expect(workerSource).not.toContain('appResult.press("Enter")');
   expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer)");
   expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
+});
+
+test("new ChatGPT chats select the requested effort and submit the first real turn directly", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const requestedSelection = workerSource.indexOf('"effort_selection"');
+  const promptAttachment = workerSource.indexOf('"prompt_attachment"', requestedSelection);
+  expect(workerSource).not.toContain("CHATGPT_WARMUP_PROMPT");
+  expect(workerSource).not.toContain('"warmup_effort_selection"');
+  expect(workerSource).not.toContain('"chat_warmup"');
+  expect(workerSource).toMatch(/turn\.modelId,\s+turn\.reasoning/);
+  expect(requestedSelection).toBeGreaterThan(-1);
+  expect(promptAttachment).toBeGreaterThan(requestedSelection);
 });
 
 test("active composer resolution waits for exactly one visible editor", async () => {
@@ -163,6 +212,7 @@ test("large read-only context is inserted in bounded edits before exact verifica
   const page = {
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
+      press: async (value: string) => { calls.push(["press", value]); },
     },
   };
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
@@ -175,14 +225,27 @@ test("large read-only context is inserted in bounded edits before exact verifica
   await attachPrompt.call({
     activeComposer: async () => composer,
     insertPromptText,
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
+      calls.push(["chunkCommitted", String(expected.length)]);
+    },
     assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
   }, page, prompt, false);
 
   const inserted = calls.filter(call => call[0] === "insertText").map(call => call[1] ?? "");
+  const fullChunkCount = Math.floor((prompt.length - 1) / CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
   expect(calls.slice(0, 2)).toEqual([["fill", ""], ["focus"]]);
   expect(inserted.every(chunk => chunk.length <= CHATGPT_PROMPT_INSERT_CHUNK_CHARS)).toBeTrue();
-  expect(inserted.length).toBe(5);
+  expect(inserted.length).toBe(Math.ceil(prompt.length / CHATGPT_PROMPT_INSERT_CHUNK_CHARS));
   expect(inserted.join("")).toBe(prompt);
+  expect(calls.filter(call => call[0] === "chunkCommitted")).toEqual(
+    Array.from({ length: fullChunkCount }, (_value, index) => [
+      "chunkCommitted",
+      String((index + 1) * CHATGPT_PROMPT_INSERT_CHUNK_CHARS),
+    ]),
+  );
+  expect(calls.filter(call => call[0] === "press")).toEqual(
+    Array.from({ length: fullChunkCount }, () => ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY]),
+  );
   expect(asserted).toBe(prompt);
 });
 
@@ -192,10 +255,10 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    dispatchEvent: async (event: string) => {
-      expect(event).toBe("click");
+    click: async (options: { force: boolean; timeout: number }) => {
+      expect(options).toEqual({ force: true, timeout: 10_000 });
       connectorSelected = true;
-      calls.push(["dispatchResult", event]);
+      calls.push(["click"]);
     },
   };
   const selectedConnector = {
@@ -210,7 +273,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
       expect(selector).toBe('[data-id^="plugin:"][data-keyword]');
       return {
         filter: (options: { hasText: string; visible: boolean }) => {
-          expect(options).toEqual({ hasText: "Codex Native", visible: true });
+          expect(options).toEqual({ hasText: "Codex Native2", visible: true });
           return selectedConnector;
         },
       };
@@ -226,13 +289,14 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   };
   const page = {
     getByText: (text: string, options: { exact: boolean }) => {
-      expect(text).toBe("Codex Native");
+      expect(text).toBe("Codex Native2");
       expect(options).toEqual({ exact: true });
       return { exactConnectorLabel: true };
     },
     locator: (selector: string) => {
       if (selector.includes("__menu-item")) {
         return {
+          evaluateAll: async () => [],
           filter: (options: { has: unknown }) => {
             expect(options).toEqual({ has: { exactConnectorLabel: true } });
             return appResult;
@@ -248,7 +312,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
 
   let activeComposerCalls = 0;
   const resolved = await selectConnector.call({
-    config: { appName: "Codex Native" },
+    config: { appName: "Codex Native2" },
     connectorIsSelected: async () => connectorSelected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -265,7 +329,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["dispatchResult", "click"],
+    ["click"],
     ["waitForSelectedConnector"],
   ]);
 });
@@ -290,7 +354,8 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       if (menuAttempt === 1) throw timeout;
     },
     count: async () => 1,
-    dispatchEvent: async () => {
+    click: async (options: { force: boolean; timeout: number }) => {
+      expect(options).toEqual({ force: true, timeout: 10_000 });
       selected = true;
       calls.push("activate");
     },
@@ -309,7 +374,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => appResult }
+      ? { filter: () => appResult, evaluateAll: async () => [] }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
@@ -318,7 +383,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
 
   let activeComposerCalls = 0;
   await selectConnector.call({
-    config: { appName: "Codex Native" },
+    config: { appName: "Codex Native2" },
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -348,7 +413,8 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const appResult = {
     waitFor: async () => { calls.push(["connectorMenu"]); },
     count: async () => 1,
-    dispatchEvent: async () => {
+    click: async (options: { force: boolean; timeout: number }) => {
+      expect(options).toEqual({ force: true, timeout: 10_000 });
       selected = true;
       calls.push(["selectConnector"]);
     },
@@ -365,7 +431,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => appResult }
+      ? { filter: () => appResult, evaluateAll: async () => [] }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
@@ -384,7 +450,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
 
   let activeComposerCalls = 0;
   await attachPrompt.call({
-    config: { appName: "Codex Native" },
+    config: { appName: "Codex Native2" },
     selectConnector,
     insertPromptText,
     connectorIsSelected: async () => selected,
@@ -405,7 +471,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["selectConnector"],
     ["selectedConnector"],
     ["selectedFocus"],
-    ["press", "End"],
+    ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
     ["insertText", " context"],
     ["assertPrompt"],
   ]);
@@ -478,40 +544,93 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   expect(workerSource).not.toContain('aria-label^="Remove file "');
 });
 
-test("effort selection uses structural menu indices instead of localized labels", () => {
+test("effort selection uses structural menu and slider indices instead of localized labels", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
   expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
   expect(workerSource).toContain('timeout: 70_000');
-  expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"])');
-  expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"])');
+  expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
+  expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
   expect(sessionSource).toContain('[role="menuitemradio"]');
+  expect(sessionSource).toContain('[data-model-reasoning-effort-slider] [role="slider"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
   expect(workerSource).toContain('getAttribute("aria-checked")');
   expect(workerSource).toContain('getAttribute("aria-expanded")');
+  expect(workerSource).toContain('getAttribute("aria-valuenow")');
+  expect(workerSource).toContain("sliderControl.press(key)");
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
 });
 
-test("effort selection handles the known ChatGPT rate-limit dialog before trusted pointer activation", () => {
+test("effort slider ARIA state fails closed on malformed and unsupported ranges", () => {
+  expect(parseChatGptEffortSliderState("0", "4", "3")).toEqual({ min: 0, max: 4, value: 3 });
+  for (const attributes of [
+    [null, "4", "3"],
+    ["", "4", "3"],
+    ["0", "4", null],
+    ["0", "4", "9"],
+    ["0", "5", "3"],
+    ["9007199254740992", "9007199254740993", "9007199254740992"],
+  ] as const) {
+    expect(parseChatGptEffortSliderState(attributes[0], attributes[1], attributes[2])).toBeUndefined();
+  }
+});
+
+test("Luna-only browser turns verify selector absence instead of opening an effort menu", async () => {
+  const checkpoints: string[] = [];
+  const hiddenDialog = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const visibleControls = { count: async () => 0 };
+  const composerForm = {
+    locator: () => ({ filter: () => visibleControls }),
+  };
+  const composer = { locator: () => composerForm };
+  const selectModelAndEffort = (ChatGptBrowserWorker.prototype as unknown as {
+    selectModelAndEffort(
+      page: unknown,
+      modelId: string,
+      reasoning: string,
+      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; proAvailable: boolean },
+      captureDiagnostic: (checkpoint: string) => Promise<void>,
+    ): Promise<{ displayLabel: string; uiEffortIndex: number | null }>;
+  }).selectModelAndEffort;
+
+  const mode = await selectModelAndEffort.call({
+    activeComposer: async () => composer,
+  }, {
+    locator: () => hiddenDialog,
+  }, "gpt-5.6-luna", "low", {
+    localToolsEnabled: true,
+    solAvailable: false,
+    proAvailable: false,
+  }, async checkpoint => { checkpoints.push(checkpoint); });
+
+  expect(mode).toMatchObject({ displayLabel: "Luna", uiEffortIndex: null });
+  expect(checkpoints).toEqual(["luna-default-confirmed"]);
+});
+
+test("effort selection handles the known ChatGPT rate-limit dialog before keyboard activation", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
   const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
   const selectionSource = workerSource.slice(selectionStart, selectionEnd);
   const guard = selectionSource.indexOf("throwIfChatGptRateLimitDialog(page)");
-  const activation = selectionSource.indexOf("currentEffort.click()");
+  const activation = selectionSource.indexOf('currentEffort.press("Enter")');
 
   expect(workerSource).toContain("Too many requests");
   expect(workerSource).toContain("making requests too quickly");
   expect(guard).toBeGreaterThan(-1);
   expect(activation).toBeGreaterThan(guard);
-  expect(selectionSource).not.toContain('currentEffort.press("Enter")');
-  expect(selectionSource).toContain("effortChoice.click()");
-  expect(selectionSource).not.toContain('effortChoice.press("Enter")');
+  expect(selectionSource).not.toContain("currentEffort.click(");
+  expect(selectionSource).toContain('effortChoice.press("Enter")');
+  expect(selectionSource).not.toContain("effortChoice.click(");
   expect(selectionSource).not.toContain("is unavailable");
 });
 
@@ -689,12 +808,16 @@ test("explicit connector auto-approval still selects Allow once", async () => {
   expect(fixture.pressed).toEqual(["Allow once:Enter"]);
 });
 
-test("browser preflight fails closed with Codex's native context-window error contract", () => {
-  expect(() => assertChatGptWebInputWithinContextWindow(150_000, "medium")).toThrow(
-    "150,000-token context window",
+test("browser preflight separates model context from one-message transport limits", () => {
+  const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
+  const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
+  const luna = { localToolsEnabled: false, solAvailable: false, proAvailable: false };
+
+  expect(() => assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "medium", plus)).toThrow(
+    "90,000-token context window",
   );
   try {
-    assertChatGptWebInputWithinContextWindow(150_000, "medium");
+    assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "medium", plus);
     throw new Error("expected context-window preflight to fail");
   } catch (error) {
     expect(error).toMatchObject({
@@ -707,13 +830,89 @@ test("browser preflight fails closed with Codex's native context-window error co
     expect(String(error)).toContain("/compact");
   }
 
-  expect(() => assertChatGptWebInputWithinContextWindow(149_999, "medium")).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(184_999, "high")).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(185_000, "high")).toThrow(
-    "185,000-token context window",
+  expect(() => assertChatGptWebInputWithinLimits(40_999, 32_807, "gpt-5.6-sol", "low", plus)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(41_000, 32_808, "gpt-5.6-sol", "low", plus)).toThrow(
+    "41,000-token context window",
   );
-  expect(() => assertChatGptWebInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(255_999, "max")).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "medium", plus)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "high", plus)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "high", plus)).toThrow(
+    "90,000-token context window",
+  );
+  expect(() => assertChatGptWebInputWithinLimits(100_000, 100_000, "gpt-5.6-sol", "xhigh", pro)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(100_000, 100_000, "gpt-5.6-sol", "max", pro)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(28_000, 19_808, "gpt-5.6-luna", "low", luna)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(28_001, 19_809, "gpt-5.6-luna", "low", luna)).toThrow(
+    "ChatGPT Free browser transport budget",
+  );
+
+  expect(() => assertChatGptWebInputWithinLimits(
+    1,
+    1,
+    "gpt-5.6-sol",
+    "low",
+    plus,
+    211_256,
+  )).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(
+    1,
+    1,
+    "gpt-5.6-sol",
+    "low",
+    plus,
+    211_257,
+  )).toThrow("211,256-character ChatGPT composer boundary");
+  for (const effort of ["medium", "high"] as const) {
+    expect(() => assertChatGptWebInputWithinLimits(
+      1,
+      1,
+      "gpt-5.6-sol",
+      effort,
+      plus,
+      1_048_572,
+    )).not.toThrow();
+    expect(() => assertChatGptWebInputWithinLimits(
+      1,
+      1,
+      "gpt-5.6-sol",
+      effort,
+      plus,
+      1_048_573,
+    )).toThrow("1,048,572-character ChatGPT composer boundary");
+  }
+
+  expect(() => assertChatGptWebInputWithinLimits(
+    111_192,
+    103_000,
+    "gpt-5.6-sol",
+    "medium",
+    pro,
+    515_000,
+  )).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(
+    111_193,
+    103_001,
+    "gpt-5.6-sol",
+    "medium",
+    pro,
+    515_001,
+  )).toThrow("103,000-token ChatGPT browser message boundary");
+  expect(() => assertChatGptWebInputWithinLimits(
+    112_192,
+    104_000,
+    "gpt-5.6-sol",
+    "max",
+    pro,
+    520_000,
+  )).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(
+    112_193,
+    104_001,
+    "gpt-5.6-sol",
+    "max",
+    pro,
+    520_001,
+  )).toThrow("104,000-token ChatGPT browser message boundary");
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {
@@ -729,6 +928,14 @@ test("browser stage diagnostics use safe bounded artifact names", () => {
   expect(browserDiagnosticCheckpoint("effort menu / before click")).toBe("effort-menu-before-click");
   expect(browserDiagnosticCheckpoint("../turn_token secret")).toBe("turn_token-secret");
   expect(browserDiagnosticCheckpoint("x".repeat(200))).toHaveLength(80);
+});
+
+test("routine browser diagnostics avoid screenshots unless full capture is requested", () => {
+  expect(browserDiagnosticIncludesScreenshot("send-ready", false)).toBeFalse();
+  expect(browserDiagnosticIncludesScreenshot("response-visible", false)).toBeFalse();
+  expect(browserDiagnosticIncludesScreenshot("response-stalled-30s", false)).toBeTrue();
+  expect(browserDiagnosticIncludesScreenshot("turn-failed", false)).toBeTrue();
+  expect(browserDiagnosticIncludesScreenshot("send-ready", true)).toBeTrue();
 });
 
 test("browser stage diagnostics preserve every critical local checkpoint", () => {
@@ -927,6 +1134,30 @@ test("trace parsing excludes the Answer now UI control", () => {
   expect(isChatGptTraceControl({ kind: "status", text: "Inspecting models", uiControl: false })).toBe(false);
   expect(isChatGptTraceControl({ kind: "status", text: "Reviewing repository invariants" })).toBe(false);
   expect(isChatGptTraceControl({ kind: "answer", text: "Answer now" })).toBe(false);
+});
+
+test("trace parsing removes an Answer now control appended to live reasoning", () => {
+  expect(stripChatGptTraceControlSuffix({
+    kind: "status",
+    text: "Pro thinking\nAnswer now",
+  })).toEqual({
+    kind: "status",
+    text: "Pro thinking",
+  });
+  expect(stripChatGptTraceControlSuffix({
+    kind: "status",
+    text: "Answer now",
+  })).toEqual({
+    kind: "status",
+    text: "",
+  });
+  expect(stripChatGptTraceControlSuffix({
+    kind: "answer",
+    text: "Tell the user to select Answer now",
+  })).toEqual({
+    kind: "answer",
+    text: "Tell the user to select Answer now",
+  });
 });
 
 test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {

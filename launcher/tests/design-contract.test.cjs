@@ -8,6 +8,9 @@ const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "ut
 const styles = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
+const connectorIdentitySource = fs.readFileSync(path.join(launcherRoot, "electron", "connector-identity.cjs"), "utf8");
+const runtimeSource = fs.readFileSync(path.join(launcherRoot, "electron", "runtime.cjs"), "utf8");
+const runtimeConfigSource = fs.readFileSync(path.join(launcherRoot, "..", "src", "config.ts"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 
@@ -93,6 +96,13 @@ test("closing the launcher follows the persisted background-runtime preference",
   assert.match(i18nSource, /keepRunningOnClose: "Keep server running when window closes"/);
 });
 
+test("normal launcher shutdown flushes the persistent ChatGPT session before closing its views", () => {
+  const persist = electronMain.indexOf("await browserHost?.persistSession()");
+  const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
+  assert.ok(persist >= 0, "shutdown must persist the ChatGPT session");
+  assert.ok(destroy > persist, "browser views must close only after session persistence completes");
+});
+
 test("settings expose a persistent fail-closed Codex bridge switch and status indicator", () => {
   assert.match(appSource, /api!\.setBridgeEnabled\(enabled\)/);
   assert.match(appSource, /snapshot\.state\.bridgeEnabled \? "success" : "error"/);
@@ -150,6 +160,11 @@ test("MCP copy includes every required account, key, and connector instruction",
   assert.match(i18nSource, /只有此步骤成功且 Tunnel 正在运行后/);
   assert.match(appSource, /className="mcp-step-two-hint"/);
   assert.match(i18nSource, /enable Developer Mode[\s\S]*?choose Tunnel[\s\S]*?set Authentication to None/);
+  assert.match(i18nSource, /create a new connector[\s\S]*?exact connector name shown below/);
+  assert.match(i18nSource, /Leave the old connector untouched and create Codex Native2 as a new connector/);
+  assert.match(i18nSource, /Do not rename or refresh Codex Native/);
+  assert.match(i18nSource, /choose Allow all actions[\s\S]*?blocks command and patch calls/);
+  assert.match(i18nSource, /outer Codex harness still enforces its sandbox and approvals/);
   assert.match(appSource, /<NoticeRow icon="alert" tone="warning">/);
   assert.doesNotMatch(appSource, /icon="spark"/);
 });
@@ -190,10 +205,39 @@ test("MCP verification has one primary action and exposes live progress", () => 
   );
 });
 
+test("launcher migrates and verifies the explicit direct-turn connector identity", () => {
+  assert.match(electronMain, /connectorName:\s*runtimeHost\.browserConnectorName\(\)/);
+  assert.match(electronMain, /getConnectorName:\s*\(\) => runtimeHost\.browserConnectorName\(\)/);
+  assert.match(appSource, /<code>\{snapshot\.connectorName\}<\/code>/);
+  assert.match(connectorIdentitySource, /CURRENT_CONNECTOR_NAME = "Codex Native2"/);
+  assert.match(connectorIdentitySource, /LEGACY_CONNECTOR_NAMES = Object\.freeze\(\["Codex Native"\]\)/);
+  assert.match(runtimeConfigSource, /CHATGPT_CONNECTOR_NAME = "Codex Native2"/);
+  assert.match(runtimeConfigSource, /LEGACY_CHATGPT_CONNECTOR_NAMES = \["Codex Native"\]/);
+  assert.match(runtimeSource, /connectorMigrationRequired[\s\S]*?isLegacyConnectorName/);
+  assert.match(runtimeSource, /requireCurrentRuntimeConnectorName/);
+  assert.match(i18nSource, /Do not rename or refresh Codex Native/);
+  assert.match(appSource, /copy\.connectorMigrationNotice/);
+  for (const source of [electronMain, browserHostSource, appSource]) {
+    assert.doesNotMatch(source, /Codex Native2/);
+  }
+});
+
 test("launcher refreshes persisted ChatGPT authentication before presenting setup", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
   assert.match(i18nSource, /checkingSignIn: "Checking saved session"/);
+});
+
+test("completed model setup remains a repeatable account-capability probe", () => {
+  assert.match(appSource, /copy\.reinstall/);
+  assert.match(appSource, /<SetupRow[\s\S]*?onAction=\{install\}[\s\S]*?repeatable/);
+  assert.match(appSource, /complete && !repeatable/);
+  assert.match(i18nSource, /reinstall: "Reinstall models"/);
+  assert.match(i18nSource, /reinstall: "重新安装模型"/);
+  assert.match(
+    electronMain,
+    /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
+  );
 });
 
 test("launcher reminds authenticated users to refresh the private ChatGPT session every 48 hours", () => {

@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test";
-import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
-import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
+import {
+  CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
+  chatGptPromptJsonBytes,
+  chatGptReadOnlyContextWarning,
+  compileChatGptWebPrompt,
+} from "../src/adapters/chatgpt-web/prompt";
+import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
-function request(reasoning: "low" | "high" | "max"): CodexParsedRequest {
+function request(reasoning: "low" | "medium" | "high" | "max"): CodexParsedRequest {
   return {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
@@ -18,24 +23,33 @@ function request(reasoning: "low" | "high" | "max"): CodexParsedRequest {
   };
 }
 
-test("tool-capable prompts resume the mandatory bind contract after the complete context envelope", () => {
+test("tool-capable prompts pass one stable turn token directly to native actions", () => {
   const token = "turn_12345678901234567890123456789012";
+  const parsed = request("high");
+  parsed.context.messages[1]!.content = `Diagnose an invalid binding_id safety failure without replaying ${token}`;
   const compiled = compileChatGptWebPrompt(
-    request("high"),
-    { localToolsEnabled: true, proAvailable: true },
+    parsed,
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
     token,
   );
   const envelopeEnd = compiled.text.indexOf("</codex_context_json>");
   const resume = compiled.text.indexOf("<codex_transport_resume>", envelopeEnd);
-  const finalToken = compiled.text.lastIndexOf(token);
+  const tokenMatches = compiled.text.match(new RegExp(token, "g"));
+  const transportOnly = compiled.text.replace(
+    /<codex_context_json>[\s\S]*<\/codex_context_json>/,
+    "<codex_context_json>[task context]</codex_context_json>",
+  );
 
   expect(envelopeEnd).toBeGreaterThan(0);
   expect(resume).toBeGreaterThan(envelopeEnd);
-  expect(finalToken).toBeGreaterThan(resume);
-  expect(compiled.text.slice(resume)).toContain("first action now must be the actual Codex Native codex_bind_turn call");
-  expect(compiled.text).toContain("turn_token and binding_id are different values");
-  expect(compiled.text).toContain("valid_until outer_turn_end has no time limit");
-  expect(compiled.text).toContain("not the turn_ token");
+  expect(tokenMatches).toHaveLength(1);
+  expect(compiled.text).toContain("[retired turn handle]");
+  expect(transportOnly).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
+  expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects, and keep calling tools until the requested work is complete and verified.");
+  expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
+  expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
+  expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex_tool_call/);
+  expect(transportOnly).not.toMatch(/expired|invalid|revoked|blocked|safety|security layer|permission gate/i);
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
   expect(compiled.text).not.toContain("internally compacts this response");
 });
@@ -43,7 +57,7 @@ test("tool-capable prompts resume the mandatory bind contract after the complete
 test("read-only prompts resume without exposing a bind capability", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.text).toContain("The task context is complete. Execute the latest active user request now under the capability contract above.");
@@ -57,12 +71,24 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
+test("browser-only Medium directs users to the full harness", () => {
+  const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
+  const warning = chatGptReadOnlyContextWarning(request("medium"), capabilities);
+  expect(warning).toContain("Browser-only mode");
+  expect(warning).toContain("Full harness");
+  expect(warning).not.toContain("tool-capable ChatGPT Web model first");
+  expect(chatGptReadOnlyContextWarning(request("medium"), {
+    ...capabilities,
+    localToolsEnabled: true,
+  })).toBeUndefined();
+});
+
 test("compaction prompts are isolated summarization turns without local or native tool instructions", () => {
   const compact = request("high");
   compact._compactionRequest = true;
   const compiled = compileChatGptWebPrompt(
     compact,
-    { localToolsEnabled: false, proAvailable: true },
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.text).toContain("This is a Codex history-compaction checkpoint, not a normal task turn.");
@@ -70,6 +96,99 @@ test("compaction prompts are isolated summarization turns without local or nativ
   expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("web search, browsing, research");
   expect(compiled.text).not.toContain("missing local-computer bridge");
+});
+
+test("Web compaction trims only the oldest history until the browser request fits", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  compact.context.systemPrompt = [];
+  compact.context.messages = [
+    { role: "developer", content: `oldest-static-${"a".repeat(10_000)}`, timestamp: 1 },
+    { role: "developer", content: `newer-static-${"b".repeat(10_000)}`, timestamp: 2 },
+    { role: "user", content: `real-task-${"c".repeat(100_000)}`, timestamp: 3 },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "verified-progress" }],
+      timestamp: 4,
+    },
+    { role: "user", content: "checkpoint-now", timestamp: 5 },
+  ];
+
+  const compiled = compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  );
+  const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
+  const envelope = JSON.parse(encoded!) as { messages: Array<{ role: string; content: unknown }> };
+
+  expect(chatGptPromptJsonBytes(compiled.text)).toBeLessThanOrEqual(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET);
+  expect(compiled.trimmedCompactionMessages).toBe(2);
+  expect(compiled.text).not.toContain("oldest-static");
+  expect(compiled.text).not.toContain("newer-static");
+  expect(compiled.text).toContain("real-task-");
+  expect(compiled.text).toContain("verified-progress");
+  expect(envelope.messages.at(-1)).toEqual({ role: "user", content: "checkpoint-now" });
+
+  const normal = structuredClone(compact);
+  delete normal._compactionRequest;
+  const untrimmed = compileChatGptWebPrompt(
+    normal,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  );
+  expect(untrimmed.text).toContain("oldest-static");
+  expect(untrimmed.text).toContain("newer-static");
+  expect(untrimmed.trimmedCompactionMessages).toBeUndefined();
+});
+
+test("Web compaction rebuilds attachments after trimming an oversized oldest image message", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  compact.context.systemPrompt = [];
+  compact.context.messages = [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: `discard-${"x".repeat(120_000)}` },
+        { type: "image", imageUrl: "data:image/png;base64,discarded-image" },
+      ],
+      timestamp: 1,
+    },
+    { role: "user", content: "preserve-latest-checkpoint", timestamp: 2 },
+  ];
+
+  const compiled = compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  );
+
+  const envelope = compiled.text.split("<codex_context_json>")[1]!.split("</codex_context_json>")[0]!;
+  expect(compiled.images).toEqual([]);
+  expect(compiled.trimmedCompactionMessages).toBe(1);
+  expect(compiled.text).not.toContain("discard-");
+  expect(envelope).not.toContain("image_attachment");
+  expect(compiled.text).toContain("preserve-latest-checkpoint");
+});
+
+test("Luna rejects a separate compaction prompt because continuity is already rolling", () => {
+  const compact = request("low");
+  compact.modelId = CHATGPT_WEB_LUNA_MODEL_ID;
+  compact._compactionRequest = true;
+  expect(() => compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, solAvailable: false, proAvailable: false },
+  )).toThrow("does not accept a separate compaction turn");
+});
+
+test("Web compaction fails closed when its final instruction alone exceeds the transport budget", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  compact.context.systemPrompt = [];
+  compact.context.messages = [{ role: "user", content: "z".repeat(120_000), timestamp: 1 }];
+
+  expect(() => compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  )).toThrow("final compaction instruction alone exceeds");
 });
 
 test("assigns prior assistant output to the model and never attributes Codex context to the human", () => {
@@ -89,7 +208,7 @@ test("assigns prior assistant output to the model and never attributes Codex con
   ];
   const compiled = compileChatGptWebPrompt(
     attributed,
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
   );
   const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
   const envelope = JSON.parse(encoded!) as { messages: Array<Record<string, unknown>> };
@@ -126,7 +245,7 @@ test("a long task keeps the newest images and drops the overflow instead of fail
 
   const compiled = compileChatGptWebPrompt(
     replayed,
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
     "turn_12345678901234567890123456789012",
   );
 
@@ -161,7 +280,7 @@ test("Web compaction attaches the newest ten images as files and never embeds th
 
   const compiled = compileChatGptWebPrompt(
     parsed,
-    { localToolsEnabled: false, proAvailable: true },
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.images.map(image => image.imageUrl)).toEqual(
@@ -192,7 +311,7 @@ test("persisted one-pixel image sentinels are not attached to ChatGPT", () => {
     options: { reasoning: "high" },
   };
 
-  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: false, proAvailable: true });
+  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: false, solAvailable: true, proAvailable: true });
 
   expect(compiled.images.map(image => image.imageUrl)).toEqual(["data:image/png;base64,real-image"]);
   expect(compiled.text.match(/"type":"image_attachment"/g)).toHaveLength(1);
@@ -228,7 +347,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
     options: { reasoning: "high" },
   };
 
-  const compiled = compileChatGptWebPrompt(replayed, { localToolsEnabled: true, proAvailable: true }, token);
+  const compiled = compileChatGptWebPrompt(replayed, { localToolsEnabled: true, solAvailable: true, proAvailable: true }, token);
 
   expect(compiled.text).not.toContain(staleToken);
   expect(compiled.text).not.toContain(staleBinding);
@@ -243,7 +362,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
 test("requires ChatGPT-native rich results to include a safe Markdown answer for Codex", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.text).toContain("also provide the relevant result as ordinary Markdown in the final answer");
@@ -254,7 +373,7 @@ test("requires ChatGPT-native rich results to include a safe Markdown answer for
 test("uses the public Instant name without leaking the browser menu alias into the prompt", () => {
   const compiled = compileChatGptWebPrompt(
     request("low"),
-    { localToolsEnabled: false, proAvailable: true },
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.text).toContain("This is ChatGPT Web Instant with no Codex Native bridge to the user's local computer");
@@ -275,7 +394,7 @@ test("keeps large contexts intact in the inline text envelope", () => {
   });
   const compiled = compileChatGptWebPrompt(
     large,
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
     token,
   );
 

@@ -4,6 +4,13 @@ const os = require("node:os");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const {
+  connectorNameForSetup,
+  CURRENT_CONNECTOR_NAME,
+  isLegacyConnectorName,
+  requireCurrentRuntimeConnectorName,
+  validateConnectorName,
+} = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
@@ -14,7 +21,6 @@ const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
-
 function collect(stream, chunks, onLine, onError) {
   let buffered = "";
   let bytes = 0;
@@ -619,14 +625,17 @@ class RuntimeHost {
   }
 
   mcpConnectorName() {
-    const config = this.supervisor.readConfig();
-    if (!config || config.mode !== "full") {
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured || current.mode !== "full") {
       throw new Error("The native MCP runtime is not configured");
     }
-    if (typeof config.appName !== "string" || !config.appName.trim() || config.appName.length > 80) {
-      throw new Error("The configured ChatGPT connector name is invalid");
-    }
-    return config.appName.trim();
+    return requireCurrentRuntimeConnectorName(current.config?.appName);
+  }
+
+  browserConnectorName() {
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured || current.mode !== "full") return CURRENT_CONNECTOR_NAME;
+    return connectorNameForSetup(current.config?.appName);
   }
 
   cancelBrowserTurns() {
@@ -693,9 +702,11 @@ class RuntimeHost {
       mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
+      "--refresh-account-capabilities",
       "--acknowledge-unofficial",
       "--restart-service",
     ];
+    if (mode === "full") args.push("--app-name", this.browserConnectorName());
     const result = await this.runSetup("core-setup", args, {
       message: "Installing ChatGPT Web models into Codex",
       successMessage: "Codex integration installed",
@@ -708,7 +719,10 @@ class RuntimeHost {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
     const currentVersion = this.app.getVersion();
-    if (existing.owner !== "launcher" || existing.config?.releaseVersion === currentVersion) {
+    const connectorMigrationRequired = existing.mode === "full"
+      && isLegacyConnectorName(validateConnectorName(existing.config?.appName));
+    if (existing.owner !== "launcher"
+      || (existing.config?.releaseVersion === currentVersion && !connectorMigrationRequired)) {
       return { updated: false };
     }
     const route = await this.bridgeStatus("runtime-upgrade-route");
@@ -720,6 +734,9 @@ class RuntimeHost {
       "--acknowledge-unofficial",
       "--restart-service",
     ];
+    if (existing.mode === "full") {
+      args.push("--app-name", connectorNameForSetup(existing.config?.appName));
+    }
     const result = await this.runSetup("runtime-upgrade", args, {
       message: `Upgrading launcher runtime from ${existing.config.releaseVersion} to ${currentVersion}`,
       successMessage: `Launcher runtime upgraded to ${currentVersion}`,
@@ -732,6 +749,7 @@ class RuntimeHost {
       bridgeEnabled: route.active,
       fromVersion: existing.config.releaseVersion,
       toVersion: currentVersion,
+      connectorMigrated: connectorMigrationRequired,
       stdout: result.stdout,
     };
   }
@@ -750,6 +768,8 @@ class RuntimeHost {
       "--full",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
+      "--app-name",
+      this.browserConnectorName(),
     ];
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");
@@ -850,4 +870,4 @@ class RuntimeHost {
   }
 }
 
-module.exports = { RuntimeHost };
+module.exports = { CURRENT_CONNECTOR_NAME, RuntimeHost };

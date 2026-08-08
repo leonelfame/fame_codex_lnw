@@ -18,10 +18,10 @@
   <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
 </p>
 
-在 Codex 原生模型选择器中选择 **ChatGPT Web — Instant**、**Medium**、**High**、
-**Extra High** 或 **Pro**。桥接程序会把完整的 Codex 任务上下文发送到一个全新的
-ChatGPT 临时聊天，附加图片，并将可见的推理过程、工具活动和 Markdown 流式传回同一个
-Codex 任务。
+Free 和 Go 账户会在 Codex 原生模型选择器中看到 **ChatGPT Web — Luna**。具有推理选择器的
+账户仍会按订阅权限看到 **Instant**、**Medium**、**High**、**Extra High** 和 **Pro**。
+桥接程序会把完整的 Codex 任务上下文发送到一个全新的 ChatGPT 临时聊天，附加图片，并将
+可见的推理过程、工具活动和 Markdown 流式传回同一个 Codex 任务。
 
 <p align="center">
   <img src="assets/demo.gif" alt="ChatGPT Web 在原生 Codex harness 中运行" width="960">
@@ -85,8 +85,9 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 2. 运行浏览器冒烟测试。
 3. 点击 **安装模型**，重启一次 Codex，然后选择一个 **ChatGPT Web — …** 模型。
 
-只有已登录账户支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令
-的情况下引导你完成完整 harness 设置。
+启动器会在设置期间检测当前账户的 ChatGPT 控件：Free/Go 账户只会显示 Luna；只有已登录账户
+支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令的情况下引导你
+完成完整 harness 设置。
 
 打包后的仅浏览器模式不需要 Google Chrome、模型 API 密钥、系统级 Node/Bun 或单独下载浏览器。
 
@@ -104,8 +105,8 @@ bun run app
 
 | 模式 | 模型 | 本地 Codex 工具 | 额外设置 |
 | --- | --- | --- | --- |
-| **仅浏览器** | Instant 到 Pro | 不可用；Codex 会显示警告 | 无 |
-| **完整 harness** | Instant 到 Pro | Instant–Extra High：可用；Pro：只读 | OpenAI 隧道 + ChatGPT 连接器 |
+| **仅浏览器** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 不可用；Codex 会显示警告 | 无 |
+| **完整 harness** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 非 Pro 模型：连接器可用时支持；Pro：只读 | OpenAI 隧道 + ChatGPT 连接器 |
 
 模型选择器中的每一项都对应一个固定的 ChatGPT 模式。Codex 仍会显示内置的 Effort 和 Speed
 选项，但更改它们不会在后台静默切换所选的浏览器模型。Pro 会收到 Codex 已经收集的完整上下文，
@@ -122,13 +123,16 @@ bun run app
 2. 在启动器中打开 **MCP**。请在将使用 ChatGPT 连接器的同一个 OpenAI 账户中创建 Tunnel
    和普通 API 密钥；创建密钥本身免费，也不会消耗模型 API 额度。
 3. 粘贴 Tunnel ID 和 API 密钥，然后点击 **连接 Harness**。
-4. 在 ChatGPT 设置中启用 **开发者模式**。创建连接器时选择 **Tunnel**，选择刚创建的
-   Tunnel，将 **身份验证** 设为 **无**，并将连接器准确命名为 `Codex Native`。
-5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。验证过程会逐字输入并确认完整的
-   `@Codex Native` mention，然后检查连接器 pill。
+4. 在 ChatGPT 设置中启用 **开发者模式**。新建连接器时选择 **Tunnel**，选择刚创建的
+   Tunnel，将 **身份验证** 设为 **无**，并将名称准确设置为 **Codex Native2**。
+5. 如果已有旧的 **Codex Native** 连接器，请保持其不变。不要重命名或刷新它：ChatGPT 会按
+   连接器身份缓存公开 MCP 合约，而此版本使用新的直接 turn-token 合约。在 **Codex Native2**
+   的 **权限** 中选择 **允许所有操作**；**允许低风险操作** 会在命令和补丁到达本地运行时前将其
+   拦截。外层 Codex harness 仍会执行沙箱和审批规则。
+6. 运行 **验证运行时**。它只会准确选择 **Codex Native2**。如果只找到 **Codex Native**，
+   验证会返回明确的迁移错误，而不会接受旧连接器。
 
-写入/修改操作需要 ChatGPT 工作区及管理员政策允许。OpenAI 目前仅为 Business 和
-Enterprise/Edu 工作区说明了这些操作；个人 Pro 账户仅限 read/fetch MCP 权限。请参阅
+写入/修改操作还需要 ChatGPT 工作区及其管理员政策允许。请参阅
 [开发者模式和 MCP 应用](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)。
 除非显式启用 `--auto-approve-tool-calls`，否则意外的审批提示会直接失败；该选项只会点击
 **Allow once**，绝不会授予永久权限。
