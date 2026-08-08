@@ -1086,6 +1086,99 @@ describe("ChatGPT outer-native harness v4", () => {
     await broker.close();
   });
 
+  test("recalculates usage from tool results added during the active browser turn", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-usage-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: "browser://chatgpt-usage-test",
+      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      const prepared = await turn.prepare();
+      try {
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+        if (!token) throw new Error("turn token missing from compiled prompt");
+        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+          method: "invoke",
+          bindingId: claimed.bindingId,
+          wireName: "exec_command",
+          freeform: false,
+          arguments: { cmd: "collect-large-evidence", workdir: tempRoot },
+        }, 30_000);
+        const output = (nativeResult.structuredContent as { output: string }).output;
+        turn.onTextDelta("Evidence bytes: ");
+        turn.onTextDelta(String(output.length));
+        return `Evidence bytes: ${output.length}`;
+      } finally {
+        prepared.release();
+      }
+    };
+
+    const adapter = createChatGptWebAdapter(provider);
+    const initial = rawWireRequest(environmentXml);
+    const firstEvents: AdapterEvent[] = [];
+    try {
+      await adapter.runTurn!(initial, { headers: new Headers() }, event => firstEvents.push(event));
+      const call = firstEvents.find(
+        (event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start",
+      );
+      expect(call?.name).toBe("exec_command");
+      const firstDone = firstEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(firstDone.usage!.inputTokens).toBeLessThan(95_000);
+
+      const largeOutput = "abcdefghij0123456789 ".repeat(30_000);
+      const continuation = structuredClone(initial);
+      const toolCall = {
+        role: "assistant" as const,
+        content: [{
+          type: "toolCall" as const,
+          id: call!.id,
+          name: "exec_command",
+          arguments: { cmd: "collect-large-evidence", workdir: tempRoot },
+        }],
+        timestamp: 3,
+      };
+      const result = {
+        role: "toolResult" as const,
+        toolCallId: call!.id,
+        toolName: "exec_command",
+        content: JSON.stringify({ output: largeOutput, exit_code: 0 }),
+        isError: false,
+        timestamp: 4,
+      };
+      continuation.context.messages.push(toolCall, result);
+      ((continuation._rawBody as { input: unknown[] }).input).push(
+        {
+          type: "function_call",
+          call_id: call!.id,
+          name: "exec_command",
+          arguments: JSON.stringify({ cmd: "collect-large-evidence", workdir: tempRoot }),
+        },
+        {
+          type: "function_call_output",
+          call_id: call!.id,
+          output: result.content,
+        },
+      );
+
+      const finalEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(continuation, { headers: new Headers() }, event => finalEvents.push(event));
+      const finalDone = finalEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(browserStarts).toBe(1);
+      expect(finalDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      expect(finalDone.usage!.inputTokens).toBeGreaterThan(95_000);
+      expect(finalDone.usage!.inputTokens).toBeGreaterThan(firstDone.usage!.inputTokens + 50_000);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("replaces the active browser response after Codex compacts mid-tool-loop", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {

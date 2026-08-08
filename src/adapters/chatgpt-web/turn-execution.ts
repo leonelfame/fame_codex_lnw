@@ -118,8 +118,6 @@ interface ChatGptTurnRuntimeBase {
   browser: Promise<string>;
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
-  /** Exact bounded request used to prepare this browser turn and report Codex usage. */
-  usageInput?: CodexParsedRequest;
   cancel: () => void;
 }
 

@@ -162,6 +162,34 @@ test("Luna checkpoint replaces only exact-parent history and preserves the curre
   expect(estimateChatGptWebInputTokens(applied.parsed, capabilities))
     .toBeLessThan(estimateChatGptWebInputTokens(next, capabilities));
 
+  const continued = request(threadId, nextTurnId, [
+    message("developer", "Old operational contract", sourceTurnId),
+    message("user", originalTask, sourceTurnId),
+    message("assistant", answer, sourceTurnId),
+    message("developer", "Fresh operational contract", nextTurnId),
+    message("user", "Continue with the second step", nextTurnId),
+    message("assistant", "Current-turn progress commentary", nextTurnId),
+    {
+      type: "function_call",
+      call_id: "call_luna_current",
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "pwd" }),
+    },
+    {
+      type: "function_call_output",
+      call_id: "call_luna_current",
+      output: "current tool evidence",
+    },
+  ]);
+  const appliedContinuation = store.apply(continued);
+  expect(appliedContinuation.applied).toBe(true);
+  const continuedEncoded = JSON.stringify(appliedContinuation.parsed.context.messages);
+  expect(continuedEncoded).toContain("Current-turn progress commentary");
+  expect(continuedEncoded).toContain("current tool evidence");
+  expect(continuedEncoded).not.toContain("Original task");
+  expect(estimateChatGptWebInputTokens(appliedContinuation.parsed, capabilities))
+    .toBeGreaterThan(estimateChatGptWebInputTokens(applied.parsed, capabilities));
+
   const branch = request(threadId, "turn_branch", [
     message("assistant", "A different parent answer.", sourceTurnId),
     message("user", "Continue on another branch", "turn_branch"),

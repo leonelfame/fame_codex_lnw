@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteFile } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
 import { parseRequest } from "../../responses/parser";
-import type { CodexMessage, CodexParsedRequest } from "../../types";
+import type { CodexParsedRequest } from "../../types";
 import * as z from "zod/v4";
 import { extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "./environment";
 
@@ -167,15 +167,37 @@ export class ChatGptLunaCheckpointStream {
   }
 }
 
-function latestAssistantAnswer(messages: readonly CodexMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== "assistant") continue;
-    const text = message.content
-      .filter(part => part.type === "text")
-      .map(part => part.text)
-      .join("");
-    if (text.trim()) return text;
+function currentTurnBoundary(parsed: CodexParsedRequest, input: unknown[], turnId: string): number | undefined {
+  const replayPrefix = Math.min(parsed._replayPrefixLen ?? 0, input.length);
+  if (replayPrefix > 0) return replayPrefix;
+  const firstCurrentItem = input.findIndex(item => itemTurnId(item) === turnId);
+  return firstCurrentItem >= 0 ? firstCurrentItem : undefined;
+}
+
+function assistantItemText(value: unknown): string | undefined {
+  const item = record(value);
+  if (!item || item.role !== "assistant") return undefined;
+  if (typeof item.content === "string") return item.content.trim() ? item.content : undefined;
+  if (!Array.isArray(item.content)) return undefined;
+  const text = item.content.map(block => {
+    const content = record(block);
+    return content && (content.type === "output_text" || content.type === "text")
+      && typeof content.text === "string"
+      ? content.text
+      : "";
+  }).join("");
+  return text.trim() ? text : undefined;
+}
+
+function parentAssistantAnswer(parsed: CodexParsedRequest, turnId: string): string | undefined {
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : undefined;
+  if (!input) return undefined;
+  const boundary = currentTurnBoundary(parsed, input, turnId);
+  if (boundary === undefined) return undefined;
+  for (let index = boundary - 1; index >= 0; index -= 1) {
+    const text = assistantItemText(input[index]);
+    if (text) return text;
   }
   return undefined;
 }
@@ -184,15 +206,10 @@ function currentTurnInput(parsed: CodexParsedRequest, turnId: string): unknown[]
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : undefined;
   if (!input) return undefined;
-
-  const replayPrefix = Math.min(parsed._replayPrefixLen ?? 0, input.length);
-  if (replayPrefix > 0) {
-    const suffix = input.slice(replayPrefix);
-    return suffix.length > 0 ? suffix : undefined;
-  }
-
-  const firstCurrentItem = input.findIndex(item => itemTurnId(item) === turnId);
-  return firstCurrentItem >= 0 ? input.slice(firstCurrentItem) : undefined;
+  const boundary = currentTurnBoundary(parsed, input, turnId);
+  if (boundary === undefined) return undefined;
+  const suffix = input.slice(boundary);
+  return suffix.length > 0 ? suffix : undefined;
 }
 
 function checkpointContext(checkpoint: ChatGptLunaCheckpoint): string {
@@ -235,7 +252,7 @@ export class ChatGptLunaCheckpointStore {
   apply(parsed: CodexParsedRequest): { parsed: CodexParsedRequest; applied: boolean; reason?: string } {
     const identity = extractChatGptTurnIdentity(parsed);
     if (!identity.threadId || !identity.turnId) return { parsed, applied: false, reason: "missing native thread identity" };
-    const parentAnswer = latestAssistantAnswer(parsed.context.messages);
+    const parentAnswer = parentAssistantAnswer(parsed, identity.turnId);
     if (!parentAnswer) return { parsed, applied: false, reason: "no completed parent assistant answer" };
 
     const parentHash = hashChatGptLunaAnswer(parentAnswer);

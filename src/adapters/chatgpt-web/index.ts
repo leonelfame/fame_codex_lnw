@@ -138,13 +138,6 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
   for (const event of events) emit(event);
 }
 
-function runtimeUsageInput(session: ChatGptTurnSession): CodexParsedRequest {
-  if (!session.runtime.usageInput) {
-    throw new Error("ChatGPT browser runtime is missing the exact prepared usage input");
-  }
-  return session.runtime.usageInput;
-}
-
 function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSession): CodexToolResultMessage[] {
   const byId = new Map<string, CodexToolResultMessage>();
   for (const message of parsed.context.messages) {
@@ -186,6 +179,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     provider.chatgptWeb?.lunaCheckpointStatePath
       ? resolve(expandUserPath(provider.chatgptWeb.lunaCheckpointStatePath))
       : undefined,
+  );
+  const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
+    parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !parsed._compactionRequest
+      ? lunaCheckpointStore.apply(parsed).parsed
+      : parsed
   );
 
   const startRuntime = (
@@ -255,7 +253,6 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         browser,
         trace,
         text,
-        usageInput: checkpointInput.parsed,
         cancel: () => browserAbort.abort(),
       };
     }
@@ -311,7 +308,6 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       browser,
       trace,
       text,
-      usageInput: checkpointInput.parsed,
       cancel: () => {
         browserAbort.abort();
         if (activeToken) broker.revoke(activeToken);
@@ -384,7 +380,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
-            emitBrowserCompletion(settled, estimateChatGptWebUsage(runtimeUsageInput(session), { answer: settled.answer, reasoning }, turnCapabilities), emit);
+            emitBrowserCompletion(settled, estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities), emit);
             return;
           }
 
@@ -400,7 +396,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (results.length === 0) {
                 const reasoning = session.reasoningForOutstandingReplay();
                 replayEvents(session.eventsForOutstandingReplay(), emit);
-                emitToolBatch(outstanding, estimateChatGptWebUsage(runtimeUsageInput(session), { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
+                emitToolBatch(outstanding, estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
                 return;
               }
               if (results.length !== outstanding.length) {
@@ -469,7 +465,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 }
                 emitBrowserCompletion(
                   next.outcome,
-                  estimateChatGptWebUsage(runtimeUsageInput(session), { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
+                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
                 return;
@@ -482,7 +478,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setOutstanding(next.requests, roundReasoning, roundEvents);
               emitToolBatch(
                 next.requests,
-                estimateChatGptWebUsage(runtimeUsageInput(session), { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
+                estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
                 emit,
               );
               return;

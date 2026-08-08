@@ -20,14 +20,18 @@ export const CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW = 90_000;
 export const CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
 export const CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT = 211_256;
 export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 1_048_572;
-export const CHATGPT_WEB_EXTRA_HIGH_CONTEXT_WINDOW = 256_000;
-export const CHATGPT_WEB_PRO_CONTEXT_WINDOW = 272_000;
-/** Pro-account model windows and separately measured one-message browser boundaries. */
-export const CHATGPT_WEB_PRO_INSTANT_CONTEXT_WINDOW = 137_000;
-export const CHATGPT_WEB_PRO_REASONING_CONTEXT_WINDOW = 256_000;
+/** Hidden ChatGPT product prompt and Codex Native schema reserve included in usage estimates. */
+export const CHATGPT_WEB_PLATFORM_RESERVE_TOKENS = 8_192;
+/** Pro-account usable browser windows and separately measured one-message boundaries. */
 export const CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT = 95_000;
 export const CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT = 103_000;
 export const CHATGPT_WEB_PRO_MODEL_MESSAGE_TOKEN_LIMIT = 104_000;
+// Browser message maxima are inclusive, while the context preflight treats its ceiling as an
+// exclusive upper bound. The extra token preserves the last accepted payload exactly.
+export const CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW =
+  CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
+export const CHATGPT_WEB_PRO_MODEL_CONTEXT_WINDOW =
+  CHATGPT_WEB_PRO_MODEL_MESSAGE_TOKEN_LIMIT + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
 export const CHATGPT_WEB_PRO_INSTANT_COMPOSER_CHAR_LIMIT = 545_000;
 export const CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT = 1_045_000;
 export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
@@ -40,12 +44,26 @@ export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
 
 export interface ChatGptWebContextLimits {
   contextWindow: number;
+  effectiveContextWindowPercent: number;
   autoCompactTokenLimit: number;
 }
 
 export interface ChatGptWebTransportLimits {
   browserMessageTokenLimit?: number;
   browserComposerCharLimit?: number;
+}
+
+function contextLimits(
+  contextWindow: number,
+  autoCompactTokenLimit: number,
+): ChatGptWebContextLimits {
+  return {
+    contextWindow,
+    // Codex reports this effective window in its context indicator. Align it with the practical
+    // pre-compaction budget instead of exposing an unreachable underlying model window.
+    effectiveContextWindowPercent: Math.round((autoCompactTokenLimit / contextWindow) * 100),
+    autoCompactTokenLimit,
+  };
 }
 
 /** Resolve the product limit for the selected visible ChatGPT mode. */
@@ -58,49 +76,31 @@ export function resolveChatGptWebContextLimits(
     // Luna carries continuity through a private checkpoint on every completed browser turn. Codex
     // internally clamps this field to 90% of the model window, but the reported active usage is the
     // bounded payload actually sent to ChatGPT and therefore stays far below that threshold.
-    return {
-      contextWindow: CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
-      autoCompactTokenLimit: CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
-    };
+    return contextLimits(CHATGPT_WEB_LUNA_CONTEXT_WINDOW, CHATGPT_WEB_LUNA_CONTEXT_WINDOW);
   }
 
   if (capabilities.proAvailable) {
     const contextWindow = effort === "low"
-      ? CHATGPT_WEB_PRO_INSTANT_CONTEXT_WINDOW
+      ? CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW
       : effort === "max"
-        ? CHATGPT_WEB_PRO_CONTEXT_WINDOW
-        : CHATGPT_WEB_PRO_REASONING_CONTEXT_WINDOW;
-    return {
-      contextWindow,
-      // The model can retain more context than ChatGPT accepts in one newly composed message.
-      // Compact before that transport boundary while preserving the real model window above.
-      autoCompactTokenLimit: Math.min(
-        Math.floor(contextWindow * 0.9),
-        CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT,
-      ),
-    };
+        ? CHATGPT_WEB_PRO_MODEL_CONTEXT_WINDOW
+        : CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW;
+    return contextLimits(contextWindow, CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT);
   }
 
   if (effort === "low") {
-    return {
-      contextWindow: CHATGPT_WEB_INSTANT_CONTEXT_WINDOW,
-      autoCompactTokenLimit: CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT,
-    };
+    return contextLimits(
+      CHATGPT_WEB_INSTANT_CONTEXT_WINDOW,
+      CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT,
+    );
   }
   if (effort === "medium" || effort === "high") {
-    return {
-      contextWindow: CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW,
-      autoCompactTokenLimit: CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT,
-    };
+    return contextLimits(
+      CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW,
+      CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT,
+    );
   }
-
-  const contextWindow = effort === "max"
-    ? CHATGPT_WEB_PRO_CONTEXT_WINDOW
-    : CHATGPT_WEB_EXTRA_HIGH_CONTEXT_WINDOW;
-  return {
-    contextWindow,
-    autoCompactTokenLimit: Math.floor(contextWindow * 0.9),
-  };
+  throw new Error(`ChatGPT Plus context limit is not defined for unavailable effort: ${effort}`);
 }
 
 /** Resolve limits of one visible ChatGPT composer message, independently of model context. */

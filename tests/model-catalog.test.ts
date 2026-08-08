@@ -68,6 +68,7 @@ describe("native /models augmentation", () => {
         priority: CHATGPT_WEB_MODEL_PRIORITY,
         context_window: limits.contextWindow,
         max_context_window: limits.contextWindow,
+        effective_context_window_percent: limits.effectiveContextWindowPercent,
         auto_compact_token_limit: limits.autoCompactTokenLimit,
         additional_speed_tiers: [],
         service_tiers: [],
@@ -113,11 +114,12 @@ describe("native /models augmentation", () => {
     expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
     expect(web.map(model => ({
       contextWindow: model.context_window,
+      effectiveContextWindowPercent: model.effective_context_window_percent,
       autoCompactTokenLimit: model.auto_compact_token_limit,
     }))).toEqual([
-      { contextWindow: 41_000, autoCompactTokenLimit: 32_000 },
-      { contextWindow: 90_000, autoCompactTokenLimit: 80_000 },
-      { contextWindow: 90_000, autoCompactTokenLimit: 80_000 },
+      { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
     ]);
   });
 
@@ -133,6 +135,7 @@ describe("native /models augmentation", () => {
       default_reasoning_level: "low",
       supported_reasoning_levels: [{ effort: "low", description: CHATGPT_WEB_LUNA_MODEL_ROUTE.displayName }],
       context_window: 1_050_000,
+      effective_context_window_percent: 100,
       auto_compact_token_limit: 1_050_000,
     });
   });
@@ -166,6 +169,7 @@ describe("native /models augmentation", () => {
       );
       expect(model.context_window).toBe(limits.contextWindow);
       expect(model.max_context_window).toBe(limits.contextWindow);
+      expect(model.effective_context_window_percent).toBe(limits.effectiveContextWindowPercent);
       expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
     }
   });
