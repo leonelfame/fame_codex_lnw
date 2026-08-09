@@ -11,15 +11,20 @@ import { extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "./en
 export const CHATGPT_LUNA_CHECKPOINT_MARKER = "CODEXLUNAPRIVATECHECKPOINTV1A7F3C9D2";
 export const CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS = 4_000;
 
-const checkpointString = z.string().trim().min(1).max(1_200);
-const checkpointSchema = z.object({
+const legacyCheckpointString = z.string().trim().min(1).max(1_200);
+const legacyCheckpointSchema = z.object({
   version: z.literal(1),
   objective: z.string().trim().min(1).max(2_000),
-  state: z.array(checkpointString).max(32),
-  evidence: z.array(checkpointString).max(32),
-  decisions: z.array(checkpointString).max(32),
-  pending: z.array(checkpointString).max(32),
+  state: z.array(legacyCheckpointString).max(32),
+  evidence: z.array(legacyCheckpointString).max(32),
+  decisions: z.array(legacyCheckpointString).max(32),
+  pending: z.array(legacyCheckpointString).max(32),
 }).strict();
+const textCheckpointSchema = z.object({
+  version: z.literal(2),
+  summary: z.string().trim().min(1).max(24_000),
+}).strict();
+const checkpointSchema = z.discriminatedUnion("version", [legacyCheckpointSchema, textCheckpointSchema]);
 
 export type ChatGptLunaCheckpoint = z.infer<typeof checkpointSchema>;
 
@@ -79,16 +84,10 @@ export function parseChatGptLunaCheckpoint(value: unknown): ChatGptLunaCheckpoin
 
 function parseCheckpointText(text: string): ChatGptLunaCheckpoint {
   const trimmed = text.trim();
-  if (!trimmed) throw new Error("ChatGPT Luna did not provide a rolling checkpoint JSON object");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch (error) {
-    throw new Error(
-      `ChatGPT Luna rolling checkpoint is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  return parseChatGptLunaCheckpoint(parsed);
+  if (!trimmed) throw new Error("ChatGPT Luna did not provide a rolling checkpoint");
+  // Luna supplies semantic state, not transport syntax. The bridge owns serialization so quotes,
+  // backslashes, control characters, and copied user text cannot make the checkpoint malformed.
+  return parseChatGptLunaCheckpoint({ version: 2, summary: trimmed });
 }
 
 /**
@@ -153,8 +152,8 @@ export class ChatGptLunaCheckpointStream {
     if (this.checkpointText.includes(CHATGPT_LUNA_CHECKPOINT_MARKER)) {
       throw new Error("ChatGPT Luna Markdown stream contained more than one rolling checkpoint marker");
     }
-    // Parse the DOM's plain text rather than Turndown Markdown: Turndown correctly escapes `_`,
-    // `*`, and brackets in ordinary prose, but those Markdown escapes are not valid JSON escapes.
+    // Capture the DOM's plain text rather than Turndown Markdown: the checkpoint is opaque
+    // assistant-owned state, so Markdown escapes must not alter paths, commands, or evidence.
     const checkpoint = parseCheckpointText(
       rawResponseText.slice(rawMarkerIndex + CHATGPT_LUNA_CHECKPOINT_MARKER.length),
     );
