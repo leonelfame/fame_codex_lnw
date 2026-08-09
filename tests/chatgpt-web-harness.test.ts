@@ -173,7 +173,7 @@ describe("ChatGPT outer-native harness v4", () => {
         request,
         { headers: new Headers() },
         () => {},
-      )).rejects.toThrow("require a V1-rooted task");
+      )).rejects.toThrow("existing V2 task cannot migrate surfaces");
       expect(browserStarts).toBe(0);
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
@@ -225,7 +225,7 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(() => chatGptTurnExecutionKey(request)).toThrow("conflicts with native Codex turn_id");
   });
 
-  test("starts a tool-capable browser turn from the current Codex metadata shape", async () => {
+  test("starts a tool-capable browser turn across a same-turn developer gap", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-canonical-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -237,14 +237,23 @@ describe("ChatGPT outer-native harness v4", () => {
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
+      expect(turn.capabilities.localToolsEnabled).toBe(true);
       const prepared = await turn.prepare();
       expect(prepared.text).toContain("<codex_context_json>");
+      expect(prepared.text).toMatch(/turn_token turn_[A-Za-z0-9_-]+/);
       const answer = "Canonical metadata accepted";
       turn.onTextDelta(answer);
       return answer;
     };
     try {
       const request = canonicalCurrentWireRequest(environmentXml);
+      const raw = request._rawBody as { input: Array<Record<string, unknown>> };
+      raw.input.splice(2, 0, {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Current Codex Desktop developer context." }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+      });
 
       const events: AdapterEvent[] = [];
       await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
@@ -333,6 +342,150 @@ describe("ChatGPT outer-native harness v4", () => {
       sandboxPolicy: { type: "dangerFullAccess" },
       tools,
     });
+  });
+
+  test("recovers a server-owned historical environment across a developer gap in a sparse native resume", () => {
+    const first = rawWireRequest(environmentXml);
+    const firstInput = (first._rawBody as { input: Array<Record<string, unknown>> }).input;
+    firstInput[0]!.id = "msg_historical_environment";
+    firstInput[1]!.id = "msg_historical_prompt";
+    firstInput.splice(1, 0, {
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text: "Historical Codex developer context" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+    });
+
+    const request = parsed();
+    const turnId = "turn_test_456";
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          thread_id: "thread_test_123",
+          turn_id: turnId,
+          sandbox: "windows_sandbox",
+          sandbox_mode: "none",
+          workspaces: { [tempRoot]: { git: null } },
+        }),
+      },
+      input: [
+        ...structuredClone(firstInput),
+        {
+          type: "message",
+          id: "msg_current_prompt",
+          role: "user",
+          content: [{ type: "input_text", text: "Continue in the same repository" }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+        },
+      ],
+    };
+
+    expect(extractChatGptTurnEnvironment(request)).toEqual({
+      cwd: tempRoot,
+      roots: [tempRoot],
+      writableRoots: [tempRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools,
+    });
+  });
+
+  test("rejects a sparse historical resume when current workspace metadata does not bind its roots", () => {
+    const first = rawWireRequest(environmentXml);
+    const firstInput = (first._rawBody as { input: Array<Record<string, unknown>> }).input;
+    firstInput[0]!.id = "msg_historical_environment";
+    firstInput[1]!.id = "msg_historical_prompt";
+    firstInput.splice(1, 0, {
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text: "Historical Codex developer context" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+    });
+    const request = parsed();
+    const turnId = "turn_test_456";
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          thread_id: "thread_test_123",
+          turn_id: turnId,
+          sandbox: "none",
+          workspaces: { [resolve(tempRoot, "other")]: { git: null } },
+        }),
+      },
+      input: [
+        ...structuredClone(firstInput),
+        {
+          type: "message",
+          id: "msg_current_prompt",
+          role: "user",
+          content: [{ type: "input_text", text: "Continue elsewhere" }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+        },
+      ],
+    };
+
+    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+  });
+
+  test("rejects sparse historical recovery without every provenance and sandbox binding", () => {
+    const validSparseResume = (): CodexParsedRequest => {
+      const first = rawWireRequest(environmentXml);
+      const firstInput = (first._rawBody as { input: Array<Record<string, unknown>> }).input;
+      firstInput[0]!.id = "msg_historical_environment";
+      firstInput[1]!.id = "msg_historical_prompt";
+      firstInput.splice(1, 0, {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Historical Codex developer context" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+      });
+      const request = parsed();
+      request._rawBody = {
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            thread_id: "thread_test_123",
+            turn_id: "turn_test_456",
+            sandbox: "windows_sandbox",
+            sandbox_mode: "none",
+            workspaces: { [tempRoot]: { git: null } },
+          }),
+        },
+        input: [
+          ...structuredClone(firstInput),
+          {
+            type: "message",
+            id: "msg_current_prompt",
+            role: "user",
+            content: [{ type: "input_text", text: "Continue in the same repository" }],
+            internal_chat_message_metadata_passthrough: { turn_id: "turn_test_456" },
+          },
+        ],
+      };
+      return request;
+    };
+    type SparseRaw = {
+      client_metadata: { "x-codex-turn-metadata": string };
+      input: Array<Record<string, unknown>>;
+    };
+    const updateMetadata = (raw: SparseRaw, update: (metadata: Record<string, unknown>) => void): void => {
+      const metadata = JSON.parse(raw.client_metadata["x-codex-turn-metadata"]) as Record<string, unknown>;
+      update(metadata);
+      raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    };
+    const mutations: Array<(raw: SparseRaw) => void> = [
+      raw => updateMetadata(raw, metadata => { delete metadata.thread_id; }),
+      raw => { delete raw.input[3]!.id; },
+      raw => { delete raw.input[0]!.id; },
+      raw => { delete raw.input[2]!.id; },
+      raw => { delete raw.input[1]!.internal_chat_message_metadata_passthrough; },
+      raw => { raw.input[1]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_other" }; },
+      raw => updateMetadata(raw, metadata => { metadata.sandbox_mode = "read-only"; }),
+    ];
+
+    for (const mutate of mutations) {
+      const request = validSparseResume();
+      mutate(request._rawBody as SparseRaw);
+      expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+    }
   });
 
   test("rejects a historical environment pair without intervening assistant output", () => {

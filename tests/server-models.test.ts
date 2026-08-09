@@ -41,6 +41,7 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
       auto_compact_token_limit?: number;
       supported_in_api?: boolean;
       priority?: number;
+      multi_agent_version?: string;
     }>;
   };
   expect(body.models.map(model => model.slug)).toEqual([
@@ -52,6 +53,7 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
     "chatgpt-web/pro",
   ]);
   expect(body.models[0]!.max_context_window).toBe(371_851);
+  expect(body.models[0]!.multi_agent_version).toBe("v1");
   for (const [index, model] of body.models.slice(1).entries()) {
     const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);

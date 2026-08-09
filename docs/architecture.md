@@ -103,7 +103,11 @@ mode.
 
 Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
 forwards the authenticated official model catalog and appends only the routed models owned by the
-`chatgpt-web/` namespace; no static catalog is installed.
+`chatgpt-web/` namespace; no static catalog is installed. While the integration is active, native
+models that support delegation and routed Web models share Codex's readable V1 collaboration
+surface so an explicitly selected Web subagent receives plaintext task content. An explicit native
+`disabled` delegation capability is preserved. Model choice, effort, context, and service tiers are
+otherwise unchanged.
 
 The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
 HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky

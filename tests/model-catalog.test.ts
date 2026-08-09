@@ -9,7 +9,7 @@ import {
 function source(): Record<string, unknown> {
   return {
     models: [
-      { slug: "gpt-5.5", display_name: "5.5", priority: 1 },
+      { slug: "gpt-5.5", display_name: "5.5", priority: 1, multi_agent_version: "disabled" },
       {
         slug: "gpt-5.6-sol",
         display_name: "5.6 Sol",
@@ -35,7 +35,7 @@ function source(): Record<string, unknown> {
         service_tiers: [{ id: "fast", name: "Fast" }],
         default_service_tier: "fast",
       },
-      { slug: "gpt-5.6-terra", display_name: "5.6 Terra", priority: 3 },
+      { slug: "gpt-5.6-terra", display_name: "5.6 Terra", priority: 3, multi_agent_version: "v2" },
     ],
   };
 }
@@ -48,9 +48,14 @@ describe("native /models augmentation", () => {
     config.proAvailable = true;
     const result = augmentNativeModelCatalog(native, config);
     const models = result.models as Array<Record<string, unknown>>;
+    const originalModels = nativeSnapshot.models as Array<Record<string, unknown>>;
 
     expect(native).toEqual(nativeSnapshot);
-    expect(models.slice(0, 3)).toEqual(nativeSnapshot.models as Array<Record<string, unknown>>);
+    expect(models.slice(0, 3)).toEqual([
+      originalModels[0],
+      { ...originalModels[1], multi_agent_version: "v1" },
+      { ...originalModels[2], multi_agent_version: "v1" },
+    ]);
     const web = models.slice(3);
     expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
     expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
@@ -78,20 +83,33 @@ describe("native /models augmentation", () => {
     }
   });
 
-  test("keeps every routed Web model in Codex's V1 spawn-agent model registry", () => {
+  test("keeps every routed Web model in a native-rooted V1 spawn-agent model registry", () => {
     const config = defaultConfig("full");
     config.proAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+    const parent = models.find(model => model.slug === "gpt-5.6-sol")!;
+    expect(parent.multi_agent_version).toBe("v1");
 
-    // Codex treats a custom openai_base_url as an API-compatible provider, filters out models
-    // unsupported by that API, sorts by priority, and exposes at most five spawn overrides.
+    // Bundled Codex 0.147.0-alpha.6.5 accepts only exact-v2 rows from a V2 parent. A V1 parent
+    // accepts the readable catalog, then sorts by priority and exposes at most five overrides.
+    const parentSurface = parent.multi_agent_version;
     const spawnOverrides = models
       .filter(model => model.supported_in_api === true && model.visibility === "list")
+      .filter(model => parentSurface !== "v2" || model.multi_agent_version === parentSurface)
       .toSorted((left, right) => Number(left.priority) - Number(right.priority))
       .slice(0, 5)
       .map(model => model.slug);
 
     expect(spawnOverrides).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
+  });
+
+  test("preserves an explicit native delegation disable while normalizing other native pins to V1", () => {
+    const config = defaultConfig("full");
+    const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+
+    expect(models.find(model => model.slug === "gpt-5.5")?.multi_agent_version).toBe("disabled");
+    expect(models.find(model => model.slug === "gpt-5.6-sol")?.multi_agent_version).toBe("v1");
+    expect(models.find(model => model.slug === "gpt-5.6-terra")?.multi_agent_version).toBe("v1");
   });
 
   test("owns only its namespace, is idempotent, and omits Pro-only modes when unavailable", () => {
@@ -156,8 +174,8 @@ describe("native /models augmentation", () => {
     expect(native).toEqual(nativeSnapshot);
     expect(models.slice(0, 3)).toEqual([
       { ...originalModels[0], max_context_window: 371_851 },
-      { ...originalModels[1], max_context_window: 371_851 },
-      { ...originalModels[2], max_context_window: 371_851 },
+      { ...originalModels[1], max_context_window: 371_851, multi_agent_version: "v1" },
+      { ...originalModels[2], max_context_window: 371_851, multi_agent_version: "v1" },
     ]);
     expect(models[1]!.context_window).toBe(300_000);
     for (const [index, model] of models.slice(3).entries()) {
