@@ -48,6 +48,38 @@ function brokerTestEndpoint(name: string): string {
     : join(tmpdir(), `${name}.sock`);
 }
 
+interface GatewayProgramCall {
+  name: string;
+  input: unknown;
+}
+
+async function executeGatewayProgram(
+  program: string,
+  availableToolNames: string[],
+  calls: GatewayProgramCall[],
+): Promise<void> {
+  const nestedTools = Object.fromEntries(availableToolNames.map(name => [
+    name,
+    async (input: unknown) => {
+      calls.push({ name, input });
+      return { output: name, exit_code: 0 };
+    },
+  ]));
+  const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+    ...args: string[]
+  ) => (...values: unknown[]) => Promise<void>;
+  const execute = new AsyncFunction("tools", "ALL_TOOLS", "text", "image", "audio", "generatedImage", program);
+  const ignoreOutput = (_value: unknown): void => {};
+  await execute(
+    nestedTools,
+    availableToolNames.map(name => ({ name, description: `${name} test tool` })),
+    ignoreOutput,
+    ignoreOutput,
+    ignoreOutput,
+    ignoreOutput,
+  );
+}
+
 function parsed(developerText?: string): CodexParsedRequest {
   return {
     modelId: CHATGPT_WEB_MODEL_ID,
@@ -1741,17 +1773,58 @@ describe("ChatGPT outer-native harness v4", () => {
         openWorldHint: true,
       });
 
-      const firstExec = call("codex_exec", { turn_token: token, cmd: "pwd", workdir: tempRoot });
+      const firstExec = call("codex_exec", {
+        turn_token: token,
+        cmd: "pwd",
+        workdir: tempRoot,
+        yield_time_ms: 2_000,
+        max_output_tokens: 1_234,
+        tty: true,
+      });
       const secondExec = call("codex_exec", { turn_token: token, cmd: "git status --short", workdir: tempRoot });
       const execRequests = await broker.nextToolBatch(token);
       expect(execRequests).toHaveLength(2);
       expect(execRequests.every(request => request.wireName === "exec" && request.freeform)).toBe(true);
-      expect(execRequests.some(request => request.input?.includes(JSON.stringify({ cmd: "pwd", workdir: tempRoot })))).toBe(true);
+      expect(execRequests.some(request => request.input?.includes(JSON.stringify({
+        cmd: "pwd",
+        workdir: tempRoot,
+        yield_time_ms: 2_000,
+        max_output_tokens: 1_234,
+        tty: true,
+      })))).toBe(true);
       expect(execRequests.some(request => request.input?.includes(JSON.stringify({ cmd: "git status --short", workdir: tempRoot })))).toBe(true);
       for (const request of execRequests) {
-        expect(request.input).toContain('tools["exec_command"]');
+        expect(request.input).toContain("ALL_TOOLS");
+        expect(request.input).toContain('"exec_command"');
+        expect(request.input).toContain('"shell_command"');
         const output = request.input?.includes('git status --short') ? "clean" : tempRoot;
         broker.completeTool(token, request.callId, toolResult({ output, exit_code: 0 }));
+      }
+      const pwdRequest = execRequests.find(request => request.input?.includes('"cmd":"pwd"'));
+      expect(pwdRequest?.input).toBeString();
+      const execGatewayCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(pwdRequest!.input!, ["exec_command"], execGatewayCalls);
+      expect(execGatewayCalls).toEqual([{
+        name: "exec_command",
+        input: {
+          cmd: "pwd",
+          workdir: tempRoot,
+          yield_time_ms: 2_000,
+          max_output_tokens: 1_234,
+          tty: true,
+        },
+      }]);
+      const shellGatewayCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(pwdRequest!.input!, ["shell_command"], shellGatewayCalls);
+      expect(shellGatewayCalls).toEqual([{
+        name: "shell_command",
+        input: { command: "pwd", workdir: tempRoot, timeout_ms: 2_000 },
+      }]);
+      for (const ambiguousInventory of [[], ["exec_command", "shell_command"]]) {
+        const rejectedCalls: GatewayProgramCall[] = [];
+        await expect(executeGatewayProgram(pwdRequest!.input!, ambiguousInventory, rejectedCalls))
+          .rejects.toThrow("Expected exactly one native command tool");
+        expect(rejectedCalls).toEqual([]);
       }
       expect((await firstExec).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
       expect((await secondExec).structuredContent).toEqual({ output: "clean", exit_code: 0 });
@@ -1987,7 +2060,9 @@ describe("ChatGPT outer-native harness v4", () => {
         }),
       ]);
       expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
-      expect(execRequest?.input).toContain('tools["exec_command"]');
+      expect(execRequest?.input).toContain("ALL_TOOLS");
+      expect(execRequest?.input).toContain('"exec_command"');
+      expect(execRequest?.input).toContain('"shell_command"');
       expect(execRequest?.input).toContain(JSON.stringify({ cmd: "pwd", workdir: tempRoot }));
       broker.completeTool(token, execRequest!.callId, toolResult({ output: tempRoot, exit_code: 0 }));
       expect((await execPromise).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
