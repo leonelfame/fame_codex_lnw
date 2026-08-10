@@ -56,11 +56,14 @@ trigger account abuse controls.
 
 Sign-in is the deliberate exception. The launcher opens the configured system Google Chrome or
 Chromium in a dedicated temporary profile so platform passkeys and identity verification remain
-available. The runtime attaches to that same browser over a loopback-only ephemeral DevTools port,
+available. The runtime attaches to that same browser over a loopback-only randomly reserved
+DevTools port,
 waits for an authenticated Temporary Chat composer, captures the session, and closes the dedicated
-browser without relaunching its profile. It then independently verifies the captured state, filters
-it to ChatGPT/OpenAI cookies plus ChatGPT local storage, imports it into the launcher-owned Electron
-partition, proves the embedded composer again, and deletes the temporary transfer. Any validation,
+browser without relaunching its profile or starting a second browser process. Before closing it, the
+runtime verifies the serialized capture in a fresh context inside that same owned Chrome process.
+The launcher then filters the capture to ChatGPT/OpenAI cookies plus ChatGPT local storage, imports
+it into the launcher-owned Electron partition, independently proves the embedded composer, and
+deletes the temporary transfer. Any validation,
 import, verification, or cleanup failure clears the partial Electron session and fails explicitly.
 
 The current compiled Codex task context is inserted as one inline JSON envelope. Image bytes stay

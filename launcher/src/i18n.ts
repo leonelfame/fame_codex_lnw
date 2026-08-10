@@ -49,7 +49,7 @@ const en = {
   optional: "Optional",
   required: "Required",
   stepAccount: "Sign in to ChatGPT",
-  stepAccountBody: "Sign in through system Chrome or Chromium. Only the verified ChatGPT session is imported into this launcher's private profile.",
+  stepAccountBody: "Sign in through system Chrome or Chromium. Only allowlisted ChatGPT state is imported and verified in this launcher's private profile.",
   signIn: "Open sign in",
   checkingSignIn: "Checking saved session",
   verifySignIn: "Check sign in",
