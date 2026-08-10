@@ -422,6 +422,17 @@ test("system-browser storage transfer imports only allowlisted ChatGPT/OpenAI st
   const validated = validateChatGptStorageState({
     cookies: [
       {
+        name: "partitioned-auxiliary",
+        value: "must-not-cross",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        partitionKey: "https://chatgpt.com",
+      },
+      {
         name: "session",
         value: "secret-session",
         domain: ".chatgpt.com",
@@ -458,9 +469,44 @@ test("system-browser storage transfer imports only allowlisted ChatGPT/OpenAI st
     ],
   });
 
+  assert.deepEqual(validated.cookies.map((cookie) => cookie.name), ["session", "__Host-session"]);
   assert.equal(validated.cookies[0].domain, ".chatgpt.com");
   assert.equal(Object.hasOwn(validated.cookies[1], "domain"), false);
   assert.deepEqual(validated.localStorage, [{ name: "theme", value: "dark" }]);
+});
+
+test("system-browser storage transfer fails closed when only partitioned cookies remain", () => {
+  assert.throws(
+    () =>
+      validateChatGptStorageState({
+        cookies: [
+          {
+            name: "partitioned-chatgpt",
+            value: "unsupported",
+            domain: ".chatgpt.com",
+            path: "/",
+            expires: -1,
+            httpOnly: true,
+            secure: true,
+            sameSite: "None",
+            partitionKey: "https://chatgpt.com",
+          },
+          {
+            name: "partitioned-openai",
+            value: "unsupported",
+            domain: ".openai.com",
+            path: "/",
+            expires: -1,
+            httpOnly: true,
+            secure: true,
+            sameSite: "None",
+            partitionKey: "https://chatgpt.com",
+          },
+        ],
+        origins: [],
+      }),
+    /contains no ChatGPT\/OpenAI cookies/,
+  );
 });
 
 test("system-browser login proves the Electron composer and cleans transfer state", async () => {

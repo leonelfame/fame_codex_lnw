@@ -189,9 +189,8 @@ function validateChatGptStorageState(value) {
     }
     const domain = boundedLoginStateString(raw.domain, "cookie domain", { allowEmpty: false });
     if (!isAllowedLoginCookieDomain(domain)) continue;
-    if (raw.partitionKey !== undefined) {
-      throw new Error("System-browser login state contains an unsupported partitioned ChatGPT/OpenAI cookie");
-    }
+    // Electron cannot represent CHIPS; never flatten one into an unpartitioned cookie.
+    if (raw.partitionKey !== undefined) continue;
     const name = boundedLoginStateString(raw.name, "cookie name", { allowEmpty: false });
     const cookieValue = boundedLoginStateString(raw.value, "cookie value");
     const cookiePath = boundedLoginStateString(raw.path, "cookie path", { allowEmpty: false });
