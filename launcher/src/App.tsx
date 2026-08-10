@@ -1017,7 +1017,7 @@ function McpSurface({
   return (
     <ContentSurface fit subtitle={copy.mcpSubtitle} title="MCP">
       {!snapshot.state.codexCatalogVerified ? (
-        <NoticeRow icon="setup" tone="warning">{copy.stepInstallBody}</NoticeRow>
+        <NoticeRow icon="setup" tone="warning">{copy.mcpCatalogRequired}</NoticeRow>
       ) : null}
 
       <div className="wizard-stepper" aria-label={`${step + 1} / 3`}>
@@ -1125,7 +1125,11 @@ function McpSurface({
                 </div>
               )
             ) : null}
-            {step === 1 ? <p className="mcp-step-two-hint">{copy.mcpStepTwoHint}</p> : null}
+            {step === 1 ? (
+              <p className="mcp-step-two-hint">
+                {snapshot.state.codexCatalogVerified ? copy.mcpStepTwoHint : copy.mcpCatalogRequired}
+              </p>
+            ) : null}
             {step === 2 ? (
               <div className="connector-actions">
                 <NoticeRow icon="alert" tone="warning">{copy.connectorMigrationNotice}</NoticeRow>
