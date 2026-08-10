@@ -83,7 +83,7 @@ const output = [
   "",
   "This file covers runtime JavaScript packages bundled into the standalone executable.",
   "The executable also embeds Bun 1.3.14; Bun's licensing and relinking notice follows first.",
-  "Project/OpenCodex notices are distributed separately in LICENSES/NOTICE.md and OpenCodex-MIT.txt.",
+  "Project notices are distributed separately in LICENSES/NOTICE.md.",
   "",
   "=".repeat(80),
   "Bun 1.3.14 runtime",

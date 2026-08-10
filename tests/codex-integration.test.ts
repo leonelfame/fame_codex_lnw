@@ -429,13 +429,13 @@ describe("reversible native Codex route integration", () => {
       installed: { model_provider: "codex-chatgpt-web", model_catalog_json: managedCatalog },
       previous: {
         model_provider: { present: false },
-        model_catalog_json: { present: true, rawLine: 'model_catalog_json = "/missing/opencodex-catalog.json"', value: "/missing/opencodex-catalog.json" },
+        model_catalog_json: { present: true, rawLine: 'model_catalog_json = "/missing/custom-catalog.json"', value: "/missing/custom-catalog.json" },
       },
     }));
 
     installCodexIntegration(defaultConfig("browser-only"));
     const installed = readFileSync(configPath, "utf8");
-    expect(installed).not.toContain("opencodex-catalog");
+    expect(installed).not.toContain("custom-catalog");
     expect(installed).not.toContain("model_catalog_json");
     expect(installed).not.toContain("model_provider");
     expect(installed).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
