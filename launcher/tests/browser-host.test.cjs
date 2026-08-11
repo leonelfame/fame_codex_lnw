@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
@@ -955,6 +956,52 @@ test("connector verification hard-refreshes an already hydrated Temporary Chat p
 
   assert.equal(loaded, false);
   assert.equal(refreshed, true);
+});
+
+test("hard refresh accepts Chromium's completed loading cycle even without did-finish-load", async () => {
+  const calls = [];
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.reloadIgnoringCache = () => {
+    calls.push("reload");
+    queueMicrotask(() => {
+      contents.emit("did-start-loading");
+      contents.emit("did-stop-loading");
+    });
+  };
+  contents.stop = () => calls.push("stop");
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: contents },
+    setState: patch => calls.push(["state", patch]),
+  });
+
+  await fixture.hardRefreshHome(100);
+
+  assert.deepEqual(calls.filter(call => call === "reload" || call === "stop"), ["reload"]);
+  assert.equal(contents.listenerCount("did-start-loading"), 0);
+  assert.equal(contents.listenerCount("did-stop-loading"), 0);
+  assert.equal(contents.listenerCount("did-finish-load"), 0);
+});
+
+test("hard refresh timeout cannot become success when stopping emits did-stop-loading", async () => {
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.reloadIgnoringCache = () => queueMicrotask(() => contents.emit("did-start-loading"));
+  contents.stop = () => contents.emit("did-stop-loading");
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: contents },
+    setState() {},
+  });
+
+  const keepTestAlive = setTimeout(() => {}, 100);
+  try {
+    await assert.rejects(
+      fixture.hardRefreshHome(5),
+      /ChatGPT hard refresh did not finish within 60 seconds/,
+    );
+  } finally {
+    clearTimeout(keepTestAlive);
+  }
 });
 
 test("launcher session refresh resolves persisted authentication before setup actions", async () => {

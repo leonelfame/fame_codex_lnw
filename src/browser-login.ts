@@ -12,10 +12,9 @@ import {
 import type { AppConfig } from "./config";
 import { atomicWriteFile } from "./config";
 import {
-  assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
   CHATGPT_TEMPORARY_CHAT_URL,
   detectChatGptAccountCapabilities,
+  isAuthenticatedTemporaryChatPage,
 } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
@@ -187,13 +186,7 @@ async function waitForAuthenticatedTemporaryChat(
   while (Date.now() < deadline) {
     for (const page of context.pages()) {
       if (page.isClosed()) continue;
-      try {
-        await assertAuthenticatedChatGptPage(page);
-        await assertTemporaryChatPage(page);
-        return page;
-      } catch {
-        // Authentication redirects and provider pages are expected until the owned Temporary Chat is ready.
-      }
+      if (await isAuthenticatedTemporaryChatPage(page)) return page;
     }
     const exited = await Promise.race([
       browserExit,

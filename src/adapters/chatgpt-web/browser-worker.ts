@@ -254,6 +254,22 @@ export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
 
+function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
+}
+
+function promptInsertChunkEnd(text: string, offset: number): number {
+  let end = Math.min(offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS, text.length);
+  if (end >= text.length) return end;
+  const previousCodeUnit = text.charCodeAt(end - 1);
+  const nextCodeUnit = text.charCodeAt(end);
+  if (previousCodeUnit >= 0xD800 && previousCodeUnit <= 0xDBFF
+    && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF) {
+    end -= 1;
+  }
+  return end;
+}
+
 export interface BrowserTurn {
   traceId: string;
   modelId: string;
@@ -1128,14 +1144,21 @@ export class ChatGptBrowserWorker {
     }, undefined, { timeout: 20_000 });
   }
 
-  private async assertPromptAttached(page: Page, prompt: string): Promise<void> {
+  private async assertPromptAttached(
+    page: Page,
+    prompt: string,
+    abortSignal?: AbortSignal,
+  ): Promise<void> {
     const deadline = Date.now() + 10_000;
     let observed = "";
     while (Date.now() < deadline) {
+      throwIfPromptAttachmentAborted(abortSignal);
       observed = await this.attachedPromptText(page);
+      throwIfPromptAttachmentAborted(abortSignal);
       if (observed === prompt) return;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
+    throwIfPromptAttachmentAborted(abortSignal);
     let commonPrefix = 0;
     while (commonPrefix < prompt.length && prompt[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
     throw new Error(
@@ -1260,7 +1283,9 @@ export class ChatGptBrowserWorker {
     prompt: string,
     localTools: boolean,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    abortSignal?: AbortSignal,
   ): Promise<void> {
+    throwIfPromptAttachmentAborted(abortSignal);
     if (!localTools) {
       const composer = await this.activeComposer(page);
       // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
@@ -1268,38 +1293,121 @@ export class ChatGptBrowserWorker {
       // then transport the complete text in one CDP Input.insertText command.
       await composer.fill("");
       await composer.focus();
-      await this.insertPromptText(page, prompt);
-      await this.assertPromptAttached(page, prompt);
+      await this.insertPromptText(page, prompt, abortSignal);
+      await this.assertPromptAttached(page, prompt, abortSignal);
       return;
     }
     const selectedComposer = await this.selectConnector(page, captureDiagnostic);
     await selectedComposer.focus();
     await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
-    await this.insertPromptText(page, ` ${prompt}`);
-    await this.assertPromptAttached(page, prompt);
+    await this.insertPromptText(page, ` ${prompt}`, abortSignal);
+    await this.assertPromptAttached(page, prompt, abortSignal);
   }
 
-  private async insertPromptText(page: Page, text: string): Promise<void> {
-    for (let offset = 0; offset < text.length; offset += CHATGPT_PROMPT_INSERT_CHUNK_CHARS) {
-      const end = Math.min(offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS, text.length);
-      await page.keyboard.insertText(text.slice(offset, end));
-      if (end < text.length) {
-        await this.waitForPromptChunkAttached(page, text.slice(0, end).trimStart());
-        // Input.insertText leaves the native caret after the committed edit. Keep that exact
-        // insertion point: a document-end shortcut makes Lexical reconstruct the boundary block
-        // and can preserve the length while changing prompt text around the chunk boundary.
+  private async reanchorPromptCaret(page: Page, abortSignal?: AbortSignal): Promise<void> {
+    throwIfPromptAttachmentAborted(abortSignal);
+    const composer = await this.activeComposer(page);
+    await composer.focus();
+    const anchored = await composer.evaluate(async element => {
+      const ignoredSelector = '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]';
+      const editableRootNodes = [...element.childNodes].filter(node => (
+        node.nodeType === Node.TEXT_NODE
+          ? (node.textContent ?? "").length > 0
+          : node instanceof Element && !node.matches(ignoredSelector)
+      ));
+      const finalRootNode = editableRootNodes[editableRootNodes.length - 1];
+      if (!finalRootNode) return false;
+
+      const textNodes: Text[] = [];
+      const collectTextNodes = (node: Node): void => {
+        if (node instanceof Element && node.matches(ignoredSelector)) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+          if ((node.textContent ?? "").length > 0) textNodes.push(node as Text);
+          return;
+        }
+        for (const child of node.childNodes) collectTextNodes(child);
+      };
+      collectTextNodes(finalRootNode);
+      const lastTextNode = textNodes[textNodes.length - 1];
+      const cursorTarget = finalRootNode instanceof Element
+        ? finalRootNode.querySelector("[data-inline-selection-pill-cursor-target]")
+        : null;
+
+      let targetNode: Node;
+      let targetOffset: number;
+      const cursorFollowsText = lastTextNode && cursorTarget
+        ? (lastTextNode.compareDocumentPosition(cursorTarget) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+        : false;
+      if (cursorTarget?.parentNode && (!lastTextNode || cursorFollowsText)) {
+        targetNode = cursorTarget.parentNode;
+        targetOffset = [...targetNode.childNodes].indexOf(cursorTarget);
+      } else if (lastTextNode) {
+        targetNode = lastTextNode;
+        targetOffset = lastTextNode.data.length;
+      } else if (finalRootNode instanceof Element && !["AREA", "BR", "HR", "IMG", "INPUT"].includes(finalRootNode.tagName)) {
+        targetNode = finalRootNode;
+        targetOffset = finalRootNode.childNodes.length;
+      } else {
+        return false;
       }
+
+      const selection = window.getSelection();
+      if (!selection) return false;
+      const selectionIsExact = (): boolean => selection.isCollapsed
+        && selection.anchorNode === targetNode
+        && selection.anchorOffset === targetOffset
+        && selection.focusNode === targetNode
+        && selection.focusOffset === targetOffset;
+      if (!selectionIsExact()) {
+        const range = document.createRange();
+        range.setStart(targetNode, targetOffset);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      // BrowserHost disables background throttling for active turn pages. One frame lets Lexical
+      // apply any selection observer before we accept the exact node-and-offset postcondition.
+      await new Promise<void>(resolveFrame => requestAnimationFrame(() => resolveFrame()));
+      return selectionIsExact();
+    }, undefined, { timeout: 20_000 });
+    throwIfPromptAttachmentAborted(abortSignal);
+    if (!anchored) {
+      throw new Error("ChatGPT composer could not re-anchor the prompt caret at the document end");
     }
   }
 
-  private async waitForPromptChunkAttached(page: Page, expected: string): Promise<void> {
+  private async insertPromptText(page: Page, text: string, abortSignal?: AbortSignal): Promise<void> {
+    for (let offset = 0; offset < text.length;) {
+      throwIfPromptAttachmentAborted(abortSignal);
+      const end = promptInsertChunkEnd(text, offset);
+      await page.keyboard.insertText(text.slice(offset, end));
+      throwIfPromptAttachmentAborted(abortSignal);
+      if (end < text.length) {
+        // Lexical can rebuild the active block after an exact commit and move its native selection.
+        // Re-anchor only after the verified prefix is stable, before the next irreversible edit.
+        const expectedPrefix = text.slice(0, end).trimStart();
+        await this.waitForPromptChunkAttached(page, expectedPrefix, abortSignal);
+        await this.reanchorPromptCaret(page, abortSignal);
+      }
+      offset = end;
+    }
+  }
+
+  private async waitForPromptChunkAttached(
+    page: Page,
+    expected: string,
+    abortSignal?: AbortSignal,
+  ): Promise<void> {
     const deadline = Date.now() + 20_000;
     let observed = "";
     do {
+      throwIfPromptAttachmentAborted(abortSignal);
       observed = await this.attachedPromptText(page);
+      throwIfPromptAttachmentAborted(abortSignal);
       if (observed === expected) return;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     } while (Date.now() < deadline);
+    throwIfPromptAttachmentAborted(abortSignal);
     let commonPrefix = 0;
     while (commonPrefix < expected.length && expected[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
     throw new Error(
@@ -1762,9 +1870,18 @@ export class ChatGptBrowserWorker {
         )
       ));
       await diagnostics.capture(page, "effort-selection-complete");
-      await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
-        this.attachPrompt(page, prepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
-      ));
+      await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, (stageSignal) => {
+        const promptAbortSignal = turn.abortSignal
+          ? AbortSignal.any([stageSignal, turn.abortSignal])
+          : stageSignal;
+        return this.attachPrompt(
+          page,
+          prepared.text,
+          mode.localTools,
+          checkpoint => diagnostics.capture(page, checkpoint),
+          promptAbortSignal,
+        );
+      });
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
         this.attachFiles(page, prepared)

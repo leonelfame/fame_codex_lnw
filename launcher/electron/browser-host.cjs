@@ -629,8 +629,11 @@ class BrowserHost {
     });
     await new Promise((resolve, reject) => {
       let settled = false;
+      let reloadStarted = false;
       const cleanup = () => {
         clearTimeout(timeout);
+        contents.off("did-start-loading", onStarted);
+        contents.off("did-stop-loading", onStopped);
         contents.off("did-finish-load", onFinished);
         contents.off("did-fail-load", onFailed);
         contents.off("render-process-gone", onRendererGone);
@@ -643,7 +646,9 @@ class BrowserHost {
         if (error) reject(error);
         else resolve();
       };
-      const onFinished = () => finish();
+      const onStarted = () => { reloadStarted = true; };
+      const onStopped = () => { if (reloadStarted) finish(); };
+      const onFinished = () => { if (reloadStarted) finish(); };
       const onFailed = (_event, errorCode, errorDescription, url, mainFrame) => {
         if (!mainFrame || errorCode === -3) return;
         finish(new Error(`ChatGPT hard refresh failed: ${errorDescription} (${url})`));
@@ -653,10 +658,12 @@ class BrowserHost {
       };
       const onDestroyed = () => finish(new Error("ChatGPT closed during hard refresh"));
       const timeout = setTimeout(() => {
-        if (!contents.isDestroyed()) contents.stop();
         finish(new Error("ChatGPT hard refresh did not finish within 60 seconds"));
+        if (!contents.isDestroyed()) contents.stop();
       }, timeoutMs);
       timeout.unref?.();
+      contents.on("did-start-loading", onStarted);
+      contents.on("did-stop-loading", onStopped);
       contents.on("did-finish-load", onFinished);
       contents.on("did-fail-load", onFailed);
       contents.on("render-process-gone", onRendererGone);
