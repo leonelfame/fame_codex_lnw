@@ -96,6 +96,17 @@ const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
 
+class ChatGptConnectorCatalogStaleError extends Error {
+  constructor(
+    readonly appName: string,
+    readonly visibleRows: string[],
+    readonly triggerAttempts: number,
+  ) {
+    super(`ChatGPT connector catalog is missing ${JSON.stringify(appName)}`);
+    this.name = "ChatGptConnectorCatalogStaleError";
+  }
+}
+
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
   .filter({ hasText: /making requests too quickly/i })
@@ -244,12 +255,12 @@ const browserStageTimeouts = {
 } as const;
 
 /**
- * CDP accepts large Input.insertText payloads, but a single oversized edit can outrun ChatGPT's
- * Lexical update path. Keep every browser edit below the 139,331-character Send ceiling measured
- * on the current Free/Luna composer. This chunks only the input event; the resulting user message
- * remains one exact prompt and is verified byte-for-byte after insertion.
+ * A six-figure Input.insertText can make current ChatGPT Lexical surfaces rewrite text inside the
+ * first edit even when its final UTF-16 length is unchanged. Bound only the native edit operation;
+ * the resulting user message remains one exact prompt, and every prefix is still verified before
+ * another irreversible edit. This is independent of model context and compaction limits.
  */
-export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 100_000;
+export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 16_000;
 export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
@@ -1209,6 +1220,7 @@ export class ChatGptBrowserWorker {
   private async selectConnector(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    catalogRefreshAvailable = false,
   ): Promise<Locator> {
     let composer = await this.activeComposer(page);
     await composer.fill("");
@@ -1245,6 +1257,17 @@ export class ChatGptBrowserWorker {
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
         if (Date.now() >= menuDeadline) {
+          const visibleRows = await this.connectorMentionRowTitles(menuRows);
+          if (catalogRefreshAvailable && visibleRows.length > 0) {
+            const legacyName = LEGACY_CHATGPT_CONNECTOR_NAMES.find(name => visibleRows.includes(name));
+            if (!legacyName && !visibleRows.includes(this.config.appName)) {
+              throw new ChatGptConnectorCatalogStaleError(
+                this.config.appName,
+                visibleRows,
+                triggerAttempts,
+              );
+            }
+          }
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
         }
@@ -1284,6 +1307,7 @@ export class ChatGptBrowserWorker {
     localTools: boolean,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
+    catalogRefreshAvailable = false,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
     if (!localTools) {
@@ -1297,7 +1321,11 @@ export class ChatGptBrowserWorker {
       await this.assertPromptAttached(page, prompt, abortSignal);
       return;
     }
-    const selectedComposer = await this.selectConnector(page, captureDiagnostic);
+    const selectedComposer = await this.selectConnector(
+      page,
+      captureDiagnostic,
+      catalogRefreshAvailable,
+    );
     await selectedComposer.focus();
     await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
     await this.insertPromptText(page, ` ${prompt}`, abortSignal);
@@ -1419,7 +1447,14 @@ export class ChatGptBrowserWorker {
   private async verifyConnectorExclusive(): Promise<string> {
     const page = await this.ensurePage();
     await this.prepareTemporaryChatSurface(page);
-    await this.selectConnector(page);
+    try {
+      await this.selectConnector(page, undefined, true);
+    } catch (error) {
+      if (!(error instanceof ChatGptConnectorCatalogStaleError)) throw error;
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+      await this.prepareTemporaryChatSurface(page);
+      await this.selectConnector(page);
+    }
     return this.config.appName;
   }
 
@@ -1860,28 +1895,53 @@ export class ChatGptBrowserWorker {
           checkpoint => diagnostics.capture(page, checkpoint),
         ),
       );
-      const mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
-        this.selectModelAndEffort(
-          page,
-          turn.modelId,
-          turn.reasoning,
-          turn.capabilities,
-          checkpoint => diagnostics.capture(page, checkpoint),
-        )
-      ));
-      await diagnostics.capture(page, "effort-selection-complete");
-      await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, (stageSignal) => {
-        const promptAbortSignal = turn.abortSignal
-          ? AbortSignal.any([stageSignal, turn.abortSignal])
-          : stageSignal;
-        return this.attachPrompt(
-          page,
-          prepared.text,
-          mode.localTools,
-          checkpoint => diagnostics.capture(page, checkpoint),
-          promptAbortSignal,
-        );
-      });
+      let mode: ChatGptWebModelMode;
+      let catalogRefreshAvailable = requestedMode.localTools;
+      for (;;) {
+        mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
+          this.selectModelAndEffort(
+            page,
+            turn.modelId,
+            turn.reasoning,
+            turn.capabilities,
+            checkpoint => diagnostics.capture(page, checkpoint),
+          )
+        ));
+        await diagnostics.capture(page, "effort-selection-complete");
+        try {
+          await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, (stageSignal) => {
+            const promptAbortSignal = turn.abortSignal
+              ? AbortSignal.any([stageSignal, turn.abortSignal])
+              : stageSignal;
+            return this.attachPrompt(
+              page,
+              prepared.text,
+              mode.localTools,
+              checkpoint => diagnostics.capture(page, checkpoint),
+              promptAbortSignal,
+              catalogRefreshAvailable,
+            );
+          });
+          break;
+        } catch (error) {
+          if (!(error instanceof ChatGptConnectorCatalogStaleError) || !catalogRefreshAvailable) throw error;
+          catalogRefreshAvailable = false;
+          await diagnostics.capture(page, "connector-catalog-stale");
+          await this.runStage(
+            turn.traceId,
+            "connector_catalog_refresh",
+            browserStageTimeouts.temporaryChatPreparation,
+            async () => {
+              await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+              await this.prepareTemporaryChatSurface(
+                page,
+                checkpoint => diagnostics.capture(page, checkpoint),
+              );
+            },
+          );
+          await diagnostics.capture(page, "connector-catalog-refreshed");
+        }
+      }
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
         this.attachFiles(page, prepared)
@@ -2005,13 +2065,10 @@ export class ChatGptBrowserWorker {
             }
             if (final.delta) emitMarkdownDelta(final.delta);
             if (checkpointStream) {
-              if (!checkpointStream.hasCheckpointMarker()) {
-                const remainder = checkpointStream.flushVisibleRemainder();
-                if (remainder) turn.onTextDelta(remainder);
-                throw new Error("ChatGPT Luna completed without the required private rolling checkpoint");
-              }
-              const completed = checkpointStream.finish(snapshot.visibleText);
-              turn.onLunaCheckpoint!(completed.captured);
+              const completed = checkpointStream.finishOptional(snapshot.visibleText);
+              if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
+              if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
+              else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
             } else {
               finalText = final.markdown;

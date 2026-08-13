@@ -38,46 +38,6 @@ export interface ChatGptEffortSliderState {
   value: number;
 }
 
-export interface ChatGptAuthenticationSurfaceEvidence {
-  url: string;
-  visibleComposerCount: number;
-}
-
-export function chatGptAuthenticationSurfaceReady(
-  evidence: ChatGptAuthenticationSurfaceEvidence,
-): boolean {
-  if (evidence.visibleComposerCount !== 1) return false;
-  try {
-    const actual = new URL(evidence.url);
-    const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
-    return actual.origin === expected.origin
-      && actual.pathname === expected.pathname
-      && actual.searchParams.get("temporary-chat") === "true";
-  } catch {
-    return false;
-  }
-}
-
-export async function isAuthenticatedTemporaryChatPage(page: Page): Promise<boolean> {
-  const evidence = await page.evaluate(({ composerSelector }) => {
-    const visible = (element: Element): boolean => {
-      const style = getComputedStyle(element);
-      const bounds = element.getBoundingClientRect();
-      return element.isConnected
-        && bounds.width > 0
-        && bounds.height > 0
-        && style.display !== "none"
-        && style.visibility !== "hidden"
-        && style.opacity !== "0";
-    };
-    return {
-      url: location.href,
-      visibleComposerCount: [...document.querySelectorAll(composerSelector)].filter(visible).length,
-    };
-  }, { composerSelector: CHATGPT_COMPOSER_SELECTOR }).catch(() => undefined);
-  return evidence ? chatGptAuthenticationSurfaceReady(evidence) : false;
-}
-
 function safeIntegerAttribute(value: string | null): number | undefined {
   if (value === null || !/^-?\d+$/.test(value)) return undefined;
   const parsed = Number(value);

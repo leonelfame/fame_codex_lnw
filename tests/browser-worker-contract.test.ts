@@ -4,7 +4,7 @@ import type { Page } from "playwright-core";
 import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
-import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable } from "../src/config";
+import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
 import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -155,8 +155,12 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 
 test("connector verification and real tool turns share one Playwright selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
-  expect(workerSource.match(/this\.prepareTemporaryChatSurface\(\s*page/g)?.length).toBe(4);
+  expect(workerSource).toContain("private async selectConnector(");
+  expect(workerSource).toContain("const selectedComposer = await this.selectConnector(");
+  expect(workerSource).toContain("await this.selectConnector(page, undefined, true)");
+  expect(workerSource.match(/this\.prepareTemporaryChatSurface\(\s*page/g)?.length).toBeGreaterThanOrEqual(4);
+  expect(workerSource).toContain('"connector_catalog_refresh"');
+  expect(workerSource).toContain('"connector-catalog-refreshed"');
   expect(workerSource).toContain('"temporary_chat_preparation"');
   expect(workerSource).toContain('if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL)');
   expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
@@ -292,7 +296,42 @@ test("multi-chunk prompt insertion repairs a drifted Lexical caret after each ex
   ]);
 });
 
-test("the real compaction envelope survives a simulated 16-unit caret drift at its 100k boundary", async () => {
+test("prompt insertion never sends the six-figure native edit that rewrites the first 100k prefix", async () => {
+  const prompt = "x".repeat(100_000) + "tail";
+  let attached = "";
+  let caret = 0;
+  const nativeEditSizes: number[] = [];
+  const page = {
+    keyboard: {
+      insertText: async (value: string) => {
+        nativeEditSizes.push(value.length);
+        // Model the exact v2.1.8 failure boundary: one six-figure native edit preserves length but
+        // rewrites content twelve units before its end. The bounded transport must never invoke it.
+        const committed = value.length >= 100_000
+          ? `${value.slice(0, value.length - 12)}!${value.slice(value.length - 11)}`
+          : value;
+        attached = `${attached.slice(0, caret)}${committed}${attached.slice(caret)}`;
+        caret += committed.length;
+      },
+    },
+  };
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
+
+  await insertPromptText.call({
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
+      expect(attached).toBe(expected);
+    },
+    reanchorPromptCaret: async () => { caret = attached.length; },
+  }, page, prompt);
+
+  expect(nativeEditSizes.length).toBeGreaterThan(1);
+  expect(Math.max(...nativeEditSizes)).toBe(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+  expect(attached).toBe(prompt);
+});
+
+test("the real compaction envelope survives simulated caret drift at every bounded edit boundary", async () => {
   const compact: CodexParsedRequest = {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
@@ -314,11 +353,10 @@ test("the real compaction envelope survives a simulated 16-unit caret drift at i
     { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
   expect(compiled.text.length).toBeGreaterThan(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
-  expect(compiled.text.length).toBeLessThan(CHATGPT_PROMPT_INSERT_CHUNK_CHARS * 2);
 
   let attached = "";
   let caret = 0;
-  let simulatedDrift = false;
+  let simulatedDrifts = 0;
   const page = {
     keyboard: {
       insertText: async (value: string) => {
@@ -335,12 +373,12 @@ test("the real compaction envelope survives a simulated 16-unit caret drift at i
     waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
       expect(attached).toBe(expected);
       caret = Math.max(0, attached.length - 16);
-      simulatedDrift = true;
+      simulatedDrifts += 1;
     },
     reanchorPromptCaret: async () => { caret = attached.length; },
   }, page, compiled.text);
 
-  expect(simulatedDrift).toBeTrue();
+  expect(simulatedDrifts).toBe(Math.floor((compiled.text.length - 1) / CHATGPT_PROMPT_INSERT_CHUNK_CHARS));
   expect(attached).toBe(compiled.text);
 });
 
@@ -557,6 +595,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   await selectConnector.call({
     config: { appName: "Codex Native2" },
     connectorIsSelected: async () => selected,
+    connectorMentionRowTitles: async () => [],
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
       activeComposerCalls += 1;
@@ -570,6 +609,139 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     "clear", "focus", "type", "menu:2",
     "activate", "selected",
   ]);
+});
+
+test("connector verification refreshes one stale catalog and re-proves the exact connector", async () => {
+  const calls: string[] = [];
+  let catalogFresh = false;
+  let selected = false;
+  let now = Date.now();
+  const realDateNow = Date.now;
+  const timeout = new Error("stale catalog");
+  timeout.name = "TimeoutError";
+  const selectedConnector = {
+    waitFor: async () => { calls.push("selected"); },
+  };
+  const appResult = {
+    waitFor: async () => {
+      calls.push(`menu:${catalogFresh ? "fresh" : "stale"}`);
+      if (!catalogFresh) {
+        now += 2_501;
+        throw timeout;
+      }
+    },
+    count: async () => catalogFresh ? 1 : 0,
+    click: async () => {
+      selected = true;
+      calls.push("activate");
+    },
+  };
+  const visibleRows = {
+    allInnerTexts: async () => catalogFresh ? ["Codex Native2"] : ["Another connector"],
+  };
+  const menuRows = {
+    filter: (options: { has?: unknown; visible?: boolean }) => options.visible ? visibleRows : appResult,
+  };
+  const initialComposer = {
+    fill: async () => { calls.push("clear"); },
+    focus: async () => { calls.push("focus"); },
+    pressSequentially: async () => { calls.push("type"); },
+  };
+  const selectedComposer = { selected: true };
+  const page = {
+    reload: async () => {
+      if (catalogFresh) throw new Error("connector catalog reloaded twice");
+      catalogFresh = true;
+      calls.push("reload");
+    },
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: () => menuRows,
+  };
+  const prototype = ChatGptBrowserWorker.prototype as unknown as {
+    connectorMentionFailure(menuRows: unknown, triggerAttempts: number): Promise<string>;
+    connectorMentionRowTitles(menuRows: unknown): Promise<string[]>;
+    selectConnector(page: unknown, capture?: unknown, refresh?: boolean): Promise<unknown>;
+    verifyConnectorExclusive(): Promise<string>;
+  };
+  let prepared = 0;
+  const fixture = {
+    config: { appName: "Codex Native2" },
+    ensurePage: async () => page,
+    prepareTemporaryChatSurface: async () => {
+      prepared += 1;
+      calls.push(`prepare:${prepared}`);
+    },
+    activeComposer: async () => selected ? selectedComposer : initialComposer,
+    connectorIsSelected: async () => selected,
+    connectorMentionFailure: prototype.connectorMentionFailure,
+    connectorMentionRowTitles: prototype.connectorMentionRowTitles,
+    selectedConnectorControl: () => selectedConnector,
+    selectConnector: prototype.selectConnector,
+  };
+
+  Date.now = () => now;
+  try {
+    await expect(prototype.verifyConnectorExclusive.call(fixture)).resolves.toBe("Codex Native2");
+    expect(prepared).toBe(2);
+    expect(calls.filter(call => call === "reload")).toEqual(["reload"]);
+    expect(calls.filter(call => call === "menu:stale")).toHaveLength(8);
+    expect(calls).toContain("menu:fresh");
+    expect(calls).toContain("activate");
+    expect(calls).toContain("selected");
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
+test("connector catalog refresh stays fail-closed for absent, legacy, and exact menu evidence", async () => {
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown, capture?: unknown, refresh?: boolean): Promise<unknown>;
+  }).selectConnector;
+  const timeout = new Error("menu timeout");
+  timeout.name = "TimeoutError";
+  const realDateNow = Date.now;
+  const run = async (visibleRows: string[]) => {
+    let now = realDateNow();
+    const page = {
+      getByText: () => ({ exactConnectorLabel: true }),
+      locator: () => ({
+        filter: (options: { has?: unknown; visible?: boolean }) => options.visible
+          ? { allInnerTexts: async () => visibleRows }
+          : {
+              waitFor: async () => {
+                now += 20_001;
+                throw timeout;
+              },
+            },
+      }),
+    };
+    Date.now = () => now;
+    try {
+      return await selectConnector.call({
+        config: { appName: CHATGPT_CONNECTOR_NAME },
+        activeComposer: async () => ({
+          fill: async () => {},
+          focus: async () => {},
+          pressSequentially: async () => {},
+        }),
+        connectorIsSelected: async () => false,
+        connectorMentionRowTitles: async () => visibleRows,
+        connectorMentionFailure: async (_rows: unknown, attempts: number) => (
+          visibleRows.length === 0
+            ? `menu absent after ${attempts}`
+            : visibleRows.includes("Codex Native")
+              ? legacyChatGptConnectorMigrationMessage("Codex Native")
+              : `exact row was not visible after ${attempts}`
+        ),
+      }, page, undefined, true);
+    } finally {
+      Date.now = realDateNow;
+    }
+  };
+
+  await expect(run([])).rejects.toThrow("menu absent");
+  await expect(run(["Codex Native"])).rejects.toThrow("Legacy ChatGPT connector");
+  await expect(run([CHATGPT_CONNECTOR_NAME])).rejects.toThrow("exact row was not visible");
 });
 
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {

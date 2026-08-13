@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
@@ -777,6 +777,57 @@ describe("ChatGPT outer-native harness v4", () => {
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("a missing optional Luna checkpoint completes once without repeating the browser turn", async () => {
+    const checkpointPath = join(tempRoot, `missing-luna-checkpoint-${Date.now()}.json`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-luna-missing-checkpoint-${Date.now()}`,
+      chatgptWeb: {
+        localToolsEnabled: false,
+        solAvailable: false,
+        proAvailable: false,
+        lunaCheckpointStatePath: checkpointPath,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      const prepared = await turn.prepare();
+      try {
+        expect(turn.captureLunaCheckpoint).toBeTrue();
+        const answer = "Luna completed the requested task.";
+        turn.onTextDelta(answer);
+        return answer;
+      } finally {
+        prepared.release();
+      }
+    };
+
+    const request = rawWireRequest(environmentXml);
+    request.modelId = "gpt-5.6-luna";
+    request.options.reasoning = "low";
+    const adapter = createChatGptWebAdapter(provider);
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const events: AdapterEvent[] = [];
+        await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+        expect(events.filter(event => event.type === "text_delta" && event.phase === "final_answer")).toEqual([{
+          type: "text_delta",
+          text: "Luna completed the requested task.",
+          phase: "final_answer",
+        }]);
+        expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+        expect(events.some(event => event.type === "error")).toBeFalse();
+      }
+      expect(browserStarts).toBe(1);
+      expect(existsSync(checkpointPath)).toBeFalse();
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     }
   });
 

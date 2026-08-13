@@ -7,6 +7,7 @@ import {
   deactivateCodexIntegration,
   getCodexHome,
   getCodexJournalPath,
+  getCodexJournalRecoveryPath,
   getCodexModelsCachePath,
   installCodexIntegration,
   inspectCodexIntegration,
@@ -72,10 +73,63 @@ describe("reversible native Codex route integration", () => {
     expect(installed).not.toMatch(/^\s*model_provider\s*=/m);
     expect(installed).not.toMatch(/^\s*model_catalog_json\s*=/m);
     expect(installed).not.toContain("[model_providers.codex-chatgpt-web]");
+    expect(readFileSync(getCodexJournalRecoveryPath(), "utf8"))
+      .toBe(readFileSync(getCodexJournalPath(), "utf8"));
 
     expect(uninstallCodexIntegration()).toEqual({ changed: true });
     expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(existsSync(getCodexJournalRecoveryPath())).toBe(false);
     expect(uninstallCodexIntegration()).toEqual({ changed: false });
+  });
+
+  test("restores a missing primary journal from its exact recovery copy", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+    const recovery = readFileSync(getCodexJournalRecoveryPath(), "utf8");
+    rmSync(getCodexJournalPath());
+
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: true, errors: [] });
+    expect(readFileSync(getCodexJournalPath(), "utf8")).toBe(recovery);
+  });
+
+  test("refuses different journal baselines when both match the same config", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+    const recovery = JSON.parse(readFileSync(getCodexJournalRecoveryPath(), "utf8"));
+    recovery.previous.model_provider = { present: false, rawLine: "different but inactive evidence" };
+    writeFileSync(getCodexJournalRecoveryPath(), `${JSON.stringify(recovery, null, 2)}\n`);
+
+    expect(() => inspectCodexIntegration()).toThrow("different baselines");
+  });
+
+  test("reconciles either side of a crash between recovery intent, config, and primary commit", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+    const activeConfig = readFileSync(configPath, "utf8");
+    const activeJournal = readFileSync(getCodexJournalPath(), "utf8");
+
+    deactivateCodexIntegration();
+    const inactiveConfig = readFileSync(configPath, "utf8");
+    const inactiveJournal = readFileSync(getCodexJournalRecoveryPath(), "utf8");
+
+    // Recovery intent and config reached disk, but primary still describes the old active state.
+    writeFileSync(getCodexJournalPath(), activeJournal);
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: false, errors: [] });
+    expect(readFileSync(getCodexJournalPath(), "utf8")).toBe(inactiveJournal);
+
+    // Only the next active intent reached disk; physical config and primary are still inactive.
+    writeFileSync(getCodexJournalRecoveryPath(), activeJournal);
+    writeFileSync(configPath, inactiveConfig);
+    writeFileSync(getCodexJournalPath(), inactiveJournal);
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: false, errors: [] });
+    expect(readFileSync(getCodexJournalRecoveryPath(), "utf8")).toBe(inactiveJournal);
+    expect(readFileSync(configPath, "utf8")).not.toBe(activeConfig);
   });
 
   test("accepts an explicitly persisted built-in openai provider and restores it exactly", () => {

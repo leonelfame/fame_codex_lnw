@@ -105,6 +105,14 @@ function allowedToolName(tool: unknown): string | undefined {
   return undefined;
 }
 
+const DEFAULT_FUNCTION_NAMESPACE = "functions";
+
+function normalizedToolNamespace(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value !== DEFAULT_FUNCTION_NAMESPACE
+    ? value
+    : undefined;
+}
+
 function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
   if (!tools) return undefined;
   const out: CodexTool[] = [];
@@ -118,28 +126,45 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
     if (namespace) tool.namespace = namespace;
     out.push(tool);
   };
+  const pushFreeform = (t: Record<string, unknown>) => {
+    const tool: CodexTool = {
+      name: t.name as string,
+      description: (t.description as string) ?? "",
+      parameters: {
+        type: "object",
+        properties: {
+          input: {
+            type: "string",
+            description: "Raw tool input. For apply_patch, begin exactly with `*** Begin Patch` (no trailing `***`), then use its standard patch envelope.",
+          },
+        },
+        required: ["input"],
+      },
+      freeform: true,
+    };
+    out.push(tool);
+  };
   for (const t of tools) {
     if (!isObj(t)) continue;
     if (t.type === "function" && typeof t.name === "string") {
       pushFn(t);
     } else if (t.type === "namespace" && Array.isArray(t.tools)) {
-      // MCP tools arrive grouped under a namespace tool; flatten the inner function tools so
-      // chat-completions models receive them (round-trip restores the namespace in the bridge).
-      const ns = typeof t.name === "string" ? t.name : undefined;
+      // Responses Lite groups ordinary native functions and the native freeform `exec` tool under
+      // the default `functions` namespace. Flatten normal functions from every namespace, and the
+      // official freeform variant only from that default namespace. Non-default custom namespaces
+      // need a distinct round-trip contract and must not be silently exposed as function calls.
+      const ns = normalizedToolNamespace(t.name);
       for (const inner of t.tools as unknown[]) {
-        if (isObj(inner) && inner.type === "function" && typeof inner.name === "string") pushFn(inner, ns);
+        if (!isObj(inner) || typeof inner.name !== "string") continue;
+        if (inner.type === "function") pushFn(inner, ns);
+        else if (t.name === DEFAULT_FUNCTION_NAMESPACE && inner.type === "custom") pushFreeform(inner);
       }
     }
     else if (t.type === "custom" && typeof t.name === "string") {
       // Freeform custom tool (e.g. apply_patch). Chat models can't emit a lark grammar, so expose a
       // function with a single string `input` carrying the raw tool body; the bridge relays the model's
       // call back as a custom_tool_call (Codex's freeform handler rejects a function_call → fatal abort).
-      out.push({
-        name: t.name,
-        description: (t.description as string) ?? "",
-        parameters: { type: "object", properties: { input: { type: "string", description: "Raw tool input. For apply_patch, begin exactly with `*** Begin Patch` (no trailing `***`), then use its standard patch envelope." } }, required: ["input"] },
-        freeform: true,
-      });
+      pushFreeform(t);
     }
     else if (t.type === "tool_search") {
       // Client-executed tool discovery — the gateway to deferred tools (subagents, extra MCP tools).
@@ -495,8 +520,9 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         const wireNames: string[] = [];
         for (const spec of specs) {
           if (spec.type === "namespace" && Array.isArray(spec.tools)) {
+            const namespace = normalizedToolNamespace(spec.name);
             for (const inner of spec.tools as Record<string, unknown>[]) {
-              if (typeof inner.name === "string") wireNames.push(namespacedToolName(spec.name as string, inner.name));
+              if (typeof inner.name === "string") wireNames.push(namespacedToolName(namespace, inner.name));
             }
           } else if (typeof spec.name === "string") {
             wireNames.push(spec.name);
