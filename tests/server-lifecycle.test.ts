@@ -3,9 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { callTurnBroker, closeTurnBrokers } from "../src/adapters/chatgpt-web/turn-broker";
+import { callTurnBroker, closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
+
+test("DEV harness configuration cannot bind a Responses listener", () => {
+  const config = { ...defaultConfig("browser-only"), purpose: "dev-harness" as const, port: 0 };
+  expect(() => startServer(config)).toThrow("cannot start a Responses listener");
+});
 
 async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promise<void> {
   const deadline = Date.now() + 1_000;
@@ -174,6 +179,42 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
       await Bun.sleep(20);
     }
     expect(message).toContain("turn token is invalid");
+  } finally {
+    await server.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("lifecycle drain and cancellation include browser turns owned by the external DEV driver", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-dev-lifecycle-"));
+  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
+  await TurnBroker.forSocket(config.brokerSocketPath).listen();
+  const server = startServer(config);
+  const endpoint = `http://127.0.0.1:${server.port}`;
+  const authorization = { authorization: `Bearer ${config.controlToken}` };
+  const remote = new RemoteTurnBroker(config.brokerSocketPath);
+  try {
+    const environment = {
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    };
+    const token = await remote.register(environment, 60_000, "dev-lifecycle");
+    const waiting = remote.nextToolBatch(token).then(
+      () => "resolved",
+      error => error instanceof Error ? error.message : String(error),
+    );
+
+    const drain = await fetch(`${endpoint}/admin/drain`, { method: "POST", headers: authorization });
+    expect(await drain.json()).toMatchObject({ active_browser_turns: 1, accepting_turns: false });
+    await expect(remote.register(environment, 60_000, "dev-after-drain")).rejects.toThrow("draining");
+
+    const cancel = await fetch(`${endpoint}/admin/cancel-browser-turns`, { method: "POST", headers: authorization });
+    expect(await cancel.json()).toMatchObject({ cancelled_browser_turns: 1, active_browser_turns: 0 });
+    expect(await waiting).toContain("revoked");
   } finally {
     await server.stop(true);
     await closeTurnBrokers();

@@ -486,11 +486,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      connectorSelected = true;
-      calls.push(["click"]);
-    },
+    getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
   };
   const selectedConnector = {
     waitFor: async () => {
@@ -536,6 +532,13 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
       }
       throw new Error(`Unexpected locator: ${selector}`);
     },
+    keyboard: {
+      press: async (key: string) => {
+        expect(key).toBe("Enter");
+        connectorSelected = true;
+        calls.push(["press"]);
+      },
+    },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -560,9 +563,51 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["click"],
+    ["press"],
     ["waitForSelectedConnector"],
   ]);
+});
+
+test("connector selection moves highlight to the exact hidden-viewport row before Enter", async () => {
+  const keys: string[] = [];
+  let arrowCount = 0;
+  let selected = false;
+  const selectedConnector = { waitFor: async () => {} };
+  const appResult = {
+    waitFor: async () => {},
+    count: async () => 1,
+    getAttribute: async () => arrowCount >= 2 ? "" : null,
+  };
+  const menuRows = {
+    evaluateAll: async () => [],
+    filter: (options: { visible?: boolean }) => options.visible
+      ? { count: async () => 3 }
+      : appResult,
+  };
+  const initialComposer = { fill: async () => {}, focus: async () => {}, pressSequentially: async () => {} };
+  const selectedComposer = { selected: true };
+  const page = {
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: () => menuRows,
+    keyboard: {
+      press: async (key: string) => {
+        keys.push(key);
+        if (key === "ArrowDown") arrowCount += 1;
+        if (key === "Enter") selected = true;
+      },
+    },
+  };
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  await expect(selectConnector.call({
+    config: { appName: "Codex Native2 DEV" },
+    connectorIsSelected: async () => selected,
+    selectedConnectorControl: () => selectedConnector,
+    activeComposer: async () => selected ? selectedComposer : initialComposer,
+  }, page)).resolves.toBe(selectedComposer);
+  expect(keys).toEqual(["ArrowDown", "ArrowDown", "Enter"]);
 });
 
 test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
@@ -585,11 +630,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       if (menuAttempt === 1) throw timeout;
     },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push("activate");
-    },
+    getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
   };
   const selectedComposer = {
     locator: () => ({ filter: () => selectedConnector }),
@@ -607,6 +648,13 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult, evaluateAll: async () => [] }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+    keyboard: {
+      press: async (key: string) => {
+        expect(key).toBe("Enter");
+        selected = true;
+        calls.push("activate");
+      },
+    },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -652,10 +700,7 @@ test("connector verification refreshes one stale catalog and re-proves the exact
       }
     },
     count: async () => catalogFresh ? 1 : 0,
-    click: async () => {
-      selected = true;
-      calls.push("activate");
-    },
+    getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
   };
   const visibleRows = {
     allInnerTexts: async () => catalogFresh ? ["Codex Native2"] : ["Another connector"],
@@ -677,6 +722,13 @@ test("connector verification refreshes one stale catalog and re-proves the exact
     },
     getByText: () => ({ exactConnectorLabel: true }),
     locator: () => menuRows,
+    keyboard: {
+      press: async (key: string) => {
+        expect(key).toBe("Enter");
+        selected = true;
+        calls.push("activate");
+      },
+    },
   };
   const prototype = ChatGptBrowserWorker.prototype as unknown as {
     connectorMentionFailure(menuRows: unknown, triggerAttempts: number): Promise<string>;
@@ -778,11 +830,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const appResult = {
     waitFor: async () => { calls.push(["connectorMenu"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push(["selectConnector"]);
-    },
+    getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
   };
   const selectedComposer = {
     focus: async () => { calls.push(["selectedFocus"]); },
@@ -800,7 +848,15 @@ test("tool-capable prompts use the shared Playwright connector selection before 
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
-      press: async (value: string) => { calls.push(["press", value]); },
+      press: async (value: string) => {
+        if (!selected) {
+          expect(value).toBe("Enter");
+          selected = true;
+          calls.push(["selectConnector"]);
+          return;
+        }
+        calls.push(["press", value]);
+      },
     },
   };
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {

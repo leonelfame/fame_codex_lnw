@@ -22,6 +22,7 @@ import { existingFullSetupCredentials, setup, type SetupOptions } from "./setup"
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
+import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -34,6 +35,11 @@ Usage:
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web browser check
+  codex-chatgpt-web dev launcher
+  codex-chatgpt-web dev status [--json]
+  codex-chatgpt-web dev setup <--browser-only|--full> [options]
+  codex-chatgpt-web dev chat NAME [--model MODEL] [MESSAGE]
+  codex-chatgpt-web dev list
   codex-chatgpt-web serve
   codex-chatgpt-web mcp [--broker-socket PATH]
   codex-chatgpt-web service <status|install|start|restart|stop|cancel-turns>
@@ -344,6 +350,9 @@ async function main(): Promise<void> {
     return;
   }
   const command = args.shift() ?? "help";
+  if (command === "dev" && home) {
+    throw new Error("--home does not apply to DEV mode; use CODEX_WEB_GPT_DEV_HOME for an explicit isolated DEV profile");
+  }
   if (command === "help") stdout.write(HELP);
   else if (command === "setup") await setupCommand(args);
   else if (command === "login") await loginCommand(args);
@@ -367,7 +376,8 @@ async function main(): Promise<void> {
     const server = startServer(config);
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
-  } else if (command === "mcp") await runChatGptMcpMain(args);
+  } else if (command === "dev") await runDevCommand(args);
+  else if (command === "mcp") await runChatGptMcpMain(args);
   else if (command === "service") await serviceCommand(args);
   else if (command === "tunnel") await tunnelCommand(args);
   else if (command === "open") await openCommand(args);

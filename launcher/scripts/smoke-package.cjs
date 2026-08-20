@@ -18,6 +18,7 @@ function run(command, args, options = {}) {
     cwd: options.cwd || scratch,
     env: options.env || process.env,
     encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
     timeout: options.timeout || 45_000,
     windowsHide: true,
   });
@@ -42,6 +43,7 @@ function artifact(pattern, label) {
 function smokeEnvironment() {
   return {
     ...process.env,
+    TMPDIR: scratch,
     CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
     CODEX_CHATGPT_WEB_HOME: coreHome,
     CODEX_HOME: path.join(scratch, "codex-home"),

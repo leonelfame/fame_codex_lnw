@@ -26,6 +26,8 @@
     "start": "bun run src/cli.ts serve",
     "setup": "bun run src/cli.ts setup",
     "doctor": "bun run src/cli.ts doctor",
+    "dev:launcher": "bun run src/cli.ts dev launcher",
+    "dev:chat": "bun run src/cli.ts dev chat",
     "test": "bun test tests/*.test.ts",
     "audit": "bun audit",
     "check-version": "bun run scripts/check-version.ts",

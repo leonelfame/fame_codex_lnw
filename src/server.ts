@@ -145,6 +145,13 @@ export class HttpTurnCounter {
 
 type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
 
+export interface ResponseRequestOptions {
+  /** DEV and other in-process harnesses can keep continuation state in their own canonical store. */
+  rememberState?: boolean;
+  /** Observe the exact production adapter stream when invoking the handler in-process. */
+  onAdapterEvent?: (event: AdapterEvent) => void;
+}
+
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
   parsed.modelId = route.backendModel;
@@ -211,6 +218,7 @@ export async function responseRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
+  options: ResponseRequestOptions = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: unknown;
@@ -278,9 +286,14 @@ export async function responseRequest(
   else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
   const run = async () => {
     try {
-      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => queue.push(event));
+      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => {
+        options.onAdapterEvent?.(event);
+        queue.push(event);
+      });
     } catch (error) {
-      queue.push({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const event: AdapterEvent = { type: "error", message: error instanceof Error ? error.message : String(error) };
+      options.onAdapterEvent?.(event);
+      queue.push(event);
     } finally {
       queue.close();
     }
@@ -301,7 +314,9 @@ export async function responseRequest(
       {
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         ...(compaction ? { compaction: true } : {
-          onCompletedResponse: (response: Record<string, unknown>) => rememberResponseState(parsed._rawBody, response, { force: true }),
+          ...(options.rememberState === false ? {} : {
+            onCompletedResponse: (response: Record<string, unknown>) => rememberResponseState(parsed._rawBody, response, { force: true }),
+          }),
         }),
       },
     );
@@ -324,7 +339,9 @@ export async function responseRequest(
     toolSearchToolNames: maps.toolSearchToolNames,
     ...(compaction ? { compaction: true } : {}),
   });
-  if (!compaction) rememberResponseState(parsed._rawBody, json, { force: true });
+  if (!compaction && options.rememberState !== false) {
+    rememberResponseState(parsed._rawBody, json, { force: true });
+  }
   return Response.json(json);
 }
 
@@ -440,9 +457,13 @@ export function startServer(
   config: AppConfig,
   dependencies: { fetchUpstream?: NativeFetch } = {},
 ): ReturnType<typeof Bun.serve> {
+  if (config.purpose === "dev-harness") {
+    throw new Error("DEV harness configuration cannot start a Responses listener");
+  }
   const startedAt = Date.now();
+  const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
-    void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {
+    void turnBroker!.listen().catch(error => {
       console.error(
         `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -455,7 +476,7 @@ export function startServer(
   const httpTurns = new HttpTurnCounter();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
-    active_browser_turns: chatGptTurnSessions.activeCount(),
+    active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
   });
   const controlAuthorized = (req: Request): boolean => {
     const header = req.headers.get("authorization") ?? "";
@@ -487,11 +508,12 @@ export function startServer(
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         draining = url.pathname === "/admin/drain";
+        turnBroker?.setExternalOwnersAccepted(!draining);
         return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-browser-turns") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        const cancelled = chatGptTurnSessions.clear();
+        const cancelled = chatGptTurnSessions.clear() + (turnBroker?.revokeExternalOwners() ?? 0);
         return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {

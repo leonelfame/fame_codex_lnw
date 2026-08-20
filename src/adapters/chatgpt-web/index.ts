@@ -10,7 +10,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./env
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
-import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
+import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
@@ -158,9 +158,12 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
   }
 }
 
-export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
+export function createChatGptWebAdapter(
+  provider: CodexProviderConfig,
+  dependencies: { broker?: TurnBrokerOwner } = {},
+): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
-  const broker = TurnBroker.forSocket(brokerSocketPath(provider));
+  const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
   const configuredCapabilities: ChatGptWebCapabilities = {
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
@@ -283,7 +286,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           );
           return { ...compiled, release: () => {} };
         } catch (error) {
-          broker.revoke(turnToken);
+          await broker.revoke(turnToken);
           throw error;
         }
       },
@@ -310,7 +313,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       text,
       cancel: () => {
         browserAbort.abort();
-        if (activeToken) broker.revoke(activeToken);
+        if (activeToken) {
+          void Promise.resolve(broker.revoke(activeToken)).catch(error => {
+            console.error(`[chatgpt-web] failed to revoke cancelled turn token: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
       },
     };
   };
@@ -402,7 +409,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           if (session.runtime.mode === "tools") {
             turnToken = await withAbort(session.runtime.token, incoming.abortSignal);
             if (!environment) throw new Error("Tool-capable ChatGPT web runtime lost its trusted environment");
-            broker.updateEnvironment(turnToken, environment);
+            await broker.updateEnvironment(turnToken, environment);
 
             const outstanding = session.outstanding();
             if (outstanding.length > 0) {
@@ -417,7 +424,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 throw new Error(`Codex returned ${results.length} of ${outstanding.length} results for a parallel ChatGPT tool batch`);
               }
               for (const message of results) {
-                broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
+                await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
                 session.markResultDelivered(message.toolCallId);
               }
             }
@@ -472,7 +479,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (next.type === "browser") {
                 session.setFinalReasoning(roundReasoning);
                 session.setFinalEvents(roundEvents);
-                if (turnToken) broker.revoke(turnToken);
+                if (turnToken) await broker.revoke(turnToken);
                 if (next.outcome.type === "error") throw next.outcome.error;
                 if (session.runtime.text.value() !== next.outcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");

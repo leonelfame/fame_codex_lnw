@@ -5,10 +5,12 @@ import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
+export type LauncherBrowserHostProfile = "production" | "development";
 
 export interface LauncherBrowserHostDescriptor {
-  version: 1;
+  version: 2;
   kind: typeof LAUNCHER_BROWSER_HOST_KIND;
+  profile: LauncherBrowserHostProfile;
   pid: number;
   endpoint: string;
   control: {
@@ -51,8 +53,11 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
     throw new Error("Launcher browser descriptor is not an object");
   }
   const descriptor = value as Partial<LauncherBrowserHostDescriptor>;
-  if (descriptor.version !== 1 || descriptor.kind !== LAUNCHER_BROWSER_HOST_KIND) {
+  if (descriptor.version !== 2 || descriptor.kind !== LAUNCHER_BROWSER_HOST_KIND) {
     throw new Error("Launcher browser descriptor has an unsupported identity or version");
+  }
+  if (descriptor.profile !== "production" && descriptor.profile !== "development") {
+    throw new Error("Launcher browser descriptor has an invalid profile");
   }
   if (!Number.isInteger(descriptor.pid) || descriptor.pid! < 1) {
     throw new Error("Launcher browser descriptor has an invalid pid");
@@ -76,7 +81,10 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (!helperScript || !existsSync(helperScript)) {
     throw new Error("Launcher browser descriptor helper script does not exist");
   }
-  if (descriptor.partition !== "persist:codex-web-gpt-chatgpt") {
+  const expectedPartition = descriptor.profile === "development"
+    ? "persist:codex-web-gpt-dev-chatgpt"
+    : "persist:codex-web-gpt-chatgpt";
+  if (descriptor.partition !== expectedPartition) {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
   if (descriptor.idleUrl !== "about:blank#codex-web-gpt-browser-host") {
@@ -89,8 +97,9 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
     throw new Error("Launcher browser descriptor has an invalid creation time");
   }
   return {
-    version: 1,
+    version: 2,
     kind: LAUNCHER_BROWSER_HOST_KIND,
+    profile: descriptor.profile,
     pid: descriptor.pid!,
     endpoint,
     control: { endpoint: controlEndpoint, token: descriptor.control.token },
@@ -216,9 +225,18 @@ export async function connectLauncherBrowserHost(
 
 export async function inspectLauncherBrowserHost(
   descriptorPath: string,
-  options: { detectCapabilities?: boolean; timeoutMs?: number } = {},
+  options: {
+    detectCapabilities?: boolean;
+    expectedProfile?: LauncherBrowserHostProfile;
+    timeoutMs?: number;
+  } = {},
 ): Promise<{ solAvailable?: boolean; proAvailable?: boolean; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  if (options.expectedProfile && descriptor.profile !== options.expectedProfile) {
+    throw new Error(
+      `Launcher browser belongs to ${descriptor.profile}, but ${options.expectedProfile} was required`,
+    );
+  }
   const timeoutMs = options.timeoutMs ?? (options.detectCapabilities
     ? LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS
     : LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS);

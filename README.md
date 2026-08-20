@@ -201,11 +201,33 @@ Read the complete [architecture](docs/architecture.md) and
 
 ```bash
 bun run app
+bun run dev:launcher
+bun run src/cli.ts dev status
+bun run dev:chat compaction-lab "Reply with exactly: DEV READY"
 bun run verify
 bun run app:package
 ```
 
+`dev:launcher` starts a second launcher profile under `~/.codex-chatgpt-web-dev`: separate Electron
+state, browser cookies/login, ChatGPT account, configuration, sandboxed `CODEX_HOME`, chats,
+diagnostics, broker, and tunnel profile. It can run beside the normal launcher and never starts a
+Responses daemon or changes Codex. Optional Full setup starts and supervises only its isolated MCP
+tunnel, using the distinct ChatGPT connector name `Codex Native2 DEV`.
+
+`dev:chat` is a named, persistent synthetic outer-Codex harness. It executes the current working
+tree through that isolated launcher browser, Temporary Chat, prompt compiler, Responses parser, and
+compaction handlers. Optional Full setup also exercises the MCP connector and broker; tool effects
+are explicit simulation receipts. Browser-only chats expose no outer tools. It does
+not open a Responses listener, change `openai_base_url`, stop the live daemon, or claim port 17841.
+Run it without a message for `/status`, `/fill 30000`, `/compact`, `/model`, and `/reset` commands.
+Sign in and initialize the profile once inside the window labelled **DEV**. Configure optional Full
+harness only for simulated tool rounds; its launcher keeps the DEV tunnel ready while named chats
+attach their broker on demand. Production credentials and the `Codex Native2` connector are never
+reused implicitly. See
+[DEV chat harness](docs/dev-chat.md).
+
 - [Architecture](docs/architecture.md)
+- [DEV chat harness](docs/dev-chat.md)
 - [Security model](docs/security-model.md)
 - [Contributing](CONTRIBUTING.md)
 

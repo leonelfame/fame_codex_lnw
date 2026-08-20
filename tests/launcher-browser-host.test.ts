@@ -18,13 +18,17 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function descriptorFile(controlEndpoint = "http://127.0.0.1:39111"): string {
+function descriptorFile(
+  controlEndpoint = "http://127.0.0.1:39111",
+  profile: "production" | "development" = "production",
+): string {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-descriptor-"));
   roots.push(root);
   const path = join(root, "launcher-browser.json");
   writeFileSync(path, `${JSON.stringify({
-    version: 1,
+    version: 2,
     kind: LAUNCHER_BROWSER_HOST_KIND,
+    profile,
     pid: process.pid,
     endpoint: "http://127.0.0.1:39110",
     control: {
@@ -35,7 +39,9 @@ function descriptorFile(controlEndpoint = "http://127.0.0.1:39111"): string {
       executable: process.execPath,
       script: import.meta.path,
     },
-    partition: "persist:codex-web-gpt-chatgpt",
+    partition: profile === "development"
+      ? "persist:codex-web-gpt-dev-chatgpt"
+      : "persist:codex-web-gpt-chatgpt",
     idleUrl: "about:blank#codex-web-gpt-browser-host",
     surfaceId: "launcher_surface_id_0123456789AB",
     createdAt: new Date().toISOString(),
@@ -47,6 +53,7 @@ test("launcher descriptor is owner-only, loopback-only, and process-bound", () =
   const path = descriptorFile();
   expect(readLauncherBrowserHostDescriptor(path)).toMatchObject({
     kind: LAUNCHER_BROWSER_HOST_KIND,
+    profile: "production",
     pid: process.pid,
     endpoint: "http://127.0.0.1:39110",
     surfaceId: "launcher_surface_id_0123456789AB",
@@ -173,6 +180,16 @@ test("launcher descriptor rejects non-loopback browser ownership", () => {
   value.endpoint = "https://example.com:443";
   writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
   expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("http://127.0.0.1");
+});
+
+test("launcher profile checks reject cross-profile browser ownership", async () => {
+  const path = descriptorFile("http://127.0.0.1:39111", "development");
+  expect(readLauncherBrowserHostDescriptor(path)).toMatchObject({
+    profile: "development",
+    partition: "persist:codex-web-gpt-dev-chatgpt",
+  });
+  await expect(inspectLauncherBrowserHost(path, { expectedProfile: "production", timeoutMs: 5 }))
+    .rejects.toThrow("belongs to development");
 });
 
 test("launcher page selection uses the owned surface marker instead of URL order", async () => {

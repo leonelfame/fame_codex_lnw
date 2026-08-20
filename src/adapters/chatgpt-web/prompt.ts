@@ -247,6 +247,7 @@ export function compileChatGptWebPrompt(
     ? [
       "After the complete user-facing answer, append one private rolling task checkpoint for the next Luna turn.",
       `Append the exact marker ${CHATGPT_LUNA_CHECKPOINT_MARKER} on its own line, followed by one compact plain-text checkpoint and nothing else. Do not write JSON and do not use a Markdown code fence.`,
+      "User-facing format constraints such as 'reply only with' apply only before the private marker and never permit an empty checkpoint. Immediately follow every marker with Objective: and all required sections; use a concise '- None.' only for a genuinely empty section.",
       "Use the headings Objective:, State:, Evidence:, Decisions:, and Pending:. Put each heading on its own line and use concise dash bullets under the list headings.",
       `Keep the checkpoint at or below ${CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS.toLocaleString("en-US")} tokens. Preserve concrete requirements, exact paths, commands, results, decisions, unresolved blockers, and the next useful actions.`,
       "Record only compact task state and evidence. Do not include hidden reasoning, chain-of-thought, capability tokens, credentials, or transport details.",

@@ -304,6 +304,8 @@ export interface ResolvedBrowserConfig {
   appName: string;
   browserHost: "managed-chrome" | "launcher";
   browserHostDescriptorPath?: string;
+  browserHelperScriptPath?: string;
+  browserDiagnosticsPath?: string;
   storageStatePath: string;
   chromeExecutablePath: string;
   turnTimeoutMs?: number;
@@ -552,12 +554,11 @@ function pruneBrowserDiagnostics(root: string): void {
 }
 
 class ChatGptBrowserDiagnostics {
-  private readonly root = join(getConfigDir(), "diagnostics", "browser-turns");
   private readonly directory: string;
   private sequence = 0;
   private initialized = false;
 
-  constructor(private readonly traceId: string) {
+  constructor(private readonly traceId: string, private readonly root: string) {
     if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId)) {
       throw new Error("ChatGPT browser diagnostic trace id is invalid");
     }
@@ -598,20 +599,26 @@ class ChatGptBrowserDiagnostics {
           const rows = (selector: string, limit = 40) => [...document.querySelectorAll(selector)]
             .filter(rendered)
             .slice(-limit)
-            .map(element => ({
-              tag: element.tagName.toLowerCase(),
-              role: element.getAttribute("role"),
-              testId: element.getAttribute("data-testid"),
-              ariaExpanded: element.getAttribute("aria-expanded"),
-              ariaChecked: element.getAttribute("aria-checked"),
-              dataState: element.getAttribute("data-state"),
-              text: boundedText(element),
-            }));
+            .map(element => {
+              const rect = element.getBoundingClientRect();
+              return {
+                tag: element.tagName.toLowerCase(),
+                role: element.getAttribute("role"),
+                testId: element.getAttribute("data-testid"),
+                ariaExpanded: element.getAttribute("aria-expanded"),
+                ariaChecked: element.getAttribute("aria-checked"),
+                dataState: element.getAttribute("data-state"),
+                dataHighlighted: element.getAttribute("data-highlighted"),
+                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                text: boundedText(element),
+              };
+            });
           const composers = [...document.querySelectorAll(composerSelector)].filter(rendered);
           const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered);
           return {
             url: location.href,
             title: document.title,
+            viewport: { width: innerWidth, height: innerHeight },
             surfaceId: (globalThis as typeof globalThis & { __CODEX_WEB_GPT_SURFACE_ID__?: unknown })
               .__CODEX_WEB_GPT_SURFACE_ID__ ?? null,
             bodyTextChars: document.body?.innerText.length ?? 0,
@@ -668,9 +675,22 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   const appName = configured.appName?.trim() || CHATGPT_CONNECTOR_NAME;
   const browserHost = configured.browserHost ?? "managed-chrome";
   const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
+  const browserHelperScriptPath = configured.browserHelperScriptPath?.trim();
+  const browserDiagnosticsPath = resolve(expandUserPath(
+    configured.browserDiagnosticsPath?.trim() || join(getConfigDir(), "diagnostics", "browser-turns"),
+  ));
   const turnTimeoutMs = configured.turnTimeoutMs;
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
     throw new Error("Launcher browser host requires chatgptWeb.browserHostDescriptorPath");
+  }
+  if (browserHelperScriptPath && browserHost !== "launcher") {
+    throw new Error("Explicit browser helper script requires a launcher host");
+  }
+  const resolvedBrowserHelperScriptPath = browserHelperScriptPath
+    ? resolve(expandUserPath(browserHelperScriptPath))
+    : undefined;
+  if (resolvedBrowserHelperScriptPath && !existsSync(resolvedBrowserHelperScriptPath)) {
+    throw new Error(`Explicit browser helper script does not exist: ${resolvedBrowserHelperScriptPath}`);
   }
   if (turnTimeoutMs !== undefined
     && (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0)) {
@@ -683,6 +703,8 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     appName,
     browserHost,
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
+    ...(resolvedBrowserHelperScriptPath ? { browserHelperScriptPath: resolvedBrowserHelperScriptPath } : {}),
+    browserDiagnosticsPath,
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
@@ -1330,15 +1352,23 @@ export class ChatGptBrowserWorker {
         + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
       );
     }
-    // The popup's keyboard highlight belongs to the whole attachment menu, not to the exact row
-    // resolved above. Composer-level ArrowDown/Enter can therefore select "Add photos & files" or
-    // another sibling group. Activate only the uniquely resolved connector row and then require the
-    // exact selected-connector marker as evidence before continuing.
-    // Use Playwright's real pointer activation. A DOM `dispatchEvent("click")` only fires an
-    // untrusted synthetic event; ChatGPT can update the visible badge while never committing the
-    // connector to the turn that is sent. Force the click only to bypass the popup's transient
-    // layout movement — the event itself remains a trusted browser input event.
-    await appResult.click({ force: true, timeout: 10_000 });
+    // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
+    // reach this menu. Unlike the old unguarded composer Enter path, require the exact row to own
+    // ChatGPT's keyboard highlight first; otherwise move the menu highlight until it does. Keep
+    // focus on the composer, activate through the menu's real keyboard owner, then prove the exact
+    // selected connector pill below.
+    const rowHighlighted = async () => await appResult.getAttribute("data-highlighted") !== null;
+    if (!await rowHighlighted()) {
+      const visibleRowCount = await menuRows.filter({ visible: true }).count();
+      for (let step = 0; step < visibleRowCount && !await rowHighlighted(); step += 1) {
+        await page.keyboard.press("ArrowDown");
+      }
+    }
+    if (!await rowHighlighted()) {
+      throw new Error(`ChatGPT connector menu could not highlight ${JSON.stringify(this.config.appName)}`);
+    }
+    await page.keyboard.press("Enter");
+    await captureDiagnostic?.("connector-choice-activated");
     // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
     // again instead of returning the pre-selection locator, otherwise the real turn can focus a
     // detached/hidden editor even though verification just succeeded.
@@ -1888,7 +1918,10 @@ export class ChatGptBrowserWorker {
     }
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities);
     const prepared = await turn.prepare();
-    const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
+    const diagnostics = new ChatGptBrowserDiagnostics(
+      turn.traceId,
+      this.config.browserDiagnosticsPath ?? join(getConfigDir(), "diagnostics", "browser-turns"),
+    );
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
