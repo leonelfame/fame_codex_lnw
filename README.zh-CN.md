@@ -115,11 +115,11 @@ bun run app
 | 模式 | 模型 | 本地 Codex 工具 | 额外设置 |
 | --- | --- | --- | --- |
 | **仅浏览器** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 不可用；Codex 会显示警告 | 无 |
-| **完整 harness** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 非 Pro 模型：连接器可用时支持；Pro：只读 | OpenAI 隧道 + ChatGPT 连接器 |
+| **完整 harness** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 所选聊天可访问连接器时支持 | OpenAI 隧道 + ChatGPT 连接器 |
 
 模型选择器中的每一项都对应一个固定的 ChatGPT 模式。Codex 仍会显示内置的 Effort 和 Speed
-选项，但更改它们不会在后台静默切换所选的浏览器模型。Pro 会收到 Codex 当前编译后的上下文，
-但 ChatGPT Pro 无法主动发起本地 MCP/工具调用。
+选项，但更改它们不会在后台静默切换所选的浏览器模型。在完整模式下，只要所选聊天可访问
+连接器，包括 Pro 在内的所有路由都会获得同一个与当前回合绑定的 MCP 能力。
 
 ## 完整 harness
 

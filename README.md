@@ -126,11 +126,12 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 | Mode | Models | Local Codex tools | Extra setup |
 | --- | --- | --- | --- |
 | **Browser-only** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | No; Codex shows a warning | None |
-| **Full harness** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | Non-Pro models: yes when the connector is available; Pro: read-only | OpenAI tunnel + ChatGPT connector |
+| **Full harness** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | Yes when the selected chat exposes the connector | OpenAI tunnel + ChatGPT connector |
 
 Every picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and Speed
-rows, but changing them cannot silently change the selected browser model. Pro receives the current
-compiled context from Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
+rows, but changing them cannot silently change the selected browser model. In Full mode every route,
+including Pro, receives the same turn-bound MCP capability when the selected chat exposes the
+connector.
 
 ## Full harness
 

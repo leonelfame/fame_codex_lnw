@@ -80,7 +80,7 @@ const en = {
   restartCodex: "Restart Codex once to refresh the model picker.",
   mcpTitle: "Native Codex tools over MCP",
   mcpSubtitle: "Connect ChatGPT to the active Codex harness through an OpenAI tunnel.",
-  mcpBody: "Let tool-capable ChatGPT tiers use the active Codex harness. Pro remains read-only for local computer access.",
+  mcpBody: "Let connector-capable ChatGPT models, including Pro when available, use the active Codex harness.",
   configureMcp: "Configure MCP",
   mcpReady: "MCP configured",
   close: "Close",

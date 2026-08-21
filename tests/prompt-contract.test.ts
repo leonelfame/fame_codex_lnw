@@ -23,9 +23,9 @@ function request(reasoning: "low" | "medium" | "high" | "max"): CodexParsedReque
   };
 }
 
-test("tool-capable prompts pass one stable turn token directly to native actions", () => {
+test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
   const token = "turn_12345678901234567890123456789012";
-  const parsed = request("high");
+  const parsed = request("max");
   parsed.context.messages[1]!.content = `Diagnose an invalid binding_id safety failure without replaying ${token}`;
   const compiled = compileChatGptWebPrompt(
     parsed,
@@ -57,7 +57,7 @@ test("tool-capable prompts pass one stable turn token directly to native actions
 test("read-only prompts resume without exposing a bind capability", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),
-    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.text).toContain("The task context is complete. Execute the latest active user request now under the capability contract above.");
@@ -208,7 +208,7 @@ test("assigns prior assistant output to the model and never attributes Codex con
   ];
   const compiled = compileChatGptWebPrompt(
     attributed,
-    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
   const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
   const envelope = JSON.parse(encoded!) as { messages: Array<Record<string, unknown>> };
@@ -362,7 +362,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
 test("requires ChatGPT-native rich results to include a safe Markdown answer for Codex", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),
-    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
   expect(compiled.text).toContain("also provide the relevant result as ordinary Markdown in the final answer");

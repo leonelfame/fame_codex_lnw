@@ -260,7 +260,7 @@ export interface CodexProviderConfig {
     turnTimeoutMs?: number;
     /** Keep the single controlled browser visible. */
     headed?: boolean;
-    /** Attach the turn-bound Codex MCP capability for non-Pro efforts. */
+    /** Attach the turn-bound Codex MCP capability for every connector-capable Web model. */
     localToolsEnabled?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     solAvailable?: boolean;
