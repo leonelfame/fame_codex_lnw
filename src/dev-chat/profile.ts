@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, posix, resolve, win32 } from "node:path";
@@ -18,6 +18,22 @@ export interface DevProfilePaths {
   chatsPath: string;
   runtimePath: string;
   configPath: string;
+}
+
+const WINDOWS_LAUNCHER_GUID = "d1a6026a-6210-588e-9a2b-da3936f94e02";
+
+function registeredWindowsLauncherInstallLocation(): string | undefined {
+  try {
+    const output = execFileSync(
+      "reg.exe",
+      ["query", `HKCU\\Software\\${WINDOWS_LAUNCHER_GUID}`, "/v", "InstallLocation"],
+      { encoding: "utf8", windowsHide: true },
+    );
+    const match = output.match(/^\s*InstallLocation\s+REG_SZ\s+(.+?)\s*$/mi);
+    return match && win32.isAbsolute(match[1]) ? match[1] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveDevProfilePaths({
@@ -70,10 +86,12 @@ export function installedLauncherCandidates({
   environment = process.env,
   homeDirectory = homedir(),
   platform = process.platform,
+  windowsInstallLocation,
 }: {
   environment?: NodeJS.ProcessEnv;
   homeDirectory?: string;
   platform?: NodeJS.Platform;
+  windowsInstallLocation?: string;
 } = {}): string[] {
   const override = environment.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
   const candidates = override ? [expandUserPath(override)] : [];
@@ -84,9 +102,15 @@ export function installedLauncherCandidates({
       posix.join(homeDirectory, "Applications", "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT"),
     );
   } else if (platform === "win32") {
-    const localAppData = environment.LOCALAPPDATA?.trim();
-    if (localAppData) {
-      candidates.push(win32.join(localAppData, "Programs", "codex-web-gpt-launcher", "Codex Web GPT.exe"));
+    const registeredLocation = windowsInstallLocation?.trim()
+      || (process.platform === "win32" ? registeredWindowsLauncherInstallLocation() : undefined);
+    if (registeredLocation && win32.isAbsolute(registeredLocation)) {
+      candidates.push(win32.join(registeredLocation, "Codex Web GPT.exe"));
+    } else {
+      const localAppData = environment.LOCALAPPDATA?.trim();
+      if (localAppData) {
+        candidates.push(win32.join(localAppData, "Programs", "Codex Web GPT", "Codex Web GPT.exe"));
+      }
     }
   } else if (platform === "linux") {
     candidates.push(posix.join(homeDirectory, ".local", "bin", "codex-web-gpt"));

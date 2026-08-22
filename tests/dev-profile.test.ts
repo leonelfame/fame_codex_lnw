@@ -61,7 +61,15 @@ test("installed launcher discovery has explicit platform candidates", () => {
     homeDirectory: "C:\\Users\\tester",
     environment: { LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local" },
   })).toEqual([
-    "C:\\Users\\tester\\AppData\\Local\\Programs\\codex-web-gpt-launcher\\Codex Web GPT.exe",
+    "C:\\Users\\tester\\AppData\\Local\\Programs\\Codex Web GPT\\Codex Web GPT.exe",
+  ]);
+  expect(installedLauncherCandidates({
+    platform: "win32",
+    homeDirectory: "C:\\Users\\tester",
+    environment: { LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local" },
+    windowsInstallLocation: "D:\\Apps\\Codex Web GPT",
+  })).toEqual([
+    "D:\\Apps\\Codex Web GPT\\Codex Web GPT.exe",
   ]);
 });
 

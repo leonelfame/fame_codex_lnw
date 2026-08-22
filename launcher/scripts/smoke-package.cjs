@@ -31,6 +31,24 @@ function run(command, args, options = {}) {
   }
 }
 
+function windowsInstallLocation() {
+  const guid = launcherManifest.build.nsis.guid;
+  const registryKey = `HKCU\\Software\\${guid}`;
+  const result = spawnSync("reg.exe", ["query", registryKey, "/v", "InstallLocation"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`Windows installer did not register ${registryKey}: ${result.stderr?.trim() || "no output"}`);
+  }
+  const match = result.stdout.match(/^\s*InstallLocation\s+REG_SZ\s+(.+?)\s*$/mi);
+  if (!match || !path.win32.isAbsolute(match[1])) {
+    throw new Error(`Windows installer registered an invalid InstallLocation: ${result.stdout.trim()}`);
+  }
+  return match[1];
+}
+
 function artifact(pattern, label) {
   const matches = fs.readdirSync(artifactsDirectory)
     .filter((name) => pattern.test(name))
@@ -76,12 +94,7 @@ try {
   } else if (process.platform === "win32") {
     const installer = artifact(/-win-x64\.exe$/, "Windows installer");
     run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
-    executable = path.join(
-      process.env.LOCALAPPDATA || "",
-      "Programs",
-      launcherManifest.name,
-      `${launcherManifest.build.productName}.exe`,
-    );
+    executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
     command = executable;
     args = ["--launcher-smoke-test"];
   } else {
