@@ -102,9 +102,7 @@ export function readCodexModelContextOverride(): CodexModelContextOverride | und
   const text = readFileSync(path, "utf8");
   const lines = splitLines(text);
   const contextWindow = findTopLevelPositiveInteger(lines, "model_context_window");
-  if (contextWindow === undefined) return undefined;
-  const model = findTopLevelAssignment(lines, "model").value;
-  return model ? { model, contextWindow } : undefined;
+  return contextWindow === undefined ? undefined : { contextWindow };
 }
 
 export function assignments(lines: string[]): Record<ManagedAssignmentKey, PreviousAssignment> {

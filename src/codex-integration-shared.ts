@@ -151,7 +151,6 @@ export interface SetCodexIntegrationActiveResult {
 }
 
 export interface CodexModelContextOverride {
-  model: string;
   contextWindow: number;
 }
 

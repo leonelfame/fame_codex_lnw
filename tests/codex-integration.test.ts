@@ -42,16 +42,19 @@ describe("reversible native Codex route integration", () => {
     expect(getCodexHome()).toBe(join(homedir(), "custom-codex-home"));
   });
 
-  test("reads the selected model's explicit context override from Codex config", () => {
+  test("reads an explicit native context override without requiring a selected model", () => {
     const { codexHome } = fixture();
     writeFileSync(
       join(codexHome, "config.toml"),
-      'model = "gpt-5.6-sol"\nmodel_context_window = 371_851 # explicit override\n',
+      [
+        "model_context_window = 1_000_000 # explicit override",
+        "model_auto_compact_token_limit = 900_000",
+        "",
+      ].join("\n"),
     );
 
     expect(readCodexModelContextOverride()).toEqual({
-      model: "gpt-5.6-sol",
-      contextWindow: 371_851,
+      contextWindow: 1_000_000,
     });
   });
 
