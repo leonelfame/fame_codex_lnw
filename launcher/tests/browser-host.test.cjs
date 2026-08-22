@@ -766,6 +766,7 @@ test("a live helper retains exclusive ownership of its running turn", () => {
     () => BrowserHost.prototype.beginTurn.call({
       manualOperation: null,
       turnTabs: new Map([[tab.id, tab]]),
+      userCancelledTurnOwners: new Map(),
     }, tab.traceId, false, process.pid + 1),
     /owned by another helper process/,
   );
@@ -792,6 +793,7 @@ test("a replacement helper takes over only after the previous owner exited", () 
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: null,
     turnTabs: new Map([[tab.id, tab]]),
+    userCancelledTurnOwners: new Map(),
     selectedTabId: "home",
     syncViewVisibility() {},
     snapshot: () => ({ tabs: [] }),
@@ -1121,7 +1123,7 @@ test("a stale helper cannot end a replacement turn with the same trace id", asyn
   );
 });
 
-test("closing a running browser tab preserves ownership until its helper reports termination", () => {
+test("closing a running browser tab reports terminal user cancellation to its helper", async () => {
   const closed = [];
   const tab = {
     id: "tab-running",
@@ -1135,6 +1137,7 @@ test("closing a running browser tab preserves ownership until its helper reports
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]),
     closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
     selectedTabId: tab.id,
     window: { contentView: { removeChildView: () => closed.push("view") } },
     syncViewVisibility() {},
@@ -1148,7 +1151,26 @@ test("closing a running browser tab preserves ownership until its helper reports
 
   assert.deepEqual(closed, ["view", "contents"]);
   assert.equal(fixture.closedTurnOwners.get("trace_running"), 333);
+  assert.equal(fixture.userCancelledTurnOwners.get("trace_running"), 333);
   assert.equal(fixture.selectedTabId, "home");
+  assert.throws(
+    () => BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, 444),
+    error => error?.code === "turn_cancelled",
+  );
+
+  assert.deepEqual(
+    await BrowserHost.prototype.endTurn.call(
+      fixture,
+      tab.traceId,
+      tab.helperPid,
+      "failed",
+      false,
+      "page closed",
+    ),
+    { cancelledByUser: true },
+  );
+  assert.equal(fixture.closedTurnOwners.has("trace_running"), false);
+  assert.equal(fixture.userCancelledTurnOwners.has("trace_running"), false);
 });
 
 test("a later provider round reuses its task tab and restores active ownership", () => {
@@ -1172,6 +1194,7 @@ test("a later provider round reuses its task tab and restores active ownership",
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: null,
     turnTabs: new Map([[tab.id, tab]]),
+    userCancelledTurnOwners: new Map(),
     selectedTabId: "home",
     syncViewVisibility: () => events.push("visible"),
     snapshot: () => ({ tabs: [] }),

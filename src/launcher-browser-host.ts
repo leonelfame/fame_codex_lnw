@@ -7,6 +7,13 @@ import { processRunning } from "./process";
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export type LauncherBrowserHostProfile = "production" | "development";
 
+export class LauncherBrowserTurnCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherBrowserTurnCancelledError";
+  }
+}
+
 export interface LauncherBrowserHostDescriptor {
   version: 2;
   kind: typeof LAUNCHER_BROWSER_HOST_KIND;
@@ -312,7 +319,7 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
-): Promise<{ surfaceId?: string }> {
+): Promise<{ surfaceId?: string; cancelledByUser?: boolean }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -327,7 +334,13 @@ export async function notifyLauncherTurn(
       signal: controller.signal,
     });
     if (!response.ok) {
-      const detail = await response.text().catch(() => "");
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (response.status === 409 && body.code === "turn_cancelled") {
+        throw new LauncherBrowserTurnCancelledError(
+          typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
+        );
+      }
+      const detail = typeof body.error === "string" ? body.error : "";
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
@@ -337,8 +350,15 @@ export async function notifyLauncherTurn(
       }
       return { surfaceId: body.surfaceId };
     }
+    if (activity.phase === "end") {
+      if (typeof body.cancelledByUser !== "boolean") {
+        throw new Error("Launcher browser control channel returned an invalid turn release result");
+      }
+      return { cancelledByUser: body.cancelledByUser };
+    }
     return {};
   } catch (error) {
+    if (error instanceof LauncherBrowserTurnCancelledError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);

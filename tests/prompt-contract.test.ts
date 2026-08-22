@@ -8,7 +8,7 @@ import {
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
-function request(reasoning: "low" | "medium" | "high" | "max"): CodexParsedRequest {
+function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexParsedRequest {
   return {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
@@ -54,6 +54,18 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(compiled.text).not.toContain("internally compacts this response");
 });
 
+test("Pro executes directly without delegating while other Web modes keep their existing contract", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+  const pro = compileChatGptWebPrompt(request("max"), capabilities, token);
+  const extraHigh = compileChatGptWebPrompt(request("xhigh"), capabilities, token);
+
+  expect(pro.text).toContain("Complete this task directly in the current parent response.");
+  expect(pro.text).toContain("Do not create, spawn, delegate to, or wait on sub-agents");
+  expect(pro.text).toContain("Use non-agent tools directly instead.");
+  expect(extraHigh.text).not.toContain("Do not create, spawn, delegate to, or wait on sub-agents");
+});
+
 test("read-only prompts resume without exposing a bind capability", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),
@@ -76,6 +88,7 @@ test("browser-only Medium directs users to the full harness", () => {
   const warning = chatGptReadOnlyContextWarning(request("medium"), capabilities);
   expect(warning).toContain("Browser-only mode");
   expect(warning).toContain("Full harness");
+  expect(warning).toContain("selected ChatGPT Web model");
   expect(warning).not.toContain("tool-capable ChatGPT Web model first");
   expect(chatGptReadOnlyContextWarning(request("medium"), {
     ...capabilities,

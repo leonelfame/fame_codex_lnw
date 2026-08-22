@@ -526,7 +526,8 @@ class RuntimeHost {
           });
         });
       });
-      if (result.code !== 0) {
+      const acceptedExitCodes = options.acceptedExitCodes || [0];
+      if (!acceptedExitCodes.includes(result.code)) {
         const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
         throw new Error(detail);
       }
@@ -549,6 +550,7 @@ class RuntimeHost {
       const result = await this.run("doctor", ["doctor", "--json"], {
         message: "Checking runtime",
         timeoutMs: 75_000,
+        acceptedExitCodes: [0, 1],
       });
       return JSON.parse(result.stdout);
     } catch (error) {
@@ -756,11 +758,11 @@ class RuntimeHost {
     return connectorNameForSetup(current.config?.appName);
   }
 
-  cancelBrowserTurns() {
+  cancelActiveTurns() {
     this.assertProductionProfile("Launcher-owned turn cancellation");
-    return this.run("cancel-browser-turns", ["service", "cancel-turns"], {
-      message: "Cancelling retained browser turns",
-      successMessage: "Retained browser turns cancelled",
+    return this.run("cancel-active-turns", ["service", "cancel-turns"], {
+      message: "Cancelling active Codex turns",
+      successMessage: "Active Codex turns cancelled",
       timeoutMs: 15_000,
     });
   }

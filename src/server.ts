@@ -33,40 +33,64 @@ import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
 export class HttpTurnCounter {
-  private active = 0;
+  private readonly active = new Map<number, {
+    abort: AbortController;
+    done: Promise<void>;
+    finish: () => void;
+  }>();
+  private nextId = 1;
 
   count(): number {
-    return this.active;
+    return this.active.size;
+  }
+
+  async cancelAll(reason: unknown = new Error("Active HTTP turns cancelled")): Promise<number> {
+    const turns = [...this.active.values()];
+    for (const turn of turns) {
+      if (!turn.abort.signal.aborted) turn.abort.abort(reason);
+    }
+    await Promise.all(turns.map(turn => turn.done));
+    return turns.length;
   }
 
   async track(
-    run: () => Promise<Response>,
-    signal?: AbortSignal,
+    run: (signal: AbortSignal) => Promise<Response>,
+    clientSignal?: AbortSignal,
     platform: NodeJS.Platform = process.platform,
   ): Promise<Response> {
-    this.active += 1;
+    const id = this.nextId++;
+    const abort = new AbortController();
+    let finish!: () => void;
+    const done = new Promise<void>(resolve => { finish = resolve; });
+    this.active.set(id, { abort, done, finish });
     let released = false;
-    let abortListener: (() => void) | undefined;
+    let clientAbortListener: (() => void) | undefined;
+    let streamAbortListener: (() => void) | undefined;
     const release = () => {
       if (released) return;
       released = true;
-      this.active -= 1;
-      if (signal && abortListener) {
-        signal.removeEventListener("abort", abortListener);
-        abortListener = undefined;
+      this.active.delete(id);
+      if (clientSignal && clientAbortListener) {
+        clientSignal.removeEventListener("abort", clientAbortListener);
+        clientAbortListener = undefined;
       }
+      if (streamAbortListener) abort.signal.removeEventListener("abort", streamAbortListener);
+      finish();
     };
+    clientAbortListener = () => abort.abort(clientSignal?.reason);
+    if (clientSignal?.aborted) abort.abort(clientSignal.reason);
+    else clientSignal?.addEventListener("abort", clientAbortListener, { once: true });
 
     try {
-      const response = await run();
+      const response = await run(abort.signal);
       if (!response.body) {
         release();
         return response;
       }
-      if (signal?.aborted) {
-        void response.body.cancel(signal.reason).catch(() => {});
+      if (abort.signal.aborted) {
+        await response.body.cancel(abort.signal.reason).catch(() => {});
         release();
-        return response;
+        return new Response(null, { status: 499, statusText: "Client Closed Request" });
       }
 
       if (platform !== "win32") {
@@ -74,10 +98,10 @@ export class HttpTurnCounter {
         // pull chain: it keeps HTTP backpressure native and lets a client body cancellation reach
         // the original SSE reader without an eagerly drained tee branch racing the socket writer.
         const reader = response.body.getReader();
-        abortListener = () => {
-          void reader.cancel(signal?.reason).catch(() => {}).finally(release);
+        streamAbortListener = () => {
+          void reader.cancel(abort.signal.reason).catch(() => {}).finally(release);
         };
-        signal?.addEventListener("abort", abortListener, { once: true });
+        abort.signal.addEventListener("abort", streamAbortListener, { once: true });
         const body = new ReadableStream<Uint8Array>({
           async pull(controller) {
             try {
@@ -114,12 +138,13 @@ export class HttpTurnCounter {
       // when the client disconnects and cancels the observer branch.
       const [clientBody, lifecycleBody] = response.body.tee();
       const reader = lifecycleBody.getReader();
-      abortListener = () => {
-        void reader.cancel(signal?.reason).catch(() => {});
-        void clientBody.cancel(signal?.reason).catch(() => {});
-        release();
+      streamAbortListener = () => {
+        void Promise.allSettled([
+          reader.cancel(abort.signal.reason),
+          clientBody.cancel(abort.signal.reason),
+        ]).finally(release);
       };
-      signal?.addEventListener("abort", abortListener, { once: true });
+      abort.signal.addEventListener("abort", streamAbortListener, { once: true });
       void (async () => {
         try {
           while (!(await reader.read()).done) {
@@ -155,7 +180,12 @@ export interface ResponseRequestOptions {
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
   parsed.modelId = route.backendModel;
-  parsed.options.reasoning = route.adapterEffort;
+  // A Pro task remains Pro, but its isolated summarization turn does not benefit from Pro's much
+  // slower reasoning. Extra High has the same 95k pre-compaction budget on a Pro account, so it
+  // can summarize the complete bounded input without changing the task's selected model.
+  parsed.options.reasoning = parsed._compactionRequest && route.adapterEffort === "max"
+    ? "xhigh"
+    : route.adapterEffort;
   return route;
 }
 
@@ -488,7 +518,7 @@ export function startServer(
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
@@ -511,10 +541,16 @@ export function startServer(
         turnBroker?.setExternalOwnersAccepted(!draining);
         return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
       }
-      if (req.method === "POST" && url.pathname === "/admin/cancel-browser-turns") {
+      if (req.method === "POST" && url.pathname === "/admin/cancel-turns") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        const cancelled = chatGptTurnSessions.clear() + (turnBroker?.revokeExternalOwners() ?? 0);
-        return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() });
+        const cancelledBrowserTurns = chatGptTurnSessions.clear() + (turnBroker?.revokeExternalOwners() ?? 0);
+        const cancelledHttpTurns = await httpTurns.cancelAll(new Error("Active turn cancelled by launcher"));
+        return Response.json({
+          status: "ok",
+          cancelled_http_turns: cancelledHttpTurns,
+          cancelled_browser_turns: cancelledBrowserTurns,
+          ...activity(),
+        });
       }
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -540,9 +576,9 @@ export function startServer(
             "codex-chatgpt-web is draining for a requested service operation",
           );
         }
-        return httpTurns.track(async () => {
+        return httpTurns.track(async signal => {
           const response = await modelsRequest(
-            req,
+            new Request(req, { signal }),
             config,
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
@@ -562,15 +598,18 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => responseRequest(req, config), req.signal);
+        return httpTurns.track(signal => responseRequest(new Request(req, { signal }), config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => compactRequest(req, config), req.signal);
+        return httpTurns.track(signal => compactRequest(new Request(req, { signal }), config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(() => nativeSearchRequest(req, dependencies.fetchUpstream), req.signal);
+        return httpTurns.track(
+          signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
+          req.signal,
+        );
       }
       return new Response("Not found", { status: 404 });
     },

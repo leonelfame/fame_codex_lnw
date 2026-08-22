@@ -199,6 +199,29 @@ test("DEV doctor requires live tunnel readiness without probing a Responses list
   }
 });
 
+test("production doctor parses its structured unhealthy report from exit status one", async () => {
+  const fixture = hostFor(null);
+  let runOptions;
+  fixture.host.run = async (_name, _args, options) => {
+    runOptions = options;
+    return {
+      code: 1,
+      stdout: JSON.stringify({
+        ok: false,
+        mode: "full",
+        checks: [{ id: "browser-host", status: "error", message: "busy" }],
+      }),
+      stderr: "",
+    };
+  };
+
+  const report = await fixture.host.doctor();
+
+  assert.equal(report.ok, false);
+  assert.equal(report.checks[0].message, "busy");
+  assert.deepEqual(runOptions.acceptedExitCodes, [0, 1]);
+});
+
 test("production and DEV setup entrypoints reject the opposite launcher profile", async () => {
   await assert.rejects(hostFor(null).host.setupDevCore(), /isolated DEV launcher/);
   await assert.rejects(devHostFor(null).host.setupCore(), /unavailable in the isolated DEV launcher profile/);

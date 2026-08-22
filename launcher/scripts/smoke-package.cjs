@@ -12,6 +12,7 @@ const expectedVersion = launcherManifest.version;
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-smoke-"));
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
+let macAppBundle;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -62,7 +63,8 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    executable = path.join(stage, "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT");
+    macAppBundle = path.join(stage, "Codex Web GPT.app");
+    executable = path.join(macAppBundle, "Contents", "MacOS", "Codex Web GPT");
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {
@@ -113,5 +115,17 @@ try {
   }
   process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);
 } finally {
-  fs.rmSync(scratch, { recursive: true, force: true });
+  try {
+    if (macAppBundle) {
+      const launchServices =
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+      run(
+        launchServices,
+        ["-u", macAppBundle],
+      );
+      run(launchServices, ["-gc"]);
+    }
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
 }

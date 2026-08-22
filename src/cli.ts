@@ -17,7 +17,7 @@ import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
-import { assertServiceIdle, cancelBrowserTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
+import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
@@ -245,8 +245,7 @@ async function serviceCommand(args: string[]): Promise<void> {
   assertNoArgs(args);
   const config = action === "status" ? undefined : loadConfig();
   if (action === "cancel-turns") {
-    const cancelled = await cancelBrowserTurns(config!);
-    stdout.write(`${JSON.stringify({ cancelledBrowserTurns: cancelled }, null, 2)}\n`);
+    stdout.write(`${JSON.stringify(await cancelActiveTurns(config!), null, 2)}\n`);
     return;
   }
   const status = action === "status" ? getServiceStatus()

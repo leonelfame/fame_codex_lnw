@@ -123,7 +123,7 @@ function emitTextDeltas(deltas: string[], emit: (event: AdapterEvent) => void): 
   for (const text of deltas) emit({ type: "text_delta", text, phase: "final_answer" });
 }
 
-function emitProContextWarning(
+function emitReadOnlyContextWarning(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   emit: (event: AdapterEvent) => void,
@@ -243,6 +243,7 @@ export function createChatGptWebAdapter(
           release: () => {},
         }),
         abortSignal: browserAbort.signal,
+        ...(parsed._compactionRequest ? { compaction: true } : {}),
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
@@ -291,6 +292,7 @@ export function createChatGptWebAdapter(
         }
       },
       abortSignal: browserAbort.signal,
+      ...(parsed._compactionRequest ? { compaction: true } : {}),
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
@@ -389,7 +391,7 @@ export function createChatGptWebAdapter(
                 events.push(event);
                 emit(event);
               };
-              if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitCaptured);
+              if (!parsed._compactionRequest) emitReadOnlyContextWarning(parsed, turnCapabilities, emitCaptured);
               const trace = session.runtime.trace.drain();
               reasoning = trace.map(event => event.text);
               emitTraceEvents(trace, emitCaptured);
@@ -445,7 +447,7 @@ export function createChatGptWebAdapter(
               emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitRound);
+            if (!parsed._compactionRequest) emitReadOnlyContextWarning(parsed, turnCapabilities, emitRound);
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken

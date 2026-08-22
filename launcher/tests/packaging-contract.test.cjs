@@ -41,7 +41,8 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(shellInstaller, /codex-web-gpt\.desktop/);
   assert.match(shellInstaller, /--appimage-extract/);
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
-  assert.match(packager, /process\.execPath/);
+  assert.match(packager, /const executable = "node"/);
+  assert.doesNotMatch(packager, /process\.execPath/);
   assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);
   assert.match(packager, /target === "--mac" && !env\.CSC_LINK && !env\.CSC_NAME/);
   assert.match(packager, /--config\.mac\.identity=-/);
@@ -83,16 +84,26 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(ci, /macos-15, ubuntu-latest, windows-latest/);
   assert.match(ci, /bun run app:package/);
   assert.match(ci, /bun run app:smoke/);
-  assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.3\.14/);
+  assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
   for (const runner of ["macos-15", "macos-15-intel", "ubuntu-latest", "windows-latest"]) {
     assert.match(release, new RegExp(runner));
   }
   assert.match(release, /launcher\/build\/runtime/);
   assert.match(release, /bun run app:smoke/);
-  assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.3\.14/);
+  assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
   assert.match(release, /Codex Web GPT\.app/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
+});
+
+test("macOS package smoke unregisters its staged app from LaunchServices", () => {
+  const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
+  assert.match(smoke, /Frameworks\/LaunchServices\.framework\/Support\/lsregister/);
+  assert.match(smoke, /\["-u", macAppBundle\]/);
+  assert.ok(
+    smoke.indexOf('["-u", macAppBundle]') < smoke.indexOf("fs.rmSync(scratch"),
+    "the staged app must be unregistered before its bundle is deleted",
+  );
 });
 
 test("release publishes the repository demo as a checksummed versioned asset", () => {

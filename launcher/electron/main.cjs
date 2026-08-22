@@ -437,8 +437,29 @@ function registerIpc({ logger, stateStore }) {
     smokePassedThisSession = true;
     return result;
   });
-  handle("launcher:mcp-verify", async () => {
+  handle("launcher:mcp-verify", async (event) => {
     const operationName = "mcp-verification";
+    const activeTraceId = browserHost.activeTraceId;
+    logger.info("mcp.verification_requested", {
+      activeTraceId,
+      launcherFocused: mainWindow?.isFocused() === true,
+      rendererFocused: event.sender.isFocused(),
+    });
+    if (activeTraceId) {
+      const report = {
+        ok: false,
+        checks: [{
+          id: "connector",
+          status: "error",
+          message: "Finish the active Codex task before verifying the ChatGPT connector",
+          detail: `Active browser turn: ${activeTraceId}`,
+        }],
+      };
+      const state = stateStore.update({ mcpSetupComplete: false });
+      send("launcher:state-changed", state);
+      publishOperation({ name: operationName, status: "failed", message: report.checks[0].message });
+      return report;
+    }
     publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
     const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
     if (!report.ok) {
@@ -461,20 +482,36 @@ function registerIpc({ logger, stateStore }) {
         ? "DEV harness and connector verified"
         : "Runtime and connector verified";
       publishOperation({ name: operationName, status: "completed", message: successMessage });
-      return report;
+      return {
+        ...report,
+        checks: report.checks.map((check) => check.id === "connector"
+          ? {
+              id: "connector",
+              status: "ok",
+              message: `ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} is available`,
+            }
+          : check),
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const state = stateStore.update({ mcpSetupComplete: false });
       send("launcher:state-changed", state);
       publishOperation({ name: operationName, status: "failed", message });
-      throw error;
+      return {
+        ...report,
+        ok: false,
+        checks: [
+          ...report.checks.filter((check) => check.id !== "connector"),
+          { id: "connector", status: "error", message },
+        ],
+      };
     }
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
   handle("launcher:cancel-turns", () => {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
-    return runtimeHost.cancelBrowserTurns();
+    return runtimeHost.cancelActiveTurns();
   });
   handle("launcher:bridge-enabled", async (_event, enabled) => {
     if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex bridge route");
@@ -645,7 +682,7 @@ async function requestQuit() {
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
-    await runtimeSupervisor?.shutdown();
+    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();

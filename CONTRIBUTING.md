@@ -8,8 +8,9 @@ Core invariants:
 - Model selection is explicit; never silently fall back to another model or reasoning level.
 - Full mode exposes local tools only through the active outer Codex registry and official MCP
   tunnel.
-- Browser-only mode never creates a broker capability or attaches an MCP connector; Pro remains
-  read-only in every mode.
+- Browser-only mode never creates a broker capability or attaches an MCP connector; Full mode gives
+  every available ChatGPT Web effort, from Luna through Pro, the same turn-bound MCP capability.
+  Never introduce an effort-specific MCP exclusion.
 - Browser state, API keys, tunnel IDs, cookies, Codex history, and absolute user paths never enter
   the repository.
 
@@ -37,4 +38,6 @@ Do not broaden selectors speculatively.
 
 Launcher changes must preserve native packaging on macOS, Windows, and Linux. Each package embeds a
 platform-matched Bun runtime, so build it on the matching OS rather than cross-packaging. CI runs
-the full verification and native package job on all three operating systems.
+the full verification and native package job on all three operating systems. Before publishing a
+release candidate, complete the account-bound [release validation](docs/release-validation.md);
+package smoke is not evidence that sign-in, MCP, compaction, or a real Codex turn works.

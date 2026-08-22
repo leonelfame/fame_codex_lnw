@@ -1032,6 +1032,61 @@ test("launcher supervisor waits for an in-flight HTTP turn to finish after drain
   assert.deepEqual(actions, ["drain", "drain"]);
 });
 
+test("explicit launcher shutdown cancels active turns before the graceful stop", async () => {
+  const actions = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  supervisor.cancelActiveTurns = async () => {
+    actions.push("cancel-turns");
+    return { cancelledHttpTurns: 1, cancelledBrowserTurns: 1 };
+  };
+  supervisor.stopForSetup = async () => {
+    actions.push("graceful-stop");
+    return { status: "stopped" };
+  };
+
+  assert.deepEqual(
+    await supervisor.shutdown({ cancelActiveTurns: true, force: true }),
+    { status: "stopped" },
+  );
+  assert.deepEqual(actions, ["cancel-turns", "graceful-stop"]);
+});
+
+test("explicit launcher shutdown force-stops only its owned runtime when graceful shutdown fails", async () => {
+  const actions = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  supervisor.cancelActiveTurns = async () => { actions.push("cancel-turns"); };
+  supervisor.stopForSetup = async () => {
+    actions.push("graceful-stop");
+    throw new Error("daemon still reports one HTTP turn");
+  };
+  supervisor.forceStopOwnedRuntime = async error => {
+    actions.push(`forced-stop:${error.message}`);
+    return { status: "forced", detail: error.message };
+  };
+
+  assert.deepEqual(
+    await supervisor.shutdown({ cancelActiveTurns: true, force: true }),
+    { status: "forced", detail: "daemon still reports one HTTP turn" },
+  );
+  assert.deepEqual(actions, [
+    "cancel-turns",
+    "graceful-stop",
+    "forced-stop:daemon still reports one HTTP turn",
+  ]);
+});
+
 test("launcher resumes an owned drained daemon before reporting it ready", async () => {
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },

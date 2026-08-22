@@ -46,7 +46,9 @@ export function App() {
       setBrowser(next.browser);
       setLogs(next.logs);
       setOperation(next.operation);
-      if (next.operation?.status === "failed") setError(next.operation.message);
+      if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
+        setError(next.operation.message);
+      }
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribeState = api.onStateChanged((state) => {
       setSnapshot((current) => current
@@ -61,7 +63,7 @@ export function App() {
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
-      if (next.status === "failed") setError(next.message);
+      if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });
     const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
     const unsubscribeUpdate = api.onUpdateState((update) => {

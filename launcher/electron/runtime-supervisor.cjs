@@ -1632,6 +1632,30 @@ class RuntimeSupervisor {
     }
   }
 
+  async cancelActiveTurns() {
+    const config = this.readConfig();
+    const daemon = this.daemon;
+    if (!config || !daemon || daemon.exitCode !== null || daemon.signalCode !== null) {
+      return { cancelledHttpTurns: 0, cancelledBrowserTurns: 0 };
+    }
+    const result = await this.control(config, "cancel-turns");
+    if (result.status !== "ok"
+      || !Number.isInteger(result.cancelled_http_turns)
+      || !Number.isInteger(result.cancelled_browser_turns)
+      || result.active_http_turns !== 0
+      || result.active_browser_turns !== 0) {
+      throw new Error("launcher-owned daemon did not acknowledge complete active-turn cancellation");
+    }
+    this.logger.info("runtime.active_turns_cancelled", {
+      httpTurns: result.cancelled_http_turns,
+      browserTurns: result.cancelled_browser_turns,
+    });
+    return {
+      cancelledHttpTurns: result.cancelled_http_turns,
+      cancelledBrowserTurns: result.cancelled_browser_turns,
+    };
+  }
+
   async stopChild(name, timeoutMs = 10_000) {
     const child = this[name];
     if (!child || child.exitCode !== null || child.signalCode !== null) {
@@ -1789,8 +1813,60 @@ class RuntimeSupervisor {
     return this.startIfConfigured();
   }
 
-  async shutdown() {
-    return this.stopForSetup();
+  async forceStopOwnedRuntime(reason) {
+    this.logger.warn("runtime.forced_shutdown_started", { message: errorMessage(reason) });
+    this.stopping = true;
+    this.stopTunnelMonitor();
+    for (const name of ["daemon", "tunnel"]) {
+      if (this.restartTimers[name]) {
+        clearTimeout(this.restartTimers[name]);
+        this.restartTimers[name] = null;
+      }
+    }
+    try {
+      if (this.recoveryTasks.size > 0) await Promise.allSettled([...this.recoveryTasks]);
+      const failures = [];
+      if (this.tunnel) {
+        try {
+          const config = this.readConfig();
+          if (!config) throw new Error("runtime configuration is unavailable");
+          const stopped = await this.runTunnelStopCommand(config);
+          if (stopped.code !== 0) throw new Error(tunnelControlDiagnostic(stopped));
+          await this.waitForTunnelStopped(config, 5_000);
+          this.tunnel = null;
+        } catch (error) {
+          failures.push(`tunnel: ${errorMessage(error)}`);
+        }
+      }
+      try {
+        await this.stopChild("daemon");
+      } catch (error) {
+        failures.push(`daemon: ${errorMessage(error)}`);
+      }
+      if (failures.length === 0) this.clearState();
+      else this.tryWriteState("failed", failures.join("; "));
+      this.logger.warn("runtime.forced_shutdown_completed", {
+        message: errorMessage(reason),
+        failures,
+      });
+      return {
+        status: failures.length === 0 ? "forced" : "forced-partial",
+        detail: errorMessage(reason),
+        failures,
+      };
+    } finally {
+      this.stopping = false;
+    }
+  }
+
+  async shutdown({ cancelActiveTurns = false, force = false } = {}) {
+    try {
+      if (cancelActiveTurns) await this.cancelActiveTurns();
+      return await this.stopForSetup();
+    } catch (error) {
+      if (!force) throw error;
+      return this.forceStopOwnedRuntime(error);
+    }
   }
 }
 

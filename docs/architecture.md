@@ -29,8 +29,8 @@ launcher-owned codex-chatgpt-web daemon
 
 ### `full`
 
-- Exposes the same fixed models and attaches the turn-bound connector capability to every model,
-  including Pro when the signed-in account exposes it.
+- Exposes the same fixed models and attaches the turn-bound connector capability to every available
+  effort, from Luna through Pro. There are no effort-specific MCP exclusions.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call presents one outer Codex turn capability; the MCP server keeps the derived
   binding private and dispatches the requested action immediately.

@@ -35,6 +35,10 @@ test("closing the launcher follows the persisted background-runtime preference",
 });
 
 test("normal shutdown persists the ChatGPT session before closing browser views", () => {
+  assert.match(
+    electronMain,
+    /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/,
+  );
   const persist = electronMain.indexOf("await browserHost?.persistSession()");
   const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
   assert.ok(persist >= 0, "shutdown must persist the ChatGPT session");
@@ -44,7 +48,7 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
   assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
-  assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\)/);
+  assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
   assert.match(electronMain, /onboardingComplete:\s*true,[\s\S]*?autoStart:\s*false/);
@@ -79,6 +83,16 @@ test("failed doctor reports retain every failed check", () => {
     /report\.ok\s*\?\s*report\.checks\.slice\(-6\)\s*:\s*report\.checks\.filter\(\(check\) => check\.status !== "ok"\)/,
   );
   assert.match(appSource, /visibleChecks\.map\(\(check\) =>/);
+});
+
+test("MCP verification failures stay inside the structured setup report", () => {
+  assert.match(appSource, /next\.operation\.name !== "mcp-verification"/);
+  assert.match(appSource, /next\.name !== "mcp-verification"/);
+  assert.match(electronMain, /Finish the active Codex task before verifying the ChatGPT connector/);
+  assert.match(electronMain, /report\.checks\.filter\(\(check\) => check\.id !== "connector"\)/);
+  assert.match(electronMain, /mcp\.verification_requested/);
+  assert.match(electronMain, /launcherFocused:\s*mainWindow\?\.isFocused\(\) === true/);
+  assert.match(electronMain, /rendererFocused:\s*event\.sender\.isFocused\(\)/);
 });
 
 test("MCP verification proves runtime health before checking the connector", () => {

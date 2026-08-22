@@ -152,6 +152,14 @@ function isChatGptCloudflareChallengeResponse(details) {
     && responseHeaderIncludes(details.responseHeaders, "cf-mitigated", "challenge");
 }
 
+class BrowserTurnCancelledError extends Error {
+  constructor(traceId) {
+    super(`Browser turn ${traceId} was cancelled by the user`);
+    this.name = "BrowserTurnCancelledError";
+    this.code = "turn_cancelled";
+  }
+}
+
 class BrowserHost {
   constructor({
     window,
@@ -192,6 +200,7 @@ class BrowserHost {
     this.surfaceActive = true;
     this.turnTabs = new Map();
     this.closedTurnOwners = new Map();
+    this.userCancelledTurnOwners = new Map();
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
@@ -862,6 +871,9 @@ class BrowserHost {
   closeTab(tabId) {
     const tab = this.turnTabs.get(tabId);
     if (!tab) throw new Error("Browser tab does not exist");
+    if (tab.status === "running") {
+      this.userCancelledTurnOwners.set(tab.traceId, tab.helperPid);
+    }
     this.removeTurnTab(tab, true);
     this.logger.info("browser.tab_closed", { tabId, traceId: tab.traceId, status: tab.status });
     return this.snapshot();
@@ -1090,6 +1102,9 @@ class BrowserHost {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
+    if (this.userCancelledTurnOwners.has(traceId)) {
+      throw new BrowserTurnCancelledError(traceId);
+    }
     const existing = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
     if (existing) {
       if (existing.status === "running" && existing.helperPid !== helperPid) {
@@ -1136,8 +1151,10 @@ class BrowserHost {
     if (!tab) {
       const closedOwner = this.closedTurnOwners.get(traceId);
       if (closedOwner === helperPid) {
+        const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
         this.closedTurnOwners.delete(traceId);
-        return;
+        this.userCancelledTurnOwners.delete(traceId);
+        return { cancelledByUser };
       }
       throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);
     }
@@ -1160,6 +1177,7 @@ class BrowserHost {
     this.removeTurnTab(tab, false);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
     this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
+    return { cancelledByUser: false };
   }
 
   async returnToIdle() {
@@ -1524,6 +1542,7 @@ class BrowserHost {
 module.exports = {
   allowedAuthUrl,
   BrowserHost,
+  BrowserTurnCancelledError,
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
