@@ -63,6 +63,9 @@ test("release installers resolve checksummed native launcher assets", () => {
     windowsInstaller.includes(expectedWindowsExecutable),
     `the PowerShell installer must launch the NSIS executable at ${expectedWindowsExecutable}`,
   );
+  assert.match(windowsInstaller, /-ArgumentList "\/S", "\/currentuser"/);
+  const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
+  assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);
 });
 
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {

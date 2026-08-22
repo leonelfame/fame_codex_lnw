@@ -65,7 +65,7 @@ try {
   $Expected = ($ExpectedLine -split "\s+")[0].ToLowerInvariant()
   $Actual = (Get-FileHash -Algorithm SHA256 $Installer).Hash.ToLowerInvariant()
   if ($Actual -ne $Expected) { throw "SHA-256 verification failed for $Asset" }
-  $Process = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
+  $Process = Start-Process -FilePath $Installer -ArgumentList "/S", "/currentuser" -Wait -PassThru
   if ($Process.ExitCode -ne 0) { throw "Installer exited with code $($Process.ExitCode)" }
   $Executable = Join-Path $env:LOCALAPPDATA "Programs\codex-web-gpt-launcher\Codex Web GPT.exe"
   if (-not (Test-Path $Executable)) { throw "Installed launcher was not found at $Executable" }

@@ -75,7 +75,7 @@ try {
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
     const installer = artifact(/-win-x64\.exe$/, "Windows installer");
-    run(installer, ["/S"], { timeout: 120_000 });
+    run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
     executable = path.join(
       process.env.LOCALAPPDATA || "",
       "Programs",
