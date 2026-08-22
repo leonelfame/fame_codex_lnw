@@ -120,7 +120,7 @@ test("DEV setup child environment removes launcher-rebound production aliases", 
     CODEX_WEB_GPT_LAUNCHER_DATA_DIR: "/dev/launcher",
   }), {
     KEEP_ME: "yes",
-    CODEX_WEB_GPT_DEV_HOME: "/dev",
+    CODEX_WEB_GPT_DEV_HOME: path.resolve("/dev"),
   });
 
   let runOptions;
