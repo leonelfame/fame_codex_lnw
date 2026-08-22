@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   devLauncherEnvironment,
   installedLauncherCandidates,
@@ -8,6 +8,7 @@ import {
 
 test("DEV profile paths isolate browser, Codex, config, chat, and runtime state", () => {
   const homeDirectory = "/Users/tester";
+  const devHome = resolve(homeDirectory, "development");
   const paths = resolveDevProfilePaths({
     homeDirectory,
     environment: {
@@ -16,13 +17,13 @@ test("DEV profile paths isolate browser, Codex, config, chat, and runtime state"
     },
   });
   expect(paths).toEqual({
-    home: join(homeDirectory, "development"),
-    codexHome: join(homeDirectory, "development", "codex-home"),
-    launcherUserData: join(homeDirectory, "development", "launcher"),
-    descriptorPath: join(homeDirectory, "development", "runtime", "launcher-browser.json"),
-    chatsPath: join(homeDirectory, "development", "chats"),
-    runtimePath: join(homeDirectory, "development", "runtime", "dev-chat"),
-    configPath: join(homeDirectory, "development", "config.json"),
+    home: devHome,
+    codexHome: join(devHome, "codex-home"),
+    launcherUserData: join(devHome, "launcher"),
+    descriptorPath: join(devHome, "runtime", "launcher-browser.json"),
+    chatsPath: join(devHome, "chats"),
+    runtimePath: join(devHome, "runtime", "dev-chat"),
+    configPath: join(devHome, "config.json"),
   });
 });
 
@@ -54,6 +55,13 @@ test("installed launcher discovery has explicit platform candidates", () => {
     "/home/tester/.local/bin/codex-web-gpt",
     "/usr/local/bin/codex-web-gpt",
     "/usr/bin/codex-web-gpt",
+  ]);
+  expect(installedLauncherCandidates({
+    platform: "win32",
+    homeDirectory: "C:\\Users\\tester",
+    environment: { LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local" },
+  })).toEqual([
+    "C:\\Users\\tester\\AppData\\Local\\Programs\\codex-web-gpt-launcher\\Codex Web GPT.exe",
   ]);
 });
 

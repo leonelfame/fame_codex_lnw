@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve, win32 } from "node:path";
+import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { expandUserPath, getConfigPath } from "../config";
 import {
   readLauncherBrowserHostDescriptor,
@@ -77,10 +77,11 @@ export function installedLauncherCandidates({
 } = {}): string[] {
   const override = environment.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
   const candidates = override ? [expandUserPath(override)] : [];
+  const targetPath = platform === "win32" ? win32 : posix;
   if (platform === "darwin") {
     candidates.push(
       "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT",
-      join(homeDirectory, "Applications", "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT"),
+      posix.join(homeDirectory, "Applications", "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT"),
     );
   } else if (platform === "win32") {
     const localAppData = environment.LOCALAPPDATA?.trim();
@@ -88,12 +89,12 @@ export function installedLauncherCandidates({
       candidates.push(win32.join(localAppData, "Programs", "codex-web-gpt-launcher", "Codex Web GPT.exe"));
     }
   } else if (platform === "linux") {
-    candidates.push(join(homeDirectory, ".local", "bin", "codex-web-gpt"));
-    for (const entry of (environment.PATH || "").split(delimiter).filter(Boolean)) {
-      candidates.push(join(entry, "codex-web-gpt"));
+    candidates.push(posix.join(homeDirectory, ".local", "bin", "codex-web-gpt"));
+    for (const entry of (environment.PATH || "").split(":").filter(Boolean)) {
+      candidates.push(posix.join(entry, "codex-web-gpt"));
     }
   }
-  return [...new Set(candidates.map(candidate => resolve(candidate)))];
+  return [...new Set(candidates.map(candidate => targetPath.resolve(candidate)))];
 }
 
 export function findInstalledLauncherExecutable(options: Parameters<typeof installedLauncherCandidates>[0] = {}): string {
