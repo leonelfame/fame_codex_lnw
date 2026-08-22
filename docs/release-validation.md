@@ -36,6 +36,14 @@ Run this list on a maintained Windows 11 x64 machine with a real ChatGPT account
 Any failed or unexecuted item blocks a stable release. An alpha may ship with a named failed item
 only when the release notes describe the limitation and recovery path explicitly.
 
+### v3.0.0 result
+
+Maintainer validation passed on Windows 11 x64 on 2026-08-22 using the published v3.0.0-alpha
+upgrade package and a real ChatGPT Pro account. The authenticated launcher, Codex model catalog,
+Full-mode MCP tools, Pro turns, compaction, cancellation, session reuse, and preserved connector
+configuration were exercised successfully. The direct installer completed successfully but gave no
+clear completion action; v3.0.0 changes it to an assisted installer with a final launch option.
+
 ## macOS gate
 
 Repeat items 2 through 10 on the oldest supported macOS version or the closest maintained machine.

@@ -22,9 +22,10 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
+  assert.equal(manifest.build.nsis.oneClick, false);
   assert.equal(manifest.build.nsis.perMachine, false);
   assert.equal(manifest.build.nsis.allowElevation, false);
-  assert.equal(manifest.build.nsis.runAfterFinish, false);
+  assert.equal(manifest.build.nsis.runAfterFinish, true);
 });
 
 test("release installers resolve checksummed native launcher assets", () => {
