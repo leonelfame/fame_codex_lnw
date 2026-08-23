@@ -72,6 +72,29 @@ it to exercise the one-message composer budget and multi-chunk prompt insertion 
 history growth. The normal model-specific browser preflight still applies and fails closed above
 the measured transport limit.
 
+## Bigger Context experiment
+
+The DEV launcher's Settings surface contains **Bigger Context (experimental)**. It is disabled by
+default and is never read by the production launcher or normal Codex route. Start a new DEV chat
+command after changing the switch so the CLI reads the updated isolated launcher preference.
+
+When enabled, every DEV browser turn transports its context as three staged JSON messages followed
+by one final commit message. Each stage contains complete semantic records, never a raw JSON string
+cut in the middle. The model must return an exact transaction-bound SHA-256 acknowledgement before
+the next stage is sent. Images, the MCP connector, and the private `turn_token` are attached only to
+the final commit. Compaction uses the same three-stage path, so history that exceeds the old single
+compaction-message budget can remain available to the summarizer.
+
+Any missing or malformed acknowledgement fails the whole transaction. No later part or final
+commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The DEV context
+and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
+stage must still fit the selected ChatGPT mode's measured one-message boundary.
+
+This mode sends four user messages and receives three acknowledgement responses for every model
+turn. It is slower and may increase the probability of rate limits or a temporary account cooldown.
+It is intentionally unavailable for Luna: Luna's later requests still include the accumulated
+transcript inside the same measured 28,000-token browser transport budget.
+
 Browser-only chats do not advertise outer tools and never claim simulated effects. Full setup keeps
 the launcher-owned DEV tunnel ready so ChatGPT can create and validate `Codex Native2 DEV` before a
 CLI chat starts. Each named chat attaches its broker to that tunnel, while every dispatched action

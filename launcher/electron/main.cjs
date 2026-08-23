@@ -638,7 +638,9 @@ function registerIpc({ logger, stateStore }) {
     };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    if (key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const devExperimental = IS_DEV_PROFILE && key === "experimentalBiggerContext";
+    if (!ordinary && !devExperimental) {
       throw new Error("Unknown preference");
     }
     return stateStore.update({ [key]: value === true });

@@ -1376,6 +1376,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {devProfile ? <SettingRow body={copy.biggerContextBody} label={copy.biggerContext}>
+          <Switch
+            checked={snapshot.state.experimentalBiggerContext}
+            onChange={(checked) => void api!.setPreference("experimentalBiggerContext", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>

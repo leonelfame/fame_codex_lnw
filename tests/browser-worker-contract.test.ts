@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptNewTurnIdentity, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -14,12 +14,31 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
 
   expect(runBrowserTurn).toContain("return this.attachPromptWithCompactionRetry(");
   expect(runBrowserTurn).toContain("connectorAttemptBudget");
-  expect(runBrowserTurn).toContain('.locator("xpath=ancestor::form[1]")');
-  expect(runBrowserTurn).toContain('.getByTestId("send-button")');
-  expect(runBrowserTurn).toContain('await sendButton.press("Enter")');
-  expect(runBrowserTurn).toContain("await this.waitForSubmissionAccepted(");
+  expect(workerSource).toContain('.locator("xpath=ancestor::form[1]")');
+  expect(workerSource).toContain('.getByTestId("send-button")');
+  expect(workerSource).toContain('await sendButton.press("Enter")');
+  expect(workerSource).toContain("await this.waitForSubmissionAccepted(");
+  expect(runBrowserTurn).toContain("this.sendAttachedPrompt(");
+  expect(runBrowserTurn).toContain("formatChatGptWebMultipartStage(");
+  expect(runBrowserTurn).toContain("waitForMultipartAcknowledgement(");
+  expect(runBrowserTurn).toContain("formatChatGptWebMultipartCommit(");
   expect(runBrowserTurn).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
+});
+
+test("conversation turn identity survives ChatGPT DOM virtualization", () => {
+  expect(chatGptNewTurnIdentity(
+    ["conversation-turn-1", "conversation-turn-2", "conversation-turn-3"],
+    ["conversation-turn-2", "conversation-turn-3", "conversation-turn-4"],
+  )).toBe("conversation-turn-4");
+  expect(chatGptNewTurnIdentity(
+    ["conversation-turn-1"],
+    ["conversation-turn-1"],
+  )).toBeUndefined();
+  expect(() => chatGptNewTurnIdentity(
+    ["conversation-turn-1"],
+    ["conversation-turn-1", "conversation-turn-2", "conversation-turn-3"],
+  )).toThrow("2 new conversation turns");
 });
 
 test("browser turns run concurrently up to the five-tab limit", async () => {
@@ -1262,11 +1281,7 @@ test("submission acceptance stops when its stage is aborted", async () => {
   const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
     waitForSubmissionAccepted(
       page: Page,
-      userTurns: unknown,
-      responseTurns: unknown,
-      responseTurn: unknown,
-      initialUserTurnCount: number,
-      initialResponseTurnCount: number,
+      baseline: unknown,
       signal: AbortSignal,
     ): Promise<unknown>;
   }).waitForSubmissionAccepted;
@@ -1277,10 +1292,6 @@ test("submission acceptance stops when its stage is aborted", async () => {
     {},
     {} as Page,
     {},
-    {},
-    {},
-    0,
-    0,
     controller.signal,
   )).rejects.toMatchObject({ name: "AbortError" });
 });
@@ -1475,6 +1486,42 @@ test("browser preflight separates model context from one-message transport limit
     pro,
     520_001,
   )).toThrow("104,000-token ChatGPT browser message boundary");
+});
+
+test("Bigger Context preflight expands only the total context ceiling and keeps each message boundary", () => {
+  const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    280_000,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    900_000,
+  )).not.toThrow();
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    333_579,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    900_000,
+  )).toThrow("three-part ceiling");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    280_000,
+    103_001,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    900_000,
+  )).toThrow("ChatGPT message boundary");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    20_000,
+    10_000,
+    "gpt-5.6-luna",
+    "low",
+    { localToolsEnabled: false, solAvailable: false, proAvailable: false },
+    40_000,
+  )).toThrow("unavailable for Luna");
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {

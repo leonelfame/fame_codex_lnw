@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
+  CHATGPT_BIGGER_CONTEXT_PARTS,
   chatGptPromptJsonBytes,
   chatGptReadOnlyContextWarning,
   compileChatGptWebPrompt,
+  formatChatGptWebMultipartCommit,
+  formatChatGptWebMultipartStage,
 } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
@@ -83,6 +86,56 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
+test("Bigger Context stages three valid semantic record envelopes and exposes the turn token only at commit", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const parsed = request("high");
+  parsed.context.systemPrompt = ["system-one", "system-two"];
+  parsed.context.messages.push(
+    { role: "assistant", content: [{ type: "text", text: "prior-answer" }], timestamp: 3 },
+    { role: "user", content: "latest-request", timestamp: 4 },
+  );
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    token,
+    { experimentalMultipartParts: CHATGPT_BIGGER_CONTEXT_PARTS },
+  );
+
+  expect(compiled.multipart?.parts).toHaveLength(3);
+  const records = compiled.multipart!.parts.flatMap(part => {
+    const payload = JSON.parse(part) as { version: number; records: unknown[] };
+    expect(payload.version).toBe(1);
+    return payload.records;
+  }) as Array<Record<string, unknown>>;
+  expect(records.filter(record => record.kind === "system").map(record => record.content)).toEqual([
+    "system-one",
+    "system-two",
+  ]);
+  expect(records.filter(record => record.kind === "message").map(record => (
+    (record.message as { role: string }).role
+  ))).toEqual(["developer", "user", "assistant", "user"]);
+  expect(compiled.multipart!.parts.join("\n")).not.toContain(token);
+  expect(compiled.multipart!.commit.match(new RegExp(token, "g"))).toHaveLength(1);
+  expect(compiled.text).toBe(compiled.multipart!.commit);
+  expect(compiled.text).not.toContain("<codex_context_json>");
+
+  const transactionId = `ctx_${"a".repeat(32)}`;
+  const stages = compiled.multipart!.parts.map((part, index) => (
+    formatChatGptWebMultipartStage(part, transactionId, index + 1)
+  ));
+  for (const [index, stage] of stages.entries()) {
+    expect(stage.text).toContain(`part: ${index + 1}/3`);
+    expect(stage.text).toContain(stage.sha256);
+    expect(stage.acknowledgement).toBe(
+      `CODEX_MULTIPART_ACK ${transactionId} ${index + 1}/3 ${stage.sha256}`,
+    );
+  }
+  const commit = formatChatGptWebMultipartCommit(compiled.multipart!, transactionId);
+  expect(commit).toContain(`transaction_id: ${transactionId}`);
+  expect(commit).toContain("All three context stages were acknowledged");
+  expect(commit.match(new RegExp(token, "g"))).toHaveLength(1);
+});
+
 test("browser-only Medium directs users to the full harness", () => {
   const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
   const warning = chatGptReadOnlyContextWarning(request("medium"), capabilities);
@@ -151,6 +204,41 @@ test("Web compaction trims only the oldest history until the browser request fit
   expect(untrimmed.text).toContain("oldest-static");
   expect(untrimmed.text).toContain("newer-static");
   expect(untrimmed.trimmedCompactionMessages).toBeUndefined();
+});
+
+test("Bigger Context compaction preserves history that fits across three atomic browser stages", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  compact.context.systemPrompt = [];
+  compact.context.messages = Array.from({ length: 6 }, (_unused, index) => ({
+    role: "user" as const,
+    content: `multipart-history-${index + 1}-${String.fromCharCode(97 + index).repeat(42_000)}`,
+    timestamp: index + 1,
+  }));
+
+  const inline = compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  );
+  const multipart = compileChatGptWebPrompt(
+    compact,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    undefined,
+    { experimentalMultipartParts: CHATGPT_BIGGER_CONTEXT_PARTS },
+  );
+
+  expect(inline.trimmedCompactionMessages).toBeGreaterThan(0);
+  expect(multipart.trimmedCompactionMessages).toBeUndefined();
+  expect(multipart.multipart?.parts).toHaveLength(3);
+  const transactionId = `ctx_${"0".repeat(32)}`;
+  for (const [index, payload] of multipart.multipart!.parts.entries()) {
+    const stage = formatChatGptWebMultipartStage(payload, transactionId, index + 1);
+    expect(chatGptPromptJsonBytes(stage.text)).toBeLessThanOrEqual(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET);
+  }
+  const staged = multipart.multipart!.parts.join("\n");
+  for (let index = 1; index <= 6; index += 1) {
+    expect(staged).toContain(`multipart-history-${index}-`);
+  }
 });
 
 test("Web compaction rebuilds attachments after trimming an oversized oldest image message", () => {
