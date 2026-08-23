@@ -1137,7 +1137,10 @@ export class ChatGptBrowserWorker {
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
     if (!menuVisible && menuExpanded !== "true") {
       await throwIfChatGptRateLimitDialog(page);
-      await currentEffort.press("Enter");
+      // ChatGPT's current Radix trigger no longer responds to synthetic Enter/Space on background
+      // Electron surfaces. Force only the exact, visible effort control; the menu/slider state
+      // below remains the authoritative postcondition, so this cannot become an unproved click.
+      await currentEffort.click({ force: true });
     }
     await captureDiagnostic?.("effort-menu-open-requested");
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
@@ -1233,7 +1236,7 @@ export class ChatGptBrowserWorker {
         const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
         if (expanded !== "true") {
           await throwIfChatGptRateLimitDialog(page);
-          await currentEffort.press("Enter");
+          await currentEffort.click({ force: true });
         }
         await effortChoice.waitFor({
           state: "visible",

@@ -460,17 +460,15 @@ export function compileChatGptWebPrompt(
   let compiled = build(sourceMessages);
   if (!parsed._compactionRequest) return compiled;
 
-  const budgetProbeTransaction = `ctx_${"0".repeat(32)}`;
-  const compactionMessageBytes = (): number[] => compiled.multipart
-    ? [
-      ...compiled.multipart.parts.map((payload, index) => chatGptPromptJsonBytes(
-        formatChatGptWebMultipartStage(payload, budgetProbeTransaction, index + 1).text,
-      )),
-      chatGptPromptJsonBytes(formatChatGptWebMultipartCommit(compiled.multipart, budgetProbeTransaction)),
-    ]
-    : [chatGptPromptJsonBytes(compiled.text)];
+  // The 110k edge budget was measured for the old single-message compaction envelope. Bigger
+  // Context stages are governed by the same model-specific per-message token and composer limits
+  // as ordinary multipart turns in browser-worker. Applying the legacy byte cap here silently
+  // discarded context that the staged transport can carry; preserve it and let browser preflight
+  // fail explicitly if any atomic record is genuinely too large for one stage.
+  if (compiled.multipart) return compiled;
+
   const exceedsCompactionBudget = (): boolean => (
-    compactionMessageBytes().some(bytes => bytes > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET)
+    chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
   );
 
   // Match native Codex compaction recovery: discard oldest history items one at a time until the
@@ -483,13 +481,8 @@ export function compileChatGptWebPrompt(
     sourceMessages = sourceMessages.slice(1);
     compiled = build(sourceMessages);
   }
-  const encodedBytes = Math.max(...compactionMessageBytes());
+  const encodedBytes = chatGptPromptJsonBytes(compiled.text);
   if (exceedsCompactionBudget()) {
-    if (compiled.multipart) {
-      throw new Error(
-        `ChatGPT Web multipart compaction still requires a ${encodedBytes.toLocaleString("en-US")}-byte stage after all older history was trimmed; the final atomic context record exceeds the browser compaction budget`,
-      );
-    }
     throw new Error(
       `ChatGPT Web compaction prompt still requires ${encodedBytes.toLocaleString("en-US")} JSON bytes after all older history was trimmed; the final compaction instruction alone exceeds the browser compaction budget`,
     );

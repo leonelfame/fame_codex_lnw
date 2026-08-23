@@ -1177,19 +1177,20 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
   expect(checkpoints).toEqual(["luna-default-confirmed"]);
 });
 
-test("effort selection handles the known ChatGPT rate-limit dialog before keyboard activation", () => {
+test("effort selection handles the known ChatGPT rate-limit dialog before background-safe activation", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
   const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
   const selectionSource = workerSource.slice(selectionStart, selectionEnd);
   const guard = selectionSource.indexOf("throwIfChatGptRateLimitDialog(page)");
-  const activation = selectionSource.indexOf('currentEffort.press("Enter")');
+  const activation = selectionSource.indexOf("currentEffort.click({ force: true })");
 
   expect(workerSource).toContain("Too many requests");
   expect(workerSource).toContain("making requests too quickly");
   expect(guard).toBeGreaterThan(-1);
   expect(activation).toBeGreaterThan(guard);
-  expect(selectionSource).not.toContain("currentEffort.click(");
+  expect(selectionSource).not.toContain('currentEffort.press("Enter")');
+  expect(selectionSource).not.toContain("currentEffort.evaluate(");
   expect(selectionSource).toContain('effortChoice.press("Enter")');
   expect(selectionSource).not.toContain("effortChoice.click(");
   expect(selectionSource).not.toContain("is unavailable");
