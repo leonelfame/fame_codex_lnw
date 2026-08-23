@@ -86,6 +86,7 @@ export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
+export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -101,12 +102,24 @@ const settleChatGptUi = (): Promise<void> => (
 class ChatGptConnectorCatalogStaleError extends Error {
   constructor(
     readonly appName: string,
-    readonly visibleRows: string[],
     readonly triggerAttempts: number,
   ) {
     super(`ChatGPT connector catalog is missing ${JSON.stringify(appName)}`);
     this.name = "ChatGptConnectorCatalogStaleError";
   }
+}
+
+interface ChatGptConnectorAttemptBudget {
+  triggerAttempts: number;
+}
+
+function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    status: 424,
+    errorType: "connector_error",
+    code: "connector_not_found",
+    retryable: false,
+  });
 }
 
 export class ChatGptPromptAttachmentIntegrityError extends Error {
@@ -1344,14 +1357,14 @@ export class ChatGptBrowserWorker {
     }
     return `ChatGPT connector menu opened but exposed no row named ${JSON.stringify(this.config.appName)}`
       + ` after ${triggerAttempts} complete mention trigger attempt(s)`
-      + `; create a connector with that exact name before retrying`
-      + `; visible rows: ${titles.map(title => JSON.stringify(title)).join(", ")}`;
+      + `; create a connector with that exact name before retrying`;
   }
 
   private async selectConnector(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     catalogRefreshAvailable = false,
+    attemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 },
   ): Promise<Locator> {
     let composer = await this.activeComposer(page);
     await composer.fill("");
@@ -1364,11 +1377,9 @@ export class ChatGptBrowserWorker {
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
-    const menuDeadline = Date.now() + 20_000;
-    let triggerAttempts = 0;
     let firstMenuCaptured = false;
-    for (;;) {
-      triggerAttempts += 1;
+    while (attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
+      attemptBudget.triggerAttempts += 1;
       composer = await this.activeComposer(page);
       await composer.fill("");
       await composer.focus();
@@ -1381,7 +1392,7 @@ export class ChatGptBrowserWorker {
       try {
         await appResult.waitFor({
           state: "visible",
-          timeout: Math.min(2_500, Math.max(1, menuDeadline - Date.now())),
+          timeout: 2_500,
         });
         await captureDiagnostic?.("connector-menu-visible");
         break;
@@ -1395,27 +1406,33 @@ export class ChatGptBrowserWorker {
           );
         if (knownIdentityMismatch) {
           await captureDiagnostic?.("connector-menu-missing");
-          throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
+          throw chatGptConnectorUnavailableError(
+            await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts),
+          );
         }
-        if (Date.now() >= menuDeadline) {
-          if (catalogRefreshAvailable && visibleRows.length > 0) {
-            if (!visibleRows.includes(this.config.appName)) {
-              throw new ChatGptConnectorCatalogStaleError(
-                this.config.appName,
-                visibleRows,
-                triggerAttempts,
-              );
-            }
-          }
+        if (
+          catalogRefreshAvailable
+          && visibleRows.length > 0
+          && !visibleRows.includes(this.config.appName)
+          && attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS
+        ) {
+          throw new ChatGptConnectorCatalogStaleError(
+            this.config.appName,
+            attemptBudget.triggerAttempts,
+          );
+        }
+        if (attemptBudget.triggerAttempts >= MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
           await captureDiagnostic?.("connector-menu-missing");
-          throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
+          throw chatGptConnectorUnavailableError(
+            await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts),
+          );
         }
       }
     }
     if (await appResult.count() !== 1) {
-      throw new Error(
+      throw chatGptConnectorUnavailableError(
         `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
-        + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
+        + ` after ${attemptBudget.triggerAttempts} complete mention trigger attempt(s)`,
       );
     }
     // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
@@ -1455,6 +1472,7 @@ export class ChatGptBrowserWorker {
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
     catalogRefreshAvailable = false,
+    connectorAttemptBudget?: ChatGptConnectorAttemptBudget,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
     if (!localTools) {
@@ -1472,6 +1490,7 @@ export class ChatGptBrowserWorker {
       page,
       captureDiagnostic,
       catalogRefreshAvailable,
+      connectorAttemptBudget,
     );
     await selectedComposer.focus();
     await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
@@ -1533,6 +1552,7 @@ export class ChatGptBrowserWorker {
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
     catalogRefreshAvailable = false,
+    connectorAttemptBudget?: ChatGptConnectorAttemptBudget,
   ): Promise<void> {
     let retryAvailable = compaction;
     for (;;) {
@@ -1544,6 +1564,7 @@ export class ChatGptBrowserWorker {
           captureDiagnostic,
           abortSignal,
           catalogRefreshAvailable,
+          connectorAttemptBudget,
         );
         return;
       } catch (error) {
@@ -2158,6 +2179,7 @@ export class ChatGptBrowserWorker {
       };
       let mode: ChatGptWebModelMode;
       let catalogRefreshAvailable = requestedMode.localTools;
+      const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       for (;;) {
         mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
           this.selectModelAndEffort(
@@ -2183,6 +2205,7 @@ export class ChatGptBrowserWorker {
               checkpoint => diagnostics.capture(page, checkpoint),
               promptAbortSignal,
               catalogRefreshAvailable,
+              connectorAttemptBudget,
             );
           });
           break;

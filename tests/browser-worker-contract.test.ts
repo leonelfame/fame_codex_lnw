@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -13,6 +13,7 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));
 
   expect(runBrowserTurn).toContain("return this.attachPromptWithCompactionRetry(");
+  expect(runBrowserTurn).toContain("connectorAttemptBudget");
   expect(runBrowserTurn).toContain('.locator("xpath=ancestor::form[1]")');
   expect(runBrowserTurn).toContain('.getByTestId("send-button")');
   expect(runBrowserTurn).toContain('await sendButton.press("Enter")');
@@ -103,10 +104,11 @@ test("connector verification reports a legacy-only ChatGPT menu as a migration e
 
   const mixedMessage = await connectorMentionFailure.call({
     config: { appName: CHATGPT_CONNECTOR_NAME },
-    connectorMentionRowTitles: async () => ["Codex Native", "Codex Native2"],
+    connectorMentionRowTitles: async () => ["Codex Native", "Codex Native2", "Private chat title"],
   }, {}, 4);
   expect(mixedMessage).not.toContain("Legacy ChatGPT connector");
   expect(mixedMessage).toContain('no row named "Codex Native2"');
+  expect(mixedMessage).not.toContain("Private chat title");
 });
 
 test("browser stage timeout aborts late page acquisition", async () => {
@@ -855,7 +857,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
     );
     expect(prepared).toBe(1);
     expect(calls.filter(call => call === "reload")).toEqual([]);
-    expect(calls.filter(call => call === "menu:stale")).toHaveLength(8);
+    expect(calls.filter(call => call === "menu:stale")).toHaveLength(MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS);
     expect(calls).not.toContain("menu:fresh");
   } finally {
     Date.now = realDateNow;
@@ -921,7 +923,18 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
     }
   };
 
-  await expect(run([])).rejects.toThrow("menu absent");
+  const missingMenuError = await run([]).catch(error => error);
+  if (!(missingMenuError instanceof Error)) {
+    throw new Error("Expected connector selection to fail with an Error");
+  }
+  expect(missingMenuError).toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 424,
+    errorType: "connector_error",
+    code: "connector_not_found",
+    retryable: false,
+  });
+  expect(missingMenuError.message).toContain(`after ${MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS}`);
   await expect(run(["Codex Native"])).rejects.toThrow("Legacy ChatGPT connector");
   await expect(run([CHATGPT_CONNECTOR_NAME])).rejects.toThrow("exact row was not visible");
 });
