@@ -93,6 +93,14 @@ test("failed doctor reports retain every failed check", () => {
   assert.match(appSource, /visibleChecks\.map\(\(check\) =>/);
 });
 
+test("launcher shares only privacy-safe exported diagnostics", () => {
+  assert.match(appSource, /api!\.exportLogs\(\)/);
+  assert.match(preloadSource, /exportLogs:[\s\S]*?launcher:export-logs/);
+  assert.match(electronMain, /launcher:export-logs[\s\S]*?showSaveDialog[\s\S]*?exportSanitizedLogs/);
+  assert.doesNotMatch(preloadSource, /launcher:open-logs/);
+  assert.doesNotMatch(electronMain, /launcher:open-logs/);
+});
+
 test("MCP verification failures stay inside the structured setup report", () => {
   assert.match(appSource, /next\.operation\.name !== "mcp-verification"/);
   assert.match(appSource, /next\.name !== "mcp-verification"/);

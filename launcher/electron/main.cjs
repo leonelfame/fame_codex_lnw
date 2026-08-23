@@ -20,6 +20,7 @@ const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
+  exportSanitizedLogs,
   installProcessDiagnosticGuards,
   registerLoggedIpc,
 } = require("./logging.cjs");
@@ -644,10 +645,20 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
-  handle("launcher:open-logs", async () => {
-    const error = await shell.openPath(path.dirname(logger.filePath));
-    if (error) throw new Error(`Could not open the launcher log directory: ${error}`);
-    return logger.filePath;
+  handle("launcher:export-logs", async () => {
+    const date = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: "Export privacy-safe diagnostics",
+      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
+      filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    const recordCount = exportSanitizedLogs({
+      filePath: logger.filePath,
+      destinationPath: result.filePath,
+    });
+    logger.info("launcher.logs_exported", { recordCount });
+    return result.filePath;
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");

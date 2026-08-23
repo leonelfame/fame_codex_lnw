@@ -1238,9 +1238,9 @@ function ActivitySurface({
         <span>{copy.recentActivity}</span>
         <SecondaryButton
           icon="external"
-          onClick={() => void api!.openLogs().catch((cause) => setError(messageOf(cause)))}
+          onClick={() => void api!.exportLogs().catch((cause) => setError(messageOf(cause)))}
         >
-          {copy.openLogFolder}
+          {copy.exportSafeLog}
         </SecondaryButton>
       </div>
       <div className="activity-table">
