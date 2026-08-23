@@ -9,6 +9,7 @@ import {
   formatChatGptWebMultipartStage,
 } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
+import { biggerContextPartCount } from "../src/adapters/chatgpt-web/usage";
 import type { CodexParsedRequest } from "../src/types";
 
 function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexParsedRequest {
@@ -134,6 +135,32 @@ test("Bigger Context stages three valid semantic record envelopes and exposes th
   expect(commit).toContain(`transaction_id: ${transactionId}`);
   expect(commit).toContain("All three context stages were acknowledged");
   expect(commit.match(new RegExp(token, "g"))).toHaveLength(1);
+});
+
+test("Bigger Context uses the minimum transport and reserves three stages for compaction", () => {
+  expect(biggerContextPartCount(94_999, 95_000, false)).toBeUndefined();
+  expect(biggerContextPartCount(95_000, 95_000, false)).toBe(2);
+  expect(biggerContextPartCount(189_999, 95_000, false)).toBe(2);
+  expect(biggerContextPartCount(190_000, 95_000, false)).toBe(3);
+  expect(biggerContextPartCount(1, 95_000, true)).toBe(3);
+
+  const compiled = compileChatGptWebPrompt(
+    request("high"),
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    undefined,
+    { experimentalMultipartParts: 2 },
+  );
+  expect(compiled.multipart?.parts).toHaveLength(2);
+  const transactionId = `ctx_${"b".repeat(32)}`;
+  const stages = compiled.multipart!.parts.map((part, index) => (
+    formatChatGptWebMultipartStage(part, transactionId, index + 1, 2)
+  ));
+  expect(stages.map(stage => stage.acknowledgement)).toEqual([
+    `CODEX_MULTIPART_ACK ${transactionId} 1/2 ${stages[0]!.sha256}`,
+    `CODEX_MULTIPART_ACK ${transactionId} 2/2 ${stages[1]!.sha256}`,
+  ]);
+  expect(formatChatGptWebMultipartCommit(compiled.multipart!, transactionId))
+    .toContain("All two context stages were acknowledged");
 });
 
 test("browser-only Medium directs users to the full harness", () => {

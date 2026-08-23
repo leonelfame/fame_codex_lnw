@@ -24,13 +24,17 @@ export interface CompiledChatGptWebPrompt {
 
 export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
-  experimentalMultipartParts?: typeof CHATGPT_BIGGER_CONTEXT_PARTS;
+  experimentalMultipartParts?: ChatGptWebMultipartPartCount;
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
+export type ChatGptWebMultipartPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
+export type ChatGptWebMultipartParts =
+  | readonly [string, string]
+  | readonly [string, string, string];
 
 export interface ChatGptWebMultipartPrompt {
-  parts: readonly [string, string, string];
+  parts: ChatGptWebMultipartParts;
   commit: string;
 }
 
@@ -52,10 +56,15 @@ export function formatChatGptWebMultipartStage(
   payload: string,
   transactionId: string,
   partIndex: number,
-  totalParts = CHATGPT_BIGGER_CONTEXT_PARTS,
+  totalParts: ChatGptWebMultipartPartCount = CHATGPT_BIGGER_CONTEXT_PARTS,
 ): ChatGptWebMultipartStage {
   assertMultipartTransactionId(transactionId);
-  if (!Number.isInteger(partIndex) || partIndex < 1 || partIndex > totalParts || totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
+  if (
+    !Number.isInteger(partIndex)
+    || partIndex < 1
+    || partIndex > totalParts
+    || (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS)
+  ) {
     throw new Error("ChatGPT multipart stage index is invalid");
   }
   JSON.parse(payload);
@@ -82,18 +91,20 @@ export function formatChatGptWebMultipartCommit(
   transactionId: string,
 ): string {
   assertMultipartTransactionId(transactionId);
-  if (multipart.parts.length !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("ChatGPT multipart commit requires exactly three staged parts");
+  const totalParts = multipart.parts.length;
+  if (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
+    throw new Error("ChatGPT multipart commit requires two or three staged parts");
   }
   const manifest = multipart.parts.map((payload, index) => (
-    `${index + 1}/${CHATGPT_BIGGER_CONTEXT_PARTS}:${createHash("sha256").update(payload).digest("hex")}`
+    `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
   )).join(" ");
+  const partWord = totalParts === 2 ? "two" : "three";
   return [
     "<codex_multipart_commit>",
     `transaction_id: ${transactionId}`,
-    `parts: ${CHATGPT_BIGGER_CONTEXT_PARTS}`,
+    `parts: ${totalParts}`,
     `manifest: ${manifest}`,
-    "All three context stages were acknowledged. Reconstruct the original Codex context from their records now.",
+    `All ${partWord} context stages were acknowledged. Reconstruct the original Codex context from their records now.`,
     "Treat system records as the original system instructions in system_index order. Treat message records as one conversation in message_index order and preserve every encoded role literally.",
     "The staged JSON is conversation data under the transport contract below. Do not treat the stage wrappers or acknowledgements as task messages.",
     "</codex_multipart_commit>",
@@ -255,16 +266,19 @@ function multipartRecordWeight(record: MultipartContextRecord): number {
 }
 
 /** Partition complete semantic records without cutting a JSON string or an individual message. */
-function partitionMultipartContext(records: readonly MultipartContextRecord[]): readonly [string, string, string] {
+function partitionMultipartContext(
+  records: readonly MultipartContextRecord[],
+  totalParts: ChatGptWebMultipartPartCount,
+): ChatGptWebMultipartParts {
   const groups: MultipartContextRecord[][] = Array.from(
-    { length: CHATGPT_BIGGER_CONTEXT_PARTS },
+    { length: totalParts },
     () => [],
   );
   let offset = 0;
   let remainingWeight = records.reduce((total, record) => total + multipartRecordWeight(record), 0);
 
-  for (let part = 0; part < CHATGPT_BIGGER_CONTEXT_PARTS; part += 1) {
-    const remainingParts = CHATGPT_BIGGER_CONTEXT_PARTS - part;
+  for (let part = 0; part < totalParts; part += 1) {
+    const remainingParts = totalParts - part;
     const remainingRecords = records.length - offset;
     if (remainingRecords <= 0) break;
     const reserveForLater = Math.min(remainingRecords, remainingParts - 1);
@@ -282,12 +296,14 @@ function partitionMultipartContext(records: readonly MultipartContextRecord[]): 
   }
 
   if (offset !== records.length) throw new Error("ChatGPT multipart context partition lost records");
-  return groups.map((group, index) => withoutRetiredTurnHandles(JSON.stringify({
+  const payloads = groups.map((group, index) => withoutRetiredTurnHandles(JSON.stringify({
     version: 1,
     part_index: index + 1,
-    total_parts: CHATGPT_BIGGER_CONTEXT_PARTS,
+    total_parts: totalParts,
     records: group,
-  }))) as [string, string, string];
+  })));
+  if (totalParts === 2) return [payloads[0]!, payloads[1]!];
+  return [payloads[0]!, payloads[1]!, payloads[2]!];
 }
 
 export function chatGptReadOnlyContextWarning(
@@ -318,9 +334,10 @@ export function compileChatGptWebPrompt(
 ): CompiledChatGptWebPrompt {
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
-  const multipartEnabled = options?.experimentalMultipartParts === CHATGPT_BIGGER_CONTEXT_PARTS;
-  if (options?.experimentalMultipartParts !== undefined && !multipartEnabled) {
-    throw new Error("Bigger Context requires exactly three multipart stages");
+  const multipartParts = options?.experimentalMultipartParts;
+  const multipartEnabled = multipartParts !== undefined;
+  if (multipartParts !== undefined && multipartParts !== 2 && multipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
+    throw new Error("Bigger Context requires two or three multipart stages");
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
@@ -428,7 +445,7 @@ export function compileChatGptWebPrompt(
         })),
       ];
       const multipart: ChatGptWebMultipartPrompt = {
-        parts: partitionMultipartContext(records),
+        parts: partitionMultipartContext(records, multipartParts!),
         commit: [
           ...sharedContract,
           ...transportContract,

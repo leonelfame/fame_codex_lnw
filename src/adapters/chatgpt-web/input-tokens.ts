@@ -24,7 +24,12 @@ export function compiledChatGptWebMessages(compiled: CompiledChatGptWebPrompt): 
   if (!compiled.multipart) return [compiled.text];
   return [
     ...compiled.multipart.parts.map((payload, index) => (
-      formatChatGptWebMultipartStage(payload, TOKEN_ESTIMATE_TRANSACTION, index + 1).text
+      formatChatGptWebMultipartStage(
+        payload,
+        TOKEN_ESTIMATE_TRANSACTION,
+        index + 1,
+        compiled.multipart!.parts.length,
+      ).text
     )),
     formatChatGptWebMultipartCommit(compiled.multipart, TOKEN_ESTIMATE_TRANSACTION),
   ];
@@ -56,7 +61,12 @@ export function estimateCompiledChatGptWebInputTokens(
     .reduce((total, message) => total + estimateTokens(message, modelId), 0);
   const acknowledgementTokens = compiled.multipart
     ? compiled.multipart.parts.reduce((total, payload, index) => total + estimateTokens(
-      formatChatGptWebMultipartStage(payload, TOKEN_ESTIMATE_TRANSACTION, index + 1).acknowledgement,
+      formatChatGptWebMultipartStage(
+        payload,
+        TOKEN_ESTIMATE_TRANSACTION,
+        index + 1,
+        compiled.multipart!.parts.length,
+      ).acknowledgement,
       modelId,
     ), 0)
     : 0;

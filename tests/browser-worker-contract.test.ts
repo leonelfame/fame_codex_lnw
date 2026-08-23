@@ -1498,6 +1498,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     pro,
     900_000,
+    3,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     333_579,
@@ -1506,7 +1507,17 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     pro,
     900_000,
+    3,
   )).toThrow("three-part ceiling");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    222_386,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    900_000,
+    2,
+  )).toThrow("two-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     280_000,
     103_001,
@@ -1514,6 +1525,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     pro,
     900_000,
+    3,
   )).toThrow("ChatGPT message boundary");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     20_000,
@@ -1522,6 +1534,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "low",
     { localToolsEnabled: false, solAvailable: false, proAvailable: false },
     40_000,
+    2,
   )).toThrow("unavailable for Luna");
 });
 

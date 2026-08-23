@@ -54,7 +54,7 @@ Interactive commands:
   /exit                Exit
 
 Experimental settings:
-  Bigger Context       Enable in the DEV launcher Settings; stages context in 3 messages + commit
+  Bigger Context       Enable in DEV Settings; adapts context across 1, 2, or 3 messages
 `;
 
 function takeFlag(args: string[], name: string): boolean {
@@ -154,7 +154,7 @@ function printHeader(
   stdout.write(`model ${state.model} · ${mode === "full" ? "tools explicitly simulated" : "browser-only, no outer tools"} · live launcher browser\n`);
   stdout.write(`context ${statusLine(status)}\n`);
   if (biggerContext) {
-    stdout.write(`${yellow("Bigger Context experimental")} · three staging messages + final commit · elevated rate-limit/cooldown risk\n`);
+    stdout.write(`${yellow("Bigger Context experimental")} · adaptive 1/2/3-message context · compaction uses 3 stages · elevated rate-limit/cooldown risk\n`);
   }
   stdout.write(`${dim("Codex route is untouched. No Responses port is bound, replaced, stopped, or restarted.")}\n`);
 }
@@ -321,7 +321,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
       stdout.write(`launcher: ${launcher.running ? `running (pid ${launcher.pid})` : `not ready${launcher.error ? ` · ${launcher.error}` : ""}`}\n`);
       stdout.write(`config: ${config.configured ? `${config.mode} (${config.purpose})` : `not ready${config.error ? ` · ${config.error}` : ""}`}\n`);
       stdout.write(`MCP runtime: ${mcpRuntime.required ? (mcpRuntime.ready ? "ready" : `not ready${mcpRuntime.detail ? ` · ${mcpRuntime.detail}` : ""}`) : "not required"}\n`);
-      stdout.write(`Bigger Context: ${features.biggerContext ? "enabled (experimental, 3 stages + commit)" : "disabled"}\n`);
+      stdout.write(`Bigger Context: ${features.biggerContext ? "enabled (experimental, adaptive 1/2/3 messages; compaction uses 3 stages)" : "disabled"}\n`);
       stdout.write("Codex route: isolated and unused\nResponses listener: not started\n");
     }
     return;

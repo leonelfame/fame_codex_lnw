@@ -354,7 +354,7 @@ export function createLauncherDevAdapter(
       lunaCheckpointStatePath: join(runtimeStateRoot, "luna-checkpoints.json"),
       turnTimeoutMs: 60 * 60_000,
       ...(options.experimentalBiggerContext
-        ? { experimentalMultipartParts: CHATGPT_BIGGER_CONTEXT_PARTS }
+        ? { experimentalBiggerContext: true }
         : {}),
     },
   }, { broker });

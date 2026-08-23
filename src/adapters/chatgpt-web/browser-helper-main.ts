@@ -112,7 +112,8 @@ async function run(message: RunMessage): Promise<void> {
   }
   if (message.turn.prepared.multipart !== undefined) {
     const multipart = message.turn.prepared.multipart;
-    if (!multipart || !Array.isArray(multipart.parts) || multipart.parts.length !== 3
+    if (!multipart || !Array.isArray(multipart.parts)
+      || (multipart.parts.length !== 2 && multipart.parts.length !== 3)
       || multipart.parts.some(part => typeof part !== "string") || typeof multipart.commit !== "string") {
       throw new Error("Browser helper multipart prompt is invalid");
     }

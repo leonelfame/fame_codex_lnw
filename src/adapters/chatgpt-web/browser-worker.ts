@@ -29,7 +29,6 @@ import {
   estimateCompiledChatGptWebMessageTokens,
 } from "./input-tokens";
 import {
-  CHATGPT_BIGGER_CONTEXT_PARTS,
   CHATGPT_MAX_INPUT_IMAGES,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
@@ -283,6 +282,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
   maxMessageChars: number,
+  partCount: 2 | 3,
 ): void {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
@@ -311,10 +311,11 @@ export function assertChatGptWebMultipartInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  const experimentalContextWindow = contextWindow * CHATGPT_BIGGER_CONTEXT_PARTS;
+  const experimentalContextWindow = contextWindow * partCount;
   if (estimatedInputTokens < experimentalContextWindow) return;
+  const partLabel = partCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
-    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token three-part ceiling. Run /compact, then retry.`,
+    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -2296,6 +2297,7 @@ export class ChatGptBrowserWorker {
           requestedMode.effort,
           turn.capabilities,
           maxMessageChars,
+          prepared.multipart.parts.length,
         );
       } else {
         assertChatGptWebInputWithinLimits(
@@ -2337,7 +2339,7 @@ export class ChatGptBrowserWorker {
       diagnosticPage = page;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
-        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.multipart ? "multipart-3" : "inline"}, maxMessageChars=${maxMessageChars}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length}, compactionTrimmedMessages=${prepared.trimmedCompactionMessages ?? 0})`,
+        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.multipart ? `multipart-${prepared.multipart.parts.length}` : "inline"}, maxMessageChars=${maxMessageChars}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length}, compactionTrimmedMessages=${prepared.trimmedCompactionMessages ?? 0})`,
       );
       await this.runStage(
         turn.traceId,
@@ -2367,6 +2369,7 @@ export class ChatGptBrowserWorker {
             prepared.multipart.parts[index]!,
             transactionId,
             index + 1,
+            prepared.multipart.parts.length,
           );
           const stageBaseline = await this.captureSubmissionBaseline(page);
           await this.runStage(

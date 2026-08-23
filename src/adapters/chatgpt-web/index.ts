@@ -8,11 +8,11 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { CHATGPT_BIGGER_CONTEXT_PARTS, chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateChatGptWebUsage } from "./usage";
+import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
@@ -207,9 +207,9 @@ export function createChatGptWebAdapter(
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
-  const experimentalMultipartParts = provider.chatgptWeb?.experimentalMultipartParts;
-  if (experimentalMultipartParts !== undefined && experimentalMultipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("ChatGPT Bigger Context requires exactly three stages");
+  const experimentalBiggerContext = provider.chatgptWeb?.experimentalBiggerContext;
+  if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
+    throw new Error("ChatGPT Bigger Context preference must be a boolean");
   }
   const configuredCapabilities: ChatGptWebCapabilities = {
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
@@ -247,9 +247,12 @@ export function createChatGptWebAdapter(
     const checkpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
+    const experimentalMultipartParts = experimentalBiggerContext
+      ? resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities)
+      : undefined;
     const compileOptions = {
       captureLunaCheckpoint,
-      ...(experimentalMultipartParts === CHATGPT_BIGGER_CONTEXT_PARTS
+      ...(experimentalMultipartParts !== undefined
         ? { experimentalMultipartParts }
         : {}),
     };
