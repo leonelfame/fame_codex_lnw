@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
+const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
@@ -14,6 +15,13 @@ test("embedded ChatGPT is measured only after its animated surface mounts", () =
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);
   assert.match(appSource, /observer\.observe\(browserSlot\)/);
   assert.match(appSource, /ref=\{browserSlotRef\}/);
+});
+
+test("native clicks reach browser tabs instead of the window drag region", () => {
+  assert.match(appSource, /draggable=\{surface !== "browser"\}/);
+  assert.match(appSource, /className=\{`app-titlebar\$\{draggable \? " draggable" : ""\}`\}/);
+  assert.match(stylesSource, /\.browser-tab\s*\{[^}]*-webkit-app-region:\s*no-drag;/s);
+  assert.match(appSource, /className="browser-tab-drag draggable"/);
 });
 
 test("renderer zoom scales the shell without moving or zooming the native ChatGPT surface", () => {

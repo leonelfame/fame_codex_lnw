@@ -1198,6 +1198,7 @@ test("the known ChatGPT rate-limit dialog is acknowledged and returns a structur
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
     retryable: true,
+    message: "ChatGPT rate limit: too many requests. Try again in a few minutes.",
   });
   expect(fixture.pressed).toEqual(["Enter"]);
 });

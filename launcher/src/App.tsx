@@ -450,6 +450,7 @@ function LauncherShell({
       <TitleBar
         copy={copy}
         devProfile={devProfile}
+        draggable={surface !== "browser"}
         sidebarOpen={sidebarOpen}
         toggleSidebar={toggleSidebar}
       />
@@ -625,16 +626,18 @@ function LauncherShell({
 function TitleBar({
   copy,
   devProfile,
+  draggable,
   sidebarOpen,
   toggleSidebar,
 }: {
   copy: Copy;
   devProfile: boolean;
+  draggable: boolean;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
 }) {
   return (
-    <header className="app-titlebar draggable">
+    <header className={`app-titlebar${draggable ? " draggable" : ""}`}>
       <div className="titlebar-left no-drag">
         <IconButton
           icon="sidebar"

@@ -1144,12 +1144,13 @@ test("closing a running browser tab reports terminal user cancellation to its he
     snapshot: () => ({ tabs: [] }),
     publishState() {},
     writeDescriptor() {},
+    cancelTurn: async (traceId) => closed.push(`cancel:${traceId}`),
     logger: { info() {} },
   });
 
-  BrowserHost.prototype.closeTab.call(fixture, tab.id);
+  await BrowserHost.prototype.closeTab.call(fixture, tab.id);
 
-  assert.deepEqual(closed, ["view", "contents"]);
+  assert.deepEqual(closed, ["cancel:trace_running", "view", "contents"]);
   assert.equal(fixture.closedTurnOwners.get("trace_running"), 333);
   assert.equal(fixture.userCancelledTurnOwners.get("trace_running"), 333);
   assert.equal(fixture.selectedTabId, "home");
@@ -1170,7 +1171,42 @@ test("closing a running browser tab reports terminal user cancellation to its he
     { cancelledByUser: true },
   );
   assert.equal(fixture.closedTurnOwners.has("trace_running"), false);
-  assert.equal(fixture.userCancelledTurnOwners.has("trace_running"), false);
+  assert.equal(fixture.userCancelledTurnOwners.get("trace_running"), 333);
+});
+
+test("a failed runtime cancellation keeps the running DOM attached", async () => {
+  const closed = [];
+  const tab = {
+    id: "tab-cancel-failed",
+    traceId: "trace_cancel_failed",
+    helperPid: 334,
+    status: "running",
+    view: {
+      webContents: { isDestroyed: () => false, close: () => closed.push("contents") },
+    },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    selectedTabId: tab.id,
+    window: { contentView: { removeChildView: () => closed.push("view") } },
+    syncViewVisibility() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    cancelTurn: async () => { throw new Error("runtime cancellation unavailable"); },
+    logger: { info() {} },
+  });
+
+  await assert.rejects(
+    BrowserHost.prototype.closeTab.call(fixture, tab.id),
+    /runtime cancellation unavailable/,
+  );
+
+  assert.equal(fixture.turnTabs.get(tab.id), tab);
+  assert.equal(tab.status, "running");
+  assert.deepEqual(closed, []);
 });
 
 test("a later provider round reuses its task tab and restores active ownership", () => {
@@ -1249,6 +1285,7 @@ test("ending one browser turn does not stop another running tab", async () => {
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[ended.id, ended], [active.id, active]]),
     closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
     selectedTabId: ended.id,
     window: { contentView: { removeChildView: (view) => {
       assert.equal(view, ended.view);
@@ -1298,6 +1335,7 @@ test("failed and aborted browser turns release their tab slots", async () => {
     const fixture = Object.assign(Object.create(BrowserHost.prototype), {
       turnTabs: new Map([[tab.id, tab]]),
       closedTurnOwners: new Map(),
+      userCancelledTurnOwners: new Map(),
       selectedTabId: tab.id,
       window: { contentView: { removeChildView() {} } },
       syncViewVisibility() {},

@@ -59,7 +59,7 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError } from "./adapter-error";
 import {
   ChatGptLunaCheckpointStream,
   type CapturedChatGptLunaCheckpoint,
@@ -131,13 +131,13 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
       await acknowledge.press("Enter");
     } catch (error) {
       throw new ChatGptWebAdapterError(
-        `ChatGPT rate-limit dialog is open, but its acknowledgement failed: ${error instanceof Error ? error.message : String(error)}`,
+        `ChatGPT rate limit: too many requests, and the dialog could not be dismissed (${error instanceof Error ? error.message : String(error)}). Try again in a few minutes.`,
         { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
       );
     }
   }
   throw new ChatGptWebAdapterError(
-    "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
+    "ChatGPT rate limit: too many requests. Try again in a few minutes.",
     { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
   );
 }
@@ -166,18 +166,6 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   throw new ChatGptWebAdapterError(
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
     { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
-  );
-}
-
-function chatGptBrowserTabClosedError(): ChatGptWebAdapterError {
-  return new ChatGptWebAdapterError(
-    "The ChatGPT browser tab was closed, so the Codex turn was cancelled.",
-    {
-      status: 499,
-      errorType: "client_closed_request",
-      code: "client_cancelled",
-      retryable: false,
-    },
   );
 }
 

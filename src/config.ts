@@ -8,6 +8,7 @@ import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
+export type SubagentProtocol = "compatibility-v1" | "native";
 
 /**
  * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
@@ -65,6 +66,7 @@ export interface AppConfig {
   purpose?: "dev-harness";
   releaseVersion: string;
   mode: RuntimeMode;
+  subagentProtocol: SubagentProtocol;
   host: "127.0.0.1";
   port: number;
   contextWindow: number;
@@ -165,6 +167,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     version: 3,
     releaseVersion: VERSION,
     mode,
+    subagentProtocol: "compatibility-v1",
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
@@ -328,6 +331,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
   }
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
   if (parsed.mode !== "browser-only" && parsed.mode !== "full") throw new Error(`Invalid runtime mode in ${path}`);
+  const subagentProtocol = parsed.subagentProtocol ?? "compatibility-v1";
+  if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
+    throw new Error(`Invalid subagentProtocol in ${path}`);
+  }
   if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
   if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {
     throw new Error(`Invalid browserHost in ${path}`);
@@ -401,7 +408,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (proAvailable && !solAvailable) {
     throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
   }
-  return { ...parsed, solAvailable, proAvailable } as AppConfig;
+  return { ...parsed, subagentProtocol, solAvailable, proAvailable } as AppConfig;
 }
 
 export function saveConfig(config: AppConfig): void {
