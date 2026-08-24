@@ -2555,7 +2555,14 @@ export class ChatGptBrowserWorker {
           }
           let textDelta: string;
           try {
-            textDelta = markdownBuffer.observe(snapshot.markdownSegments);
+            // A tool-capable ChatGPT turn can legitimately reparent or replace visible Markdown
+            // between MCP calls. Its reasoning/commentary and tool events remain live, but the
+            // final-answer channel is irreversible and therefore waits for terminal DOM evidence.
+            textDelta = markdownBuffer.observe(
+              snapshot.markdownSegments,
+              Date.now(),
+              !mode.localTools,
+            );
           } catch (error) {
             if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
             throw new ChatGptWebAdapterError(error.message, {
