@@ -139,9 +139,14 @@ function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterErr
   });
 }
 
-export class ChatGptPromptAttachmentIntegrityError extends Error {
+export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterError {
   constructor(message: string) {
-    super(message);
+    super(message, {
+      status: 502,
+      errorType: "server_error",
+      code: "prompt_attachment_integrity",
+      retryable: false,
+    });
     this.name = "ChatGptPromptAttachmentIntegrityError";
   }
 }
@@ -170,6 +175,25 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
     "ChatGPT rate limit: too many requests. Try again in a few minutes.",
     { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
   );
+}
+
+const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
+  .locator('[role="dialog"]')
+  .filter({ hasText: "Not in history" })
+  .filter({ hasText: "No model training" })
+  .filter({ hasText: "Memory off" })
+  .last();
+
+export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise<boolean> {
+  const dialog = chatGptTemporaryChatOnboardingDialog(page);
+  if (!await dialog.isVisible().catch(() => false)) return false;
+  const continueButton = dialog.getByRole("button", { name: "Continue", exact: true }).last();
+  if (!await continueButton.isVisible().catch(() => false)) {
+    throw new Error("ChatGPT Temporary Chat onboarding is visible without its Continue action");
+  }
+  await continueButton.click({ force: true });
+  await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+  return true;
 }
 
 type ChatGptTextScope = Pick<Locator, "getByText">;
@@ -410,51 +434,12 @@ const browserStageTimeouts = {
   send: 20_000,
 } as const;
 
-/**
- * A six-figure Input.insertText can make current ChatGPT Lexical surfaces rewrite text inside the
- * first edit even when its final UTF-16 length is unchanged. Bound only the native edit operation;
- * the resulting user message remains one exact prompt, and every prefix is still verified before
- * another irreversible edit. This is independent of model context and compaction limits.
- */
-export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 16_000;
-const CHATGPT_PROMPT_INSERT_BOUNDARY_LOOKBACK_CHARS = 4_096;
-const CHATGPT_PROMPT_WHITESPACE = /\s/u;
 export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
 
 function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
-}
-
-function promptInsertChunkEnd(text: string, offset: number): number {
-  const hardEnd = Math.min(offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS, text.length);
-  if (hardEnd >= text.length) return hardEnd;
-
-  const minimumPreferredEnd = Math.max(
-    offset + 1,
-    hardEnd - CHATGPT_PROMPT_INSERT_BOUNDARY_LOOKBACK_CHARS,
-  );
-  for (let candidate = hardEnd; candidate >= minimumPreferredEnd; candidate -= 1) {
-    if (!CHATGPT_PROMPT_WHITESPACE.test(text[candidate] ?? "")) continue;
-    let whitespaceStart = candidate;
-    while (
-      whitespaceStart > offset
-      && CHATGPT_PROMPT_WHITESPACE.test(text[whitespaceStart - 1] ?? "")
-    ) {
-      whitespaceStart -= 1;
-    }
-    if (whitespaceStart > offset) return whitespaceStart;
-  }
-
-  let end = hardEnd;
-  const previousCodeUnit = text.charCodeAt(hardEnd - 1);
-  const nextCodeUnit = text.charCodeAt(hardEnd);
-  if (previousCodeUnit >= 0xD800 && previousCodeUnit <= 0xDBFF
-    && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF) {
-    end -= 1;
-  }
-  return end;
 }
 
 export interface BrowserTurn {
@@ -1399,6 +1384,9 @@ export class ChatGptBrowserWorker {
     } catch {
       throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
     }
+    if (await dismissChatGptTemporaryChatOnboarding(page)) {
+      await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
+    }
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
@@ -1702,7 +1690,7 @@ export class ChatGptBrowserWorker {
       const composer = await this.activeComposer(page);
       // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
       // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-      // then transport the complete text in one CDP Input.insertText command.
+      // then transport the complete text through the browser's plain-text editing command.
       await composer.fill("");
       await composer.focus();
       await this.insertPromptText(page, prompt, abortSignal);
@@ -1873,115 +1861,34 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async reanchorPromptCaret(page: Page, abortSignal?: AbortSignal): Promise<void> {
+  private async insertPromptText(page: Page, text: string, abortSignal?: AbortSignal): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
     const composer = await this.activeComposer(page);
     await composer.focus();
-    const anchored = await composer.evaluate(async element => {
-      const ignoredSelector = '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]';
-      const editableRootNodes = [...element.childNodes].filter(node => (
-        node.nodeType === Node.TEXT_NODE
-          ? (node.textContent ?? "").length > 0
-          : node instanceof Element && !node.matches(ignoredSelector)
-      ));
-      const finalRootNode = editableRootNodes[editableRootNodes.length - 1];
-      if (!finalRootNode) return false;
-
-      const textNodes: Text[] = [];
-      const collectTextNodes = (node: Node): void => {
-        if (node instanceof Element && node.matches(ignoredSelector)) return;
-        if (node.nodeType === Node.TEXT_NODE) {
-          if ((node.textContent ?? "").length > 0) textNodes.push(node as Text);
-          return;
-        }
-        for (const child of node.childNodes) collectTextNodes(child);
-      };
-      collectTextNodes(finalRootNode);
-      const lastTextNode = textNodes[textNodes.length - 1];
-      const cursorTarget = finalRootNode instanceof Element
-        ? finalRootNode.querySelector("[data-inline-selection-pill-cursor-target]")
-        : null;
-
-      let targetNode: Node;
-      let targetOffset: number;
-      const cursorFollowsText = lastTextNode && cursorTarget
-        ? (lastTextNode.compareDocumentPosition(cursorTarget) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
-        : false;
-      if (cursorTarget?.parentNode && (!lastTextNode || cursorFollowsText)) {
-        targetNode = cursorTarget.parentNode;
-        targetOffset = [...targetNode.childNodes].indexOf(cursorTarget);
-      } else if (lastTextNode) {
-        targetNode = lastTextNode;
-        targetOffset = lastTextNode.data.length;
-      } else if (finalRootNode instanceof Element && !["AREA", "BR", "HR", "IMG", "INPUT"].includes(finalRootNode.tagName)) {
-        targetNode = finalRootNode;
-        targetOffset = finalRootNode.childNodes.length;
-      } else {
+    // CDP Input.insertText is interpreted as live typing by ChatGPT's Lexical plugins. On a large
+    // JSON transport it can turn literal Markdown backticks into rich code nodes, remove the
+    // delimiters from textContent, and leave the next insertion outside the intended block. The
+    // browser's plain-text editing command updates the same focused contenteditable atomically
+    // without running those Markdown shortcuts. Exact readback below remains the authority.
+    const inserted = await composer.evaluate((element, value) => {
+      const selection = window.getSelection();
+      if (
+        document.activeElement !== element
+        || !selection
+        || !selection.isCollapsed
+        || !selection.anchorNode
+        || !element.contains(selection.anchorNode)
+      ) {
         return false;
       }
-
-      const selection = window.getSelection();
-      if (!selection) return false;
-      const selectionIsExact = (): boolean => selection.isCollapsed
-        && selection.anchorNode === targetNode
-        && selection.anchorOffset === targetOffset
-        && selection.focusNode === targetNode
-        && selection.focusOffset === targetOffset;
-      if (!selectionIsExact()) {
-        const range = document.createRange();
-        range.setStart(targetNode, targetOffset);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-      // BrowserHost disables background throttling for active turn pages. One frame lets Lexical
-      // apply any selection observer before we accept the exact node-and-offset postcondition.
-      await new Promise<void>(resolveFrame => requestAnimationFrame(() => resolveFrame()));
-      return selectionIsExact();
-    }, undefined, { timeout: 20_000 });
+      return document.execCommand("insertText", false, value);
+    }, text, { timeout: 20_000 });
     throwIfPromptAttachmentAborted(abortSignal);
-    if (!anchored) {
-      throw new Error("ChatGPT composer could not re-anchor the prompt caret at the document end");
+    if (!inserted) {
+      throw new ChatGptPromptAttachmentIntegrityError(
+        "ChatGPT composer rejected the plain-text editing command",
+      );
     }
-  }
-
-  private async insertPromptText(page: Page, text: string, abortSignal?: AbortSignal): Promise<void> {
-    for (let offset = 0; offset < text.length;) {
-      throwIfPromptAttachmentAborted(abortSignal);
-      const end = promptInsertChunkEnd(text, offset);
-      await page.keyboard.insertText(text.slice(offset, end));
-      throwIfPromptAttachmentAborted(abortSignal);
-      if (end < text.length) {
-        // Lexical can rebuild the active block after an exact commit and move its native selection.
-        // Re-anchor only after the verified prefix is stable, before the next irreversible edit.
-        const expectedPrefix = text.slice(0, end).trimStart();
-        await this.waitForPromptChunkAttached(page, expectedPrefix, abortSignal);
-        await this.reanchorPromptCaret(page, abortSignal);
-      }
-      offset = end;
-    }
-  }
-
-  private async waitForPromptChunkAttached(
-    page: Page,
-    expected: string,
-    abortSignal?: AbortSignal,
-  ): Promise<void> {
-    const deadline = Date.now() + 20_000;
-    let observed = "";
-    do {
-      throwIfPromptAttachmentAborted(abortSignal);
-      observed = await this.attachedPromptText(page);
-      throwIfPromptAttachmentAborted(abortSignal);
-      if (this.promptTextEquivalent(expected, observed)) return;
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
-    } while (Date.now() < deadline);
-    throwIfPromptAttachmentAborted(abortSignal);
-    const commonPrefix = this.promptEquivalentPrefixLength(expected, observed);
-    throw new ChatGptPromptAttachmentIntegrityError(
-      `ChatGPT composer did not commit a complete prompt insertion chunk`
-      + ` (expectedChars=${expected.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
-    );
   }
 
   private async verifyConnectorExclusive(): Promise<string> {
