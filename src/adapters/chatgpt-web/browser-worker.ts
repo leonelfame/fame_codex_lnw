@@ -311,7 +311,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   }
   const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
   const assertMessageBoundary = (
-    label: "stage" | "final commit",
+    label: "stage" | "final part",
     messageTokens: number,
     messageChars: number,
     messageEffort: ChatGptWebModelMode["effort"],
@@ -342,7 +342,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
       transport.stagingEffort,
     );
     assertMessageBoundary(
-      "final commit",
+      "final part",
       transport.finalMessageTokens,
       transport.finalMessageChars,
       effort,
@@ -2431,7 +2431,7 @@ export class ChatGptBrowserWorker {
         ? `ctx_${randomUUID().replaceAll("-", "")}`
         : undefined;
       const multipartStages = prepared.multipart && multipartTransactionId
-        ? prepared.multipart.parts.map((payload, index) => formatChatGptWebMultipartStage(
+        ? prepared.multipart.parts.slice(0, -1).map((payload, index) => formatChatGptWebMultipartStage(
           payload,
           multipartTransactionId,
           index + 1,
@@ -2543,79 +2543,66 @@ export class ChatGptBrowserWorker {
 
       let finalPrompt = prepared.text;
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
-        let multipartFailed = false;
-        let multipartError: unknown;
-        try {
-          for (let index = 0; index < multipartStages.length; index += 1) {
-            const stage = multipartStages[index]!;
-            const stageBaseline = await this.captureSubmissionBaseline(page);
-            await this.runStage(
-              turn.traceId,
-              `multipart_stage_${index + 1}_attachment`,
-              browserStageTimeouts.promptAttachment,
-              (stageSignal) => this.attachPrompt(
-                page,
-                stage.text,
-                false,
-                checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
-                turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-              ),
-            );
-            await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
-            const evidence = await this.runStage(
-              turn.traceId,
-              `multipart_stage_${index + 1}_send`,
-              browserStageTimeouts.send,
-              (stageSignal) => this.sendAttachedPrompt(
-                page,
-                stageBaseline,
-                checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
-                turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-              ),
-            );
-            const responseTurn = await this.waitForNewAssistantTurn(
+        for (let index = 0; index < multipartStages.length; index += 1) {
+          const stage = multipartStages[index]!;
+          const stageBaseline = await this.captureSubmissionBaseline(page);
+          await this.runStage(
+            turn.traceId,
+            `multipart_stage_${index + 1}_attachment`,
+            browserStageTimeouts.promptAttachment,
+            (stageSignal) => this.attachPrompt(
+              page,
+              stage.text,
+              false,
+              checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+            ),
+          );
+          await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
+          const evidence = await this.runStage(
+            turn.traceId,
+            `multipart_stage_${index + 1}_send`,
+            browserStageTimeouts.send,
+            (stageSignal) => this.sendAttachedPrompt(
               page,
               stageBaseline,
-              deadline,
-              turn.abortSignal,
-            );
-            console.info(
-              `[chatgpt-web] browser turn ${turn.traceId} multipart stage ${index + 1}/${multipartStages.length} submission accepted evidence=${evidence}`,
-            );
-            await this.waitForMultipartAcknowledgement(
-              page,
-              responseTurn,
-              stage,
-              deadline,
-              turn.abortSignal,
-            );
-            await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
-          }
-        } catch (error) {
-          multipartFailed = true;
-          multipartError = error;
+              checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+            ),
+          );
+          const responseTurn = await this.waitForNewAssistantTurn(
+            page,
+            stageBaseline,
+            deadline,
+            turn.abortSignal,
+          );
+          console.info(
+            `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
+          );
+          await this.waitForMultipartAcknowledgement(
+            page,
+            responseTurn,
+            stage,
+            deadline,
+            turn.abortSignal,
+          );
+          await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
         }
         if (mode.effort !== requestedMode.effort) {
-          try {
-            mode = await this.runStage(
-              turn.traceId,
-              "requested_effort_restoration",
-              browserStageTimeouts.effortSelection,
-              () => this.selectModelAndEffort(
-                page,
-                turn.modelId,
-                requestedMode.effort,
-                turn.capabilities,
-                checkpoint => diagnostics.capture(page, `requested-${checkpoint}`),
-              ),
-            );
-            await diagnostics.capture(page, "requested-effort-restored");
-          } catch (restoreError) {
-            if (!multipartFailed) throw restoreError;
-            await diagnostics.capture(page, "requested-effort-restore-failed", restoreError);
-          }
+          mode = await this.runStage(
+            turn.traceId,
+            "final_part_effort_selection",
+            browserStageTimeouts.effortSelection,
+            () => this.selectModelAndEffort(
+              page,
+              turn.modelId,
+              requestedMode.effort,
+              turn.capabilities,
+              checkpoint => diagnostics.capture(page, `final-part-${checkpoint}`),
+            ),
+          );
+          await diagnostics.capture(page, "final-part-effort-selected");
         }
-        if (multipartFailed) throw multipartError;
         finalPrompt = multipartFinalPrompt;
       }
 

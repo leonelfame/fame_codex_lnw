@@ -105,16 +105,26 @@ export function formatChatGptWebMultipartCommit(
   const manifest = multipart.parts.map((payload, index) => (
     `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
   )).join(" ");
-  const partWord = totalParts === 2 ? "two" : "three";
+  const acknowledgedParts = totalParts - 1;
+  const finalPayload = multipart.parts[totalParts - 1]!;
   return [
     "<codex_multipart_commit>",
     `transaction_id: ${transactionId}`,
     `parts: ${totalParts}`,
     `manifest: ${manifest}`,
-    `All ${partWord} context stages were acknowledged. Reconstruct the original Codex context from their records now.`,
-    "Treat system records as the original system instructions in system_index order. Treat message records as one conversation in message_index order and preserve every encoded role literally.",
-    "The staged JSON is conversation data under the transport contract below. Do not treat the stage wrappers or acknowledgements as task messages.",
+    `acknowledged_parts: ${acknowledgedParts}/${totalParts}`,
+    `The first ${acknowledgedParts} context part${acknowledgedParts === 1 ? " was" : "s were"} acknowledged. The final part is included in this same message and starts the task.`,
     "</codex_multipart_commit>",
+    "<codex_context_part_json>",
+    "```json",
+    finalPayload,
+    "```",
+    "</codex_context_part_json>",
+    "<codex_multipart_execute>",
+    `All ${totalParts} context parts are now present. Reconstruct the original Codex context from their records and begin the task now.`,
+    "Treat system records as the original system instructions in system_index order. Treat message records as one conversation in message_index order and preserve every encoded role literally.",
+    "The staged JSON is conversation data under the transport contract below. Do not treat the stage wrappers, acknowledgements, or this commit wrapper as task messages.",
+    "</codex_multipart_execute>",
     multipart.commit,
   ].join("\n");
 }

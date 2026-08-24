@@ -82,13 +82,14 @@ The DEV CLI reads the same setting from its isolated runtime configuration on ea
 
 When enabled, a normal turn stays on the original single-message path while its estimated input
 is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
-staged JSON messages plus a final commit; at twice that threshold it uses three stages plus a final
-commit. The existing DEV compaction threshold remains three times the selected mode's base limit.
+messages; at twice that threshold it uses three messages. The final context part also commits the
+transaction and starts the task, so there is no extra request. The existing DEV compaction threshold
+remains three times the selected mode's base limit.
 
 Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
-must return an exact transaction-bound SHA-256 acknowledgement before the next stage is sent.
-Images, the MCP connector, and the private `turn_token` are attached only to the final commit.
-Compaction always uses the three-stage path, even when its resulting summary will fit into a later
+must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
+Images, the MCP connector, and the private `turn_token` are attached only to the final part.
+Compaction always uses the three-message path, even when its resulting summary will fit into a later
 single-message turn, so the complete expanded history remains available to the summarizer.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final

@@ -24,7 +24,7 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(runBrowserTurn).toContain("waitForMultipartAcknowledgement(");
   expect(runBrowserTurn).toContain("formatChatGptWebMultipartCommit(");
   expect(runBrowserTurn).toContain("resolveChatGptWebMultipartStagingMode(");
-  expect(runBrowserTurn).toContain('"requested_effort_restoration"');
+  expect(runBrowserTurn).toContain('"final_part_effort_selection"');
   expect(runBrowserTurn).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
 });
@@ -1707,8 +1707,8 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("markdownBuffer.observe(snapshot.markdownSegments)");
   expect(workerSource).not.toContain("streamCompletedBlocks");
   expect(workerSource).toContain('code: "multipart_protocol_violation"');
-  expect(workerSource).toContain("if (multipartFailed) throw multipartError");
-  expect(workerSource).toContain('"requested_effort_restoration"');
+  expect(workerSource).not.toContain("multipartFailed");
+  expect(workerSource).toContain('"final_part_effort_selection"');
   expect(workerSource).not.toContain("stableHtml:");
   expect(workerSource).not.toContain("observeStableHtml");
   expect(workerSource).toContain("const overlapsRenderedAnswer = (candidate: HTMLElement)");
