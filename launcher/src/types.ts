@@ -142,8 +142,9 @@ export interface LauncherApi {
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
+  setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "experimentalBiggerContext",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

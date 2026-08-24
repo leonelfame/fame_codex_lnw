@@ -116,7 +116,8 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
   const normalState = normal.open("normal-window", "chatgpt-web/high").state;
   expect(normal.status(normalState).autoCompactTokenLimit).toBe(95_000);
 
-  const bigger = new DevChatDriver(config, store, factory, root, { biggerContext: true });
+  const biggerConfig = { ...config, experimentalBiggerContext: true };
+  const bigger = new DevChatDriver(biggerConfig, store, factory, root, { biggerContext: true });
   const biggerState = bigger.open("bigger-window", "chatgpt-web/high").state;
   const biggerStatus = bigger.status(biggerState);
   expect(biggerStatus).toMatchObject({
@@ -125,7 +126,7 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
   });
   expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 285_000) * 1_000) / 10);
   const luna = new DevChatDriver({
-    ...config,
+    ...biggerConfig,
     solAvailable: false,
     proAvailable: false,
   }, store, factory, root, { biggerContext: true });

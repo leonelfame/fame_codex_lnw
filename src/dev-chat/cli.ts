@@ -54,7 +54,7 @@ Interactive commands:
   /exit                Exit
 
 Experimental settings:
-  Bigger Context       Enable in DEV Settings; adapts context across 1, 2, or 3 messages
+  Bigger Context       Enable in Settings; adapts context across 1, 2, or 3 messages
 `;
 
 function takeFlag(args: string[], name: string): boolean {
@@ -337,12 +337,18 @@ export async function runDevCommand(args: string[]): Promise<void> {
     const descriptorPath = takeOption(args, "--browser-host-descriptor") ?? paths.descriptorPath;
     const acknowledgedUnofficial = takeFlag(args, "--acknowledge-unofficial");
     const refreshAccountCapabilities = takeFlag(args, "--refresh-account-capabilities");
+    const biggerContext = takeFlag(args, "--bigger-context");
+    const standardContext = takeFlag(args, "--standard-context");
+    if (biggerContext && standardContext) {
+      throw new Error("Choose at most one context mode: --bigger-context or --standard-context");
+    }
     if (args.length > 0) throw new Error(`Unknown DEV setup arguments: ${args.join(" ")}`);
     const result = await setupDevProfile({
       mode: full ? "full" : "browser-only",
       browserHostDescriptorPath: descriptorPath,
       refreshAccountCapabilities,
       acknowledgedUnofficial,
+      ...(biggerContext || standardContext ? { experimentalBiggerContext: biggerContext } : {}),
       ...(tunnelId ? { tunnelId } : {}),
       ...(runtimeKeyFile ? { runtimeKeyFile } : {}),
       ...(appName ? { appName } : {}),
@@ -386,7 +392,6 @@ export async function runDevCommand(args: string[]): Promise<void> {
       runtimeStateRoot,
       {
         ...(transport ? { broker: transport.broker } : {}),
-        experimentalBiggerContext: features.biggerContext,
       },
     );
     driver = new DevChatDriver(runtimeConfig, store, runtime.adapterFactory, process.cwd(), features);

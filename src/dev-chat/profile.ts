@@ -70,25 +70,25 @@ export interface DevChatExperimentalFeatures {
   biggerContext: boolean;
 }
 
-/** Read only the explicit DEV launcher preference consumed by repository chat commands. */
+/** Read the canonical DEV runtime setting consumed by repository chat commands. */
 export function readDevChatExperimentalFeatures(
   paths = resolveDevProfilePaths(),
 ): DevChatExperimentalFeatures {
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(paths.launcherStatePath, "utf8"));
+    value = JSON.parse(readFileSync(paths.configPath, "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { biggerContext: false };
     throw new Error(
-      `Could not read DEV launcher settings from ${paths.launcherStatePath}: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not read DEV runtime settings from ${paths.configPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (!value || typeof value !== "object" || Array.isArray(value) || (value as { version?: unknown }).version !== 1) {
-    throw new Error(`Invalid DEV launcher settings in ${paths.launcherStatePath}`);
+  if (!value || typeof value !== "object" || Array.isArray(value) || (value as { version?: unknown }).version !== 3) {
+    throw new Error(`Invalid DEV runtime settings in ${paths.configPath}`);
   }
   const enabled = (value as { experimentalBiggerContext?: unknown }).experimentalBiggerContext;
   if (enabled !== undefined && typeof enabled !== "boolean") {
-    throw new Error(`Invalid Bigger Context preference in ${paths.launcherStatePath}`);
+    throw new Error(`Invalid Bigger Context preference in ${paths.configPath}`);
   }
   return { biggerContext: enabled === true };
 }

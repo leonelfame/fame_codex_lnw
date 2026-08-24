@@ -17,7 +17,6 @@ import type { AppConfig } from "../config";
 import { parseRequest } from "../responses/parser";
 import { compactRequest, responseRequest, routeChatGptWebRequest } from "../server";
 import { namespacedToolName, type AdapterEvent, type CodexProviderConfig } from "../types";
-import { CHATGPT_BIGGER_CONTEXT_PARTS } from "../adapters/chatgpt-web/prompt";
 import {
   createDevContextFiller,
   type DevChatModel,
@@ -339,7 +338,6 @@ export function createLauncherDevAdapter(
   options: {
     broker?: TurnBrokerOwner;
     browserHelperScriptPath?: string;
-    experimentalBiggerContext?: boolean;
   } = {},
 ): { broker: TurnBrokerOwner; adapterFactory: AdapterFactory } {
   const broker = options.broker ?? new RemoteTurnBroker(config.brokerSocketPath);
@@ -353,7 +351,7 @@ export function createLauncherDevAdapter(
       threadEnvironmentStatePath: join(runtimeStateRoot, "thread-environments.json"),
       lunaCheckpointStatePath: join(runtimeStateRoot, "luna-checkpoints.json"),
       turnTimeoutMs: 60 * 60_000,
-      ...(options.experimentalBiggerContext
+      ...(config.experimentalBiggerContext
         ? { experimentalBiggerContext: true }
         : {}),
     },
@@ -548,9 +546,8 @@ export class DevChatDriver {
       proAvailable: this.config.proAvailable,
     });
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, this.config);
-    const contextMultiplier = this.features.biggerContext ? CHATGPT_BIGGER_CONTEXT_PARTS : 1;
-    const autoCompactTokenLimit = limits.autoCompactTokenLimit * contextMultiplier;
-    const contextWindow = limits.contextWindow * contextMultiplier;
+    const autoCompactTokenLimit = limits.autoCompactTokenLimit;
+    const contextWindow = limits.contextWindow;
     return {
       model: state.model,
       inputTokens,

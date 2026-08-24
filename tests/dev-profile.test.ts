@@ -31,7 +31,7 @@ test("DEV profile paths isolate browser, Codex, config, chat, and runtime state"
   });
 });
 
-test("Bigger Context is disabled by default and read only from the isolated DEV launcher", () => {
+test("Bigger Context is disabled by default and read from the isolated DEV runtime config", () => {
   const root = mkdtempSync(join(tmpdir(), "codex-web-gpt-dev-features-"));
   try {
     const paths = resolveDevProfilePaths({
@@ -39,14 +39,14 @@ test("Bigger Context is disabled by default and read only from the isolated DEV 
       environment: { CODEX_WEB_GPT_DEV_HOME: join(root, "dev") },
     });
     expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
-    mkdirSync(paths.launcherUserData, { recursive: true });
-    writeFileSync(paths.launcherStatePath, JSON.stringify({
-      version: 1,
+    mkdirSync(paths.home, { recursive: true });
+    writeFileSync(paths.configPath, JSON.stringify({
+      version: 3,
       experimentalBiggerContext: true,
     }));
     expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: true });
-    writeFileSync(paths.launcherStatePath, JSON.stringify({
-      version: 1,
+    writeFileSync(paths.configPath, JSON.stringify({
+      version: 3,
       experimentalBiggerContext: "yes",
     }));
     expect(() => readDevChatExperimentalFeatures(paths)).toThrow("Invalid Bigger Context preference");

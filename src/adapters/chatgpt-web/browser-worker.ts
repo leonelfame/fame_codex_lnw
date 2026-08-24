@@ -15,7 +15,11 @@ import {
 } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
-import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "./markdown";
+import {
+  ChatGptMarkdownBuffer,
+  ChatGptMarkdownConsistencyError,
+  type ChatGptMarkdownSegment,
+} from "./markdown";
 import {
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
@@ -2549,7 +2553,18 @@ export class ChatGptBrowserWorker {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
           }
-          const textDelta = markdownBuffer.observe(snapshot.markdownSegments);
+          let textDelta: string;
+          try {
+            textDelta = markdownBuffer.observe(snapshot.markdownSegments);
+          } catch (error) {
+            if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
+            throw new ChatGptWebAdapterError(error.message, {
+              status: 502,
+              errorType: "server_error",
+              code: "browser_stream_inconsistent",
+              retryable: false,
+            });
+          }
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
@@ -2562,7 +2577,7 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
           });
           if (domError) throw new Error(domError);
-          if (completionTracker.update({
+          if (markdownBuffer.currentSnapshotIsConsistent() && completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,

@@ -74,11 +74,13 @@ the measured transport limit.
 
 ## Bigger Context experiment
 
-The DEV launcher's Settings surface contains **Bigger Context (experimental)**. It is disabled by
-default and is never read by the production launcher or normal Codex route. Start a new DEV chat
-command after changing the switch so the CLI reads the updated isolated launcher preference.
+Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is disabled by
+default. The switch updates the profile's canonical runtime configuration through the normal setup
+transaction; it is not a launcher-only preference. Production setup also rewrites the managed
+Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
+The DEV CLI reads the same setting from its isolated runtime configuration on each command.
 
-When enabled, a normal DEV turn stays on the original single-message path while its estimated input
+When enabled, a normal turn stays on the original single-message path while its estimated input
 is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
 staged JSON messages plus a final commit; at twice that threshold it uses three stages plus a final
 commit. The existing DEV compaction threshold remains three times the selected mode's base limit.
@@ -90,7 +92,7 @@ Compaction always uses the three-stage path, even when its resulting summary wil
 single-message turn, so the complete expanded history remains available to the summarizer.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final
-commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The DEV context
+commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
 and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
 stage must still fit the selected ChatGPT mode's measured one-message boundary.
 
