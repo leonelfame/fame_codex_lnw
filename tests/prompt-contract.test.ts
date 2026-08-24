@@ -130,6 +130,12 @@ test("Bigger Context stages three valid semantic record envelopes and exposes th
     expect(stage.acknowledgement).toBe(
       `CODEX_MULTIPART_ACK ${transactionId} ${index + 1}/3 ${stage.sha256}`,
     );
+    expect(stage.text).toContain("```json\n");
+    expect(stage.text).toContain("<codex_multipart_stage_end>");
+    expect(stage.text).toEndWith("</codex_multipart_stage_end>");
+    expect(stage.text.lastIndexOf(stage.acknowledgement)).toBeGreaterThan(
+      stage.text.indexOf("</codex_context_part_json>"),
+    );
   }
   const commit = formatChatGptWebMultipartCommit(compiled.multipart!, transactionId);
   expect(commit).toContain(`transaction_id: ${transactionId}`);
