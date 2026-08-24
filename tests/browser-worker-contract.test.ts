@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptNewTurnIdentity, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptNewTurnIdentity, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -22,6 +23,8 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(runBrowserTurn).toContain("formatChatGptWebMultipartStage(");
   expect(runBrowserTurn).toContain("waitForMultipartAcknowledgement(");
   expect(runBrowserTurn).toContain("formatChatGptWebMultipartCommit(");
+  expect(runBrowserTurn).toContain("resolveChatGptWebMultipartStagingMode(");
+  expect(runBrowserTurn).toContain('"final_effort_selection"');
   expect(runBrowserTurn).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
 });
@@ -1538,6 +1541,38 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
   )).toThrow("unavailable for Luna");
 });
 
+test("Bigger Context stages use the lowest account mode that can carry the stage", () => {
+  const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
+  const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 200_000).effort).toBe("low");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 300_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 500_000).effort).toBe("low");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 600_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 104_000, 1_200_000).effort).toBe("max");
+  expect(() => resolveChatGptWebMultipartStagingMode(
+    "gpt-5.6-luna",
+    { localToolsEnabled: false, solAvailable: false, proAvailable: false },
+    10_000,
+    20_000,
+  )).toThrow("Luna-only");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    100_000,
+    30_000,
+    "gpt-5.6-sol",
+    "low",
+    plus,
+    300_000,
+    3,
+    {
+      stagingEffort: "medium",
+      maxStageMessageTokens: 30_000,
+      maxStageChars: 300_000,
+      finalMessageTokens: 1_000,
+      finalMessageChars: 4_000,
+    },
+  )).not.toThrow();
+});
+
 test("browser diagnostics redact context envelopes and capability values", () => {
   const diagnostic = redactChatGptUiDiagnostic(
     "<codex_context_json>private context</codex_context_json> turn_12345678901234567890 binding_12345678901234567890",
@@ -1664,11 +1699,12 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain("!commentaryRoots.includes(candidate)");
   expect(workerSource).toContain('fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join("")');
-  expect(workerSource).toContain("const markdownSegments = renderedRoots.flatMap");
-  expect(workerSource).toContain('key: `${rootIndex}:${childIndex}:${tag}:${itemIndex}`');
-  expect(workerSource).toContain("streamable: childIsComplete || itemIndex < listItems.length - 1");
-  expect(workerSource).toContain("!mode.localTools");
-  expect(workerSource).toContain("final-answer channel is irreversible");
+  expect(workerSource).toContain("const flattenedMarkdownSegments:");
+  expect(workerSource).toContain("boundaries therefore are not identity");
+  expect(workerSource).toContain('key: `${index}:${segment.tag}`');
+  expect(workerSource).toContain("streamable: index < segments.length - 1");
+  expect(workerSource).toContain("markdownBuffer.observe(snapshot.markdownSegments)");
+  expect(workerSource).not.toContain("streamCompletedBlocks");
   expect(workerSource).not.toContain("stableHtml:");
   expect(workerSource).not.toContain("observeStableHtml");
   expect(workerSource).toContain("const overlapsRenderedAnswer = (candidate: HTMLElement)");
@@ -1683,6 +1719,22 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("!overlapsRenderedAnswer(semantic)");
   expect(workerSource).toContain("!overlapsRenderedAnswer(container)");
   expect(workerSource).not.toContain('fullHtml: rendered?.innerHTML ?? ""');
+});
+
+test("persistent Stopped thinking is a terminal cancelled turn", () => {
+  expect(CHATGPT_STOPPED_THINKING_GRACE_MS).toBe(5_000);
+  const tracker = new ChatGptStoppedThinkingTracker();
+  expect(tracker.update(true, 1_000)).toBeFalse();
+  expect(tracker.update(true, 5_999)).toBeFalse();
+  expect(tracker.update(false, 6_000)).toBeFalse();
+  expect(tracker.update(true, 10_000)).toBeFalse();
+  expect(tracker.update(true, 15_000)).toBeTrue();
+  expect(chatGptStoppedThinkingError()).toMatchObject({
+    status: 499,
+    errorType: "client_closed_request",
+    code: "client_cancelled",
+    retryable: false,
+  });
 });
 
 test("visible DOM trace keeps a complete action phrase instead of a nested count", () => {

@@ -13,6 +13,7 @@ import {
   legacyChatGptConnectorMigrationMessage,
   LEGACY_CHATGPT_CONNECTOR_NAMES,
 } from "../../config";
+import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import {
@@ -71,7 +72,11 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
-import { ChatGptWebAdapterError, chatGptBrowserTabClosedError } from "./adapter-error";
+import {
+  ChatGptWebAdapterError,
+  chatGptBrowserTabClosedError,
+  chatGptStoppedThinkingError,
+} from "./adapter-error";
 import {
   ChatGptLunaCheckpointStream,
   type CapturedChatGptLunaCheckpoint,
@@ -287,6 +292,13 @@ export function assertChatGptWebMultipartInputWithinLimits(
   capabilities: ChatGptWebCapabilities,
   maxMessageChars: number,
   partCount: 2 | 3,
+  transport?: {
+    stagingEffort: ChatGptWebModelMode["effort"];
+    maxStageMessageTokens: number;
+    maxStageChars: number;
+    finalMessageTokens: number;
+    finalMessageChars: number;
+  },
 ): void {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
@@ -298,28 +310,85 @@ export function assertChatGptWebMultipartInputWithinLimits(
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
   const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
-  const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
-    modelId,
-    effort,
-    capabilities,
-  );
-  if (browserComposerCharLimit !== undefined && maxMessageChars > browserComposerCharLimit) {
-    throw new ChatGptWebAdapterError(
-      `A Bigger Context stage contains ${maxMessageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+  const assertMessageBoundary = (
+    label: "stage" | "final commit",
+    messageTokens: number,
+    messageChars: number,
+    messageEffort: ChatGptWebModelMode["effort"],
+  ): void => {
+    const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
+      modelId,
+      messageEffort,
+      capabilities,
     );
-  }
-  if (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit) {
-    throw new ChatGptWebAdapterError(
-      `A Bigger Context stage requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    if (browserComposerCharLimit !== undefined && messageChars > browserComposerCharLimit) {
+      throw new ChatGptWebAdapterError(
+        `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      );
+    }
+    if (browserMessageTokenLimit !== undefined && messageTokens > browserMessageTokenLimit) {
+      throw new ChatGptWebAdapterError(
+        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      );
+    }
+  };
+  if (transport) {
+    assertMessageBoundary(
+      "stage",
+      transport.maxStageMessageTokens,
+      transport.maxStageChars,
+      transport.stagingEffort,
     );
+    assertMessageBoundary(
+      "final commit",
+      transport.finalMessageTokens,
+      transport.finalMessageChars,
+      effort,
+    );
+  } else {
+    assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
   const experimentalContextWindow = contextWindow * partCount;
   if (estimatedInputTokens < experimentalContextWindow) return;
   const partLabel = partCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
     `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+  );
+}
+
+/** Select the cheapest account-visible mode that can carry every inert multipart stage. */
+export function resolveChatGptWebMultipartStagingMode(
+  modelId: string,
+  capabilities: ChatGptWebCapabilities,
+  maxStageMessageTokens: number,
+  maxStageChars: number,
+): ChatGptWebModelMode {
+  if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
+    throw new ChatGptWebAdapterError(
+      "Bigger Context staging is unavailable for a Luna-only account.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  if (modelId !== CHATGPT_WEB_MODEL_ID) {
+    throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
+  }
+  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
+    ? ["low", "medium", "max"]
+    : ["low", "medium"];
+  for (const effort of efforts) {
+    const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
+    const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
+    const tokenFits = limits.browserMessageTokenLimit === undefined
+      || maxStageMessageTokens <= limits.browserMessageTokenLimit;
+    const charsFit = limits.browserComposerCharLimit === undefined
+      || maxStageChars <= limits.browserComposerCharLimit;
+    if (tokenFits && charsFit) return mode;
+  }
+  throw new ChatGptWebAdapterError(
+    `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -540,6 +609,27 @@ export class ChatGptTurnDomHealthTracker {
   }
 }
 
+export const CHATGPT_STOPPED_THINKING_GRACE_MS = 5_000;
+
+export class ChatGptStoppedThinkingTracker {
+  private visibleSince?: number;
+
+  constructor(private readonly graceMs = CHATGPT_STOPPED_THINKING_GRACE_MS) {
+    if (!Number.isFinite(graceMs) || graceMs < 0) {
+      throw new Error("ChatGPT Stopped thinking grace must be a non-negative finite number");
+    }
+  }
+
+  update(visible: boolean, now = Date.now()): boolean {
+    if (!visible) {
+      this.visibleSince = undefined;
+      return false;
+    }
+    this.visibleSince ??= now;
+    return now - this.visibleSince >= this.graceMs;
+  }
+}
+
 export interface ChatGptVisibleTraceBlock {
   kind: "answer" | "commentary" | "status";
   text: string;
@@ -560,6 +650,7 @@ interface ChatGptResponseDomSnapshot {
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
   completionActionVisible: boolean;
+  stoppedThinkingVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
 
@@ -569,6 +660,7 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   fullHtml: "",
   markdownSegments: [],
   completionActionVisible: false,
+  stoppedThinkingVisible: false,
   traceBlocks: [],
 });
 
@@ -1651,6 +1743,7 @@ export class ChatGptBrowserWorker {
   ): Promise<void> {
     const completionTracker = new ChatGptCompletionTracker();
     const domHealthTracker = new ChatGptTurnDomHealthTracker();
+    const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       if (abortSignal?.aborted) {
@@ -1664,6 +1757,9 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn);
       const snapshot = await this.responseDomSnapshot(responseTurn);
+      if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
+        throw chatGptStoppedThinkingError();
+      }
       const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
@@ -1991,55 +2087,69 @@ export class ChatGptBrowserWorker {
       const renderedRoots = allMarkdownRoots.filter(candidate => (
         !commentaryRoots.includes(candidate)
       ));
-      const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) => {
-        const rootIsComplete = rootIndex < renderedRoots.length - 1;
+      // ChatGPT may merge adjacent `.markdown` roots when a streamed answer is finalized. Root
+      // boundaries therefore are not identity: flatten semantic blocks first, then assign keys by
+      // their global answer order so the same answer remains append-only across that reparenting.
+      const flattenedMarkdownSegments: Array<{
+        tag: string;
+        html: string;
+        text: string;
+        group?: string;
+      }> = [];
+      let listGroupIndex = 0;
+      renderedRoots.forEach((markdownRoot) => {
         const hasDirectText = [...markdownRoot.childNodes].some(node => (
           node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
         ));
         const children = [...markdownRoot.children] as HTMLElement[];
         if (hasDirectText || children.length === 0) {
-          return markdownRoot.innerHTML.trim() ? [{
-            key: `${rootIndex}:root`,
+          if (markdownRoot.innerHTML.trim()) flattenedMarkdownSegments.push({
+            tag: "root",
             html: markdownRoot.innerHTML,
             text: markdownRoot.innerText.trim(),
-            streamable: rootIsComplete,
-          }] : [];
+          });
+          return;
         }
 
-        return children.flatMap((child, childIndex) => {
+        children.forEach((child) => {
           const tag = child.tagName.toLowerCase();
-          const childIsComplete = rootIsComplete || childIndex < children.length - 1;
           const listItems = tag === "ol" || tag === "ul"
             ? [...child.children].filter(candidate => candidate.tagName === "LI") as HTMLElement[]
             : [];
           if (listItems.length === 0) {
-            return [{
-              key: `${rootIndex}:${childIndex}:${tag}`,
+            flattenedMarkdownSegments.push({
+              tag,
               html: child.outerHTML,
               text: child.innerText.trim(),
-              streamable: childIsComplete,
-            }];
+            });
+            return;
           }
 
-          const group = `${rootIndex}:${childIndex}:${tag}`;
+          const group = `list:${listGroupIndex++}:${tag}`;
           const orderedStart = tag === "ol" ? Number(child.getAttribute("start") ?? "1") : undefined;
-          return listItems.map((item, itemIndex) => {
+          listItems.forEach((item, itemIndex) => {
             const shell = child.cloneNode(false) as HTMLElement;
             shell.removeAttribute("data-is-last-node");
             if (orderedStart !== undefined && Number.isFinite(orderedStart)) {
               shell.setAttribute("start", String(orderedStart + itemIndex));
             }
             shell.append(item.cloneNode(true));
-            return {
-              key: `${rootIndex}:${childIndex}:${tag}:${itemIndex}`,
+            flattenedMarkdownSegments.push({
+              tag: `${tag}:item`,
               html: shell.outerHTML,
               text: item.innerText.trim(),
               group,
-              streamable: childIsComplete || itemIndex < listItems.length - 1,
-            };
+            });
           });
         });
       });
+      const markdownSegments = flattenedMarkdownSegments.map((segment, index, segments) => ({
+        key: `${index}:${segment.tag}`,
+        html: segment.html,
+        text: segment.text,
+        ...(segment.group ? { group: segment.group } : {}),
+        streamable: index < segments.length - 1,
+      }));
       const rendered = renderedRoots.at(-1);
       const completionAction = rendered
         ? [...root.querySelectorAll<HTMLElement>(completionActionSelector)]
@@ -2128,12 +2238,25 @@ export class ChatGptBrowserWorker {
         ...block,
         ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
       }));
+      const stoppedThinkingVisible = (() => {
+        const ariaMatch = [...root.querySelectorAll<HTMLElement>('[aria-label="Stopped thinking"]')]
+          .some(renderedInDom);
+        if (ariaMatch) return true;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          if (node.textContent?.replace(/\s+/g, " ").trim() !== "Stopped thinking") continue;
+          const parent = node.parentElement;
+          if (parent && renderedInDom(parent)) return true;
+        }
+        return false;
+      })();
       return {
         responsePresent: true,
         visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
         fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
         markdownSegments,
         completionActionVisible: completionAction !== undefined,
+        stoppedThinkingVisible,
         traceBlocks,
       };
     }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(() => {
@@ -2290,9 +2413,37 @@ export class ChatGptBrowserWorker {
     let diagnosticPage: Page | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      const multipartTransactionId = prepared.multipart
+        ? `ctx_${randomUUID().replaceAll("-", "")}`
+        : undefined;
+      const multipartStages = prepared.multipart && multipartTransactionId
+        ? prepared.multipart.parts.map((payload, index) => formatChatGptWebMultipartStage(
+          payload,
+          multipartTransactionId,
+          index + 1,
+          prepared.multipart!.parts.length,
+        ))
+        : undefined;
+      const multipartFinalPrompt = prepared.multipart && multipartTransactionId
+        ? formatChatGptWebMultipartCommit(prepared.multipart, multipartTransactionId)
+        : undefined;
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
       const estimatedMessageTokens = estimateCompiledChatGptWebMessageTokens(prepared, turn.modelId);
       const maxMessageChars = compiledChatGptWebMaxMessageChars(prepared);
+      const maxStageMessageTokens = multipartStages
+        ? Math.max(...multipartStages.map(stage => estimateTokens(stage.text, turn.modelId)))
+        : undefined;
+      const maxStageChars = multipartStages
+        ? Math.max(...multipartStages.map(stage => stage.text.length))
+        : undefined;
+      const stagingMode = multipartStages
+        ? resolveChatGptWebMultipartStagingMode(
+          turn.modelId,
+          turn.capabilities,
+          maxStageMessageTokens!,
+          maxStageChars!,
+        )
+        : requestedMode;
       if (prepared.multipart) {
         assertChatGptWebMultipartInputWithinLimits(
           estimatedInputTokens,
@@ -2302,6 +2453,16 @@ export class ChatGptBrowserWorker {
           turn.capabilities,
           maxMessageChars,
           prepared.multipart.parts.length,
+          multipartStages
+            && multipartFinalPrompt
+            && maxStageMessageTokens !== undefined
+            && maxStageChars !== undefined ? {
+            stagingEffort: stagingMode.effort,
+            maxStageMessageTokens,
+            maxStageChars,
+            finalMessageTokens: estimateTokens(multipartFinalPrompt, turn.modelId),
+            finalMessageChars: multipartFinalPrompt.length,
+          } : undefined,
         );
       } else {
         assertChatGptWebInputWithinLimits(
@@ -2358,7 +2519,7 @@ export class ChatGptBrowserWorker {
         this.selectModelAndEffort(
           page,
           turn.modelId,
-          turn.reasoning,
+          stagingMode.effort,
           turn.capabilities,
           checkpoint => diagnostics.capture(page, checkpoint),
         )
@@ -2366,15 +2527,9 @@ export class ChatGptBrowserWorker {
       await diagnostics.capture(page, "effort-selection-complete");
 
       let finalPrompt = prepared.text;
-      if (prepared.multipart) {
-        const transactionId = `ctx_${randomUUID().replaceAll("-", "")}`;
-        for (let index = 0; index < prepared.multipart.parts.length; index += 1) {
-          const stage = formatChatGptWebMultipartStage(
-            prepared.multipart.parts[index]!,
-            transactionId,
-            index + 1,
-            prepared.multipart.parts.length,
-          );
+      if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
+        for (let index = 0; index < multipartStages.length; index += 1) {
+          const stage = multipartStages[index]!;
           const stageBaseline = await this.captureSubmissionBaseline(page);
           await this.runStage(
             turn.traceId,
@@ -2407,7 +2562,7 @@ export class ChatGptBrowserWorker {
             turn.abortSignal,
           );
           console.info(
-            `[chatgpt-web] browser turn ${turn.traceId} multipart stage ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
+            `[chatgpt-web] browser turn ${turn.traceId} multipart stage ${index + 1}/${multipartStages.length} submission accepted evidence=${evidence}`,
           );
           await this.waitForMultipartAcknowledgement(
             page,
@@ -2418,7 +2573,22 @@ export class ChatGptBrowserWorker {
           );
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
         }
-        finalPrompt = formatChatGptWebMultipartCommit(prepared.multipart, transactionId);
+        finalPrompt = multipartFinalPrompt;
+        if (mode.effort !== requestedMode.effort) {
+          mode = await this.runStage(
+            turn.traceId,
+            "final_effort_selection",
+            browserStageTimeouts.effortSelection,
+            () => this.selectModelAndEffort(
+              page,
+              turn.modelId,
+              requestedMode.effort,
+              turn.capabilities,
+              checkpoint => diagnostics.capture(page, `final-${checkpoint}`),
+            ),
+          );
+          await diagnostics.capture(page, "final-effort-selection-complete");
+        }
       }
 
       let submissionBaseline = await this.captureSubmissionBaseline(page);
@@ -2512,6 +2682,7 @@ export class ChatGptBrowserWorker {
       };
       const completionTracker = new ChatGptCompletionTracker();
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
       for (;;) {
         if (page.isClosed()) {
           throw chatGptBrowserTabClosedError();
@@ -2545,6 +2716,9 @@ export class ChatGptBrowserWorker {
         }
 
         const snapshot = await this.responseDomSnapshot(responseTurn);
+        if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
+          throw chatGptStoppedThinkingError();
+        }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
@@ -2555,14 +2729,7 @@ export class ChatGptBrowserWorker {
           }
           let textDelta: string;
           try {
-            // A tool-capable ChatGPT turn can legitimately reparent or replace visible Markdown
-            // between MCP calls. Its reasoning/commentary and tool events remain live, but the
-            // final-answer channel is irreversible and therefore waits for terminal DOM evidence.
-            textDelta = markdownBuffer.observe(
-              snapshot.markdownSegments,
-              Date.now(),
-              !mode.localTools,
-            );
+            textDelta = markdownBuffer.observe(snapshot.markdownSegments);
           } catch (error) {
             if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
             throw new ChatGptWebAdapterError(error.message, {
