@@ -333,7 +333,8 @@ class BrowserHost {
     this.turnTabs.set(id, tab);
     this.window.contentView.addChildView(view);
     view.setBounds(this.hiddenTurnBounds());
-    view.setVisible(false);
+    // Start running turns with a real renderer viewport even before the first visibility sync.
+    view.setVisible(true);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
@@ -805,11 +806,16 @@ class BrowserHost {
 
   hiddenTurnBounds() {
     const [contentWidth, contentHeight] = this.window.getContentSize();
+    const width = Math.max(HIDDEN_TURN_VIEWPORT.width, Math.round(contentWidth || 0));
+    const height = Math.max(HIDDEN_TURN_VIEWPORT.height, Math.round(contentHeight || 0));
     return {
-      x: 0,
-      y: 0,
-      width: Math.max(HIDDEN_TURN_VIEWPORT.width, Math.round(contentWidth || 0)),
-      height: Math.max(HIDDEN_TURN_VIEWPORT.height, Math.round(contentHeight || 0)),
+      // Electron collapses a hidden WebContentsView's renderer viewport to 0x0. Keep running
+      // turn views visible to Chromium and move them wholly outside the launcher content area so
+      // Playwright retains a real viewport without exposing the task to the user.
+      x: Math.max(width, Math.round(contentWidth || 0)) + 1,
+      y: Math.max(height, Math.round(contentHeight || 0)) + 1,
+      width,
+      height,
     };
   }
 
@@ -828,7 +834,9 @@ class BrowserHost {
     for (const tab of this.turnTabs.values()) {
       const tabVisible = visible && !this.authView && selected?.id === tab.id;
       tab.view.setBounds(tabVisible ? this.bounds : this.hiddenTurnBounds());
-      tab.view.setVisible(tabVisible);
+      // A running hidden turn must remain composited; setVisible(false) gives Electron a zero
+      // width renderer viewport and makes otherwise valid Playwright actions fail as out of view.
+      tab.view.setVisible(tabVisible || tab.status === "running");
     }
     this.authView?.setVisible(visible);
   }
