@@ -22,6 +22,7 @@ import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, chatGptExternalProgressIsLive } from "../src/adapters/chatgpt-web/turn-progress";
+import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -1499,6 +1500,14 @@ describe("ChatGPT outer-native harness v4", () => {
     });
   });
 
+  test("preserves Obsidian wiki links without turning them into LaTeX delimiters", () => {
+    expect(chatGptHtmlToMarkdown(
+      "<p>Sources: [[Goals/финансовые цели]] · [[wiki/entities/me]]</p>",
+    )).toBe("Sources: [[Goals/финансовые цели]] · [[wiki/entities/me]]");
+    expect(chatGptHtmlToMarkdown("<p>Ordinary [brackets] stay escaped</p>"))
+      .toBe("Ordinary \\[brackets\\] stay escaped");
+  });
+
   test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
     const plain = "<p>Source</p>";
     const linked = '<p><a href="https://example.com">Source</a></p>';
@@ -2587,4 +2596,61 @@ describe("ChatGPT outer-native harness v4", () => {
       await broker.close();
     }
   }, 30_000);
+
+  test("an aborted MCP request revokes its turn binding and leaves the stdio server usable", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-mcp-abort-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    environment.tools = [
+      { name: "exec_command", description: "Run a Codex command", parameters: { type: "object" } },
+    ];
+    const abandonedToken = await broker.register(environment);
+    const replacementToken = await broker.register(environment);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "codex-chatgpt-web-mcp-abort-test", version: "1.0.0" });
+
+    try {
+      expect(chatGptMcpInvocationTimeout(environment)).toBe(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
+      await client.connect(transport);
+      const abandoned = client.callTool({
+        name: "codex_exec",
+        arguments: { turn_token: abandonedToken, cmd: "sleep forever", yield_time_ms: 30_000 },
+      }, undefined, { timeout: 100 });
+      const [request] = await broker.nextToolBatch(abandonedToken);
+      expect(request).toMatchObject({ wireName: "exec_command" });
+      await expect(abandoned).rejects.toBeDefined();
+
+      const deadline = Date.now() + 2_000;
+      let abandonedError: unknown;
+      do {
+        try {
+          await callTurnBroker(socketPath, { method: "claim", token: abandonedToken });
+        } catch (error) {
+          abandonedError = error;
+          break;
+        }
+        await Bun.sleep(10);
+      } while (Date.now() < deadline);
+      expect(String(abandonedError)).toContain("already finished");
+
+      const inventory = await client.callTool({
+        name: "codex_tool_inventory",
+        arguments: { turn_token: replacementToken, query: "exec_command", include_schema: false },
+      });
+      expect(inventory.structuredContent).toMatchObject({
+        total: 1,
+        tools: [{ wire_name: "exec_command" }],
+      });
+    } finally {
+      await client.close().catch(() => {});
+      broker.revoke(abandonedToken);
+      broker.revoke(replacementToken);
+      await broker.close();
+    }
+  }, 10_000);
 });
