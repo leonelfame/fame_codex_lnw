@@ -25,7 +25,7 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.ok(manifest.build.files.includes("assets/icon.png"));
   assert.ok(manifest.build.files.includes("assets/linux-appimage-runner.sh"));
   assert.ok(manifest.build.asarUnpack.includes("assets/linux-appimage-runner.sh"));
-  assert.equal(manifest.build.afterPack, "scripts/after-pack.cjs");
+  assert.equal(manifest.build.afterPack, undefined);
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
   assert.equal(manifest.build.nsis.oneClick, false);
   assert.equal(manifest.build.nsis.perMachine, false);
@@ -98,6 +98,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(ci, /bun run app:package/);
   assert.match(ci, /bun run app:smoke/);
   assert.match(ci, /prepare-linux-libnotify\.sh/);
+  assert.match(ci, /prepare-linux-appimage-tools\.cjs/);
   assert.match(ci, /archlinux:base/);
   assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
   for (const runner of ["macos-15", "macos-15-intel", "ubuntu-latest", "windows-latest"]) {
@@ -106,6 +107,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /launcher\/build\/runtime/);
   assert.match(release, /bun run app:smoke/);
   assert.match(release, /prepare-linux-libnotify\.sh/);
+  assert.match(release, /prepare-linux-appimage-tools\.cjs/);
   assert.match(release, /archlinux:base/);
   assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
@@ -165,8 +167,8 @@ test("Linux AppImage fallback uses one owned extraction and removes it on exit",
   }
 });
 
-test("Linux pack hook replaces libnotify only after proving the required ABI", () => {
-  const source = fs.readFileSync(path.join(launcherRoot, "scripts", "after-pack.cjs"), "utf8");
+test("Linux packaging replaces libnotify in an owned AppImage toolset before assembly", () => {
+  const source = fs.readFileSync(path.join(launcherRoot, "scripts", "prepare-linux-appimage-tools.cjs"), "utf8");
   const prepare = fs.readFileSync(path.join(repositoryRoot, "scripts", "prepare-linux-libnotify.sh"), "utf8");
   const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-linux-appimage-symbols.sh"), "utf8");
   const license = fs.readFileSync(
@@ -177,7 +179,9 @@ test("Linux pack hook replaces libnotify only after proving the required ABI", (
     assert.match(contract, /notify_notification_get_activation_app_launch_context/);
   }
   assert.match(prepare, /4be15202ec4184fce1ac15997ece5530d2be32fe9573875aeb10e3b573858748/);
-  assert.match(source, /Expected exactly one packaged libnotify\.so\.4/);
+  assert.match(source, /getAppImageTools\("0\.0\.0", Arch\.x64\)/);
+  assert.match(source, /APPIMAGE_TOOLS_PATH/);
+  assert.match(source, /must not replace the shared download cache/);
   assert.match(license, /GNU LESSER GENERAL PUBLIC LICENSE/);
   assert.match(license, /libnotify-0\.8\.7\.tar\.xz/);
 });

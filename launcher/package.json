@@ -43,7 +43,6 @@
     "asarUnpack": [
       "assets/linux-appimage-runner.sh"
     ],
-    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "release"
     },

@@ -45,6 +45,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y meson ninja-build pkg-config libglib2.0-dev libgdk-pixbuf-2.0-dev binutils
           ./scripts/prepare-linux-libnotify.sh
+      - name: Prepare owned AppImage toolset
+        if: runner.os == 'Linux'
+        run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
       - run: bun run verify
       - run: bun run app:package
       - name: Verify Linux AppImage ABI on current Arch
