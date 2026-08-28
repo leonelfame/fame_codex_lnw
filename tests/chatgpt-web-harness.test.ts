@@ -2597,7 +2597,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   }, 30_000);
 
-  test("an aborted MCP request revokes its turn binding and leaves the stdio server usable", async () => {
+  test("an explicitly aborted MCP request revokes its turn binding and leaves the stdio server usable", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-mcp-abort-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
@@ -2618,12 +2618,14 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(chatGptMcpInvocationTimeout(environment)).toBe(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
       expect(chatGptMcpInvocationTimeout({ ...environment, expiresAt: 1_500 }, 1_000)).toBe(500);
       await client.connect(transport);
+      const abort = new AbortController();
       const abandoned = client.callTool({
         name: "codex_exec",
         arguments: { turn_token: abandonedToken, cmd: "sleep forever", yield_time_ms: 30_000 },
-      }, undefined, { timeout: 100 });
+      }, undefined, { signal: abort.signal });
       const [request] = await broker.nextToolBatch(abandonedToken);
       expect(request).toMatchObject({ wireName: "exec_command" });
+      abort.abort(new Error("synthetic MCP client cancellation"));
       await expect(abandoned).rejects.toBeDefined();
 
       const deadline = Date.now() + 5_000;
