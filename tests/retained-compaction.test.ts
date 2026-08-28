@@ -188,7 +188,9 @@ test("active compaction delivers the current result and converts every later MCP
         description: "Run one command",
         parameters: { type: "object" },
       }],
-    }, 1_000, "trace_active_compaction");
+    // The assertion exercises compaction routing, not expiry. Leave enough lease headroom for
+    // Windows named-pipe scheduling under the full parallel test suite.
+    }, 30_000, "trace_active_compaction");
     const claimed = await callTurnBroker<{ bindingId: string }>(broker.socketPath, {
       method: "claim",
       token,
