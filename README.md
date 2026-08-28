@@ -46,35 +46,18 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
 
 ## Highlights
 
-- **A polished cross-platform launcher.** One command installs the native macOS, Windows, or Linux
-  app. It keeps sign-in orchestration, setup, smoke testing, MCP guidance, runtime health, and local
-  logs in one place, while the embedded browser lets you watch every ChatGPT turn as it happens. Up
-  to five task-bound browser tabs can run in parallel; the cap avoids excessive parallel account
-  traffic.
-- **ChatGPT is the selected model.** It runs as a native Codex model, not as a tool called by
-  another host model. The original model picker, task lifecycle, streaming, tracing, and tool UI
-  remain intact.
-- **Local-first task sessions.** Codex remains the source of truth for task history on your
-  computer. Sequential native messages in one task reuse the same ChatGPT Temporary Chat until
-  compaction; each message gets a new turn-bound MCP capability, while all of that message's tool
-  rounds stay inside one Web response. At compaction, that exact agent submits the checkpoint
-  through a one-shot MCP control capability before its retained surface is closed and the next
-  compaction epoch starts a new Temporary Chat. If that private chat was already closed, the bridge
-  rebuilds the checkpoint from canonical Codex history in a fresh read-only Temporary Chat. Measured
-  browser ceilings trigger compaction, while Luna carries completed state through an adaptive
-  rolling checkpoint. Browser chats are never reused across tasks or added to normal ChatGPT
-  history.
-- **The full Codex harness over MCP.** In Full mode, every effort available to the signed-in account—
-  Luna, Instant, Medium, High, Extra High, and Pro—can use the active Codex task's filesystem,
-  shell, images, approvals, and configured tools/apps through the same turn-bound MCP capability.
-  Calls and real results stay inside the same browser response; nothing is simulated as text.
-- **No Pro exception.** Pro follows exactly the same MCP, context, image, tracing, tool-round,
-  browser-ceiling, and compaction contracts as every other effort. There are no effort-specific MCP
-  exclusions. Browser-only mode remains read-only for every route.
-- **Fail-closed with an explicit release gate.** UI drift and missing capabilities produce explicit
-  errors rather than silent fallbacks. Account-bound model selection, long context, images,
-  streaming, compaction, native tool rounds, cancellation, and Pro are covered by the documented
-  [release validation](docs/release-validation.md), separately from package smoke.
+- **Native Codex models.** ChatGPT Web runs from Codex's model picker while the original task UI,
+  context lifecycle, streaming, tracing, and tool presentation stay intact.
+- **The full Codex harness over MCP.** Full mode gives every effort exposed by the signed-in account,
+  including Pro, the active task's filesystem, shell, images, approvals, and configured tools/apps.
+- **Continuous task sessions and native compaction.** Sequential messages reuse one task-bound
+  Temporary Chat. At the context boundary, the retained agent writes the checkpoint before Codex
+  starts a clean chat; if that chat was closed, canonical Codex history supplies the fallback.
+- **One cross-platform launcher.** The macOS, Windows, and Linux app owns sign-in, model setup, MCP
+  guidance, health checks, safe diagnostics, and up to five visible task-bound browser tabs.
+- **Fail-closed behavior.** Missing models, tools, or changed ChatGPT UI produce explicit errors
+  instead of silently switching route or capability. End-to-end coverage is documented in
+  [release validation](docs/release-validation.md).
 
 Temporary Chat is a ChatGPT privacy mode, not anonymity or local-only inference: prompts are still
 processed by OpenAI and are subject to the account's settings and OpenAI's
@@ -172,27 +155,13 @@ that option clicks **Allow once**, never a permanent grant.
 
 ## Operations
 
-Use **Activity** for structured local logs and **Settings → Run doctor** for end-to-end health
-checks. Use **Settings → Cancel retained browser turn** if a stopped task leaves ChatGPT working,
-and **Settings → Remove Codex integration** before deleting the launcher so the previous Codex
-route is restored.
+Use **Activity** for safe local diagnostics and **Settings → Run doctor** for end-to-end health.
+Settings can also cancel a retained browser turn or remove the Codex integration before uninstall.
+Set `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` only when every browser checkpoint needs a screenshot.
 
-Browser turn diagnostics save bounded JSON state at each checkpoint. Screenshots are captured for
-stalled and failed turns, where the visible UI is needed to diagnose DOM drift without slowing every
-successful step. Set `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` before starting the runtime to also
-capture a screenshot at every checkpoint during an investigation.
-
-Subagent protocol is an explicit installation setting. New installs use **Compatibility V1**: it
-enables `multi_agent`, disables the global `multi_agent_v2` override, and
-restores the user's previous feature lines on disconnect or uninstall. It also raises
-`[agents].max_depth` to at least 2 while active so Web children can spawn Web grandchildren, then
-restores the prior value. This is the universal cross-backend surface: native and Web parents can
-delegate to Web children without opaque V2 payloads, and targeted waits can observe a child that
-completed before the parent began waiting. Web parents expose `wait_agent` as explicit 10-second
-polls so one long wait cannot occupy the connector's MCP channel and block the child's own tools.
-**Native** remains an advanced opt-in that preserves
-Codex's own feature settings and supports plaintext Web-to-Web V2 delegation. Switch deliberately,
-then restart Codex and start a new task because an existing task cannot change protocol in place:
+New installs use **Compatibility V1** for cross-backend subagents. **Native** preserves Codex's own
+feature settings and enables plaintext Web-to-Web V2 delegation. Restart Codex and start a new task
+after changing the protocol:
 
 ```bash
 codex-chatgpt-web subagents status
@@ -204,18 +173,13 @@ codex-chatgpt-web subagents native
 
 - This is unofficial browser automation, not an OpenAI API. ChatGPT UI changes can break selectors;
   drift fails explicitly instead of silently switching model or transport.
-- ChatGPT's account-specific composer ceilings are smaller than some underlying model windows.
-  The measured boundaries and requirements for a larger deterministic transport are tracked in
-  [#76](https://github.com/miuuyy/codex-chatgpt-web/issues/76).
 - Browser state is a sensitive login artifact, and the loopback listener is reachable by processes
   running as the same local user. Never share the launcher profile; use a trusted workstation.
 - Release packages currently target macOS 13+ (arm64/x64), Windows x64, and Linux x64. Runtime,
-  tests, and native packaging are gated on all three operating systems in CI. Account-bound browser
-  and MCP flows require the separate [release validation](docs/release-validation.md); package smoke
-  is not treated as end-to-end proof.
-- Until platform signing credentials are configured for a release, macOS Gatekeeper or Windows
-  SmartScreen may show an unknown-publisher warning. The one-command installers verify the
-  published SHA-256 manifest before installation.
+  tests, and packaging are gated on all three in CI; account-bound browser and MCP flows use the
+  separate [release validation](docs/release-validation.md).
+- Builds are not yet platform-signed, so Gatekeeper or SmartScreen may warn. The installers verify
+  the published SHA-256 manifest before installation.
 
 Read the complete [architecture](docs/architecture.md) and
 [security model](docs/security-model.md) before enabling full mode. Report vulnerabilities through
