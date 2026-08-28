@@ -1889,7 +1889,7 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("const statusSemantic = (candidate: HTMLElement)");
   expect(workerSource).toContain('candidate.querySelectorAll<HTMLElement>(".sr-only")');
   expect(workerSource).not.toContain("const adjacentCommentary");
-  expect(workerSource).toContain(
+  expect(workerSource.replaceAll("\r\n", "\n")).toContain(
     'candidate.closest<HTMLElement>("button")\n'
     + '          ?? candidate.closest<HTMLElement>("[data-item-anchor]")\n'
     + "          ?? candidate",
