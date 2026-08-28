@@ -194,7 +194,7 @@ function execCommandGatewayProgram(
 }
 
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
-  const server = new McpServer({ name: "codex-native", version: "4.0.0" });
+  const server = new McpServer({ name: "codex-native", version: "4.0.1" });
 
   const claimTurn = async (
     toolName: string,

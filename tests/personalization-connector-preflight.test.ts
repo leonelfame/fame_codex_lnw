@@ -78,10 +78,14 @@ test("an Unpersonalized Temporary Chat is switched through its owned radio menu 
       expect(menuOpen).toBeTrue();
       events.push("menu-visible");
     },
-    getByRole: (role: string, options: { name: RegExp }) => {
-      expect(role).toBe("radio");
-      expect(options.name.test("PersonalizedThis chat can reference plugins")).toBeTrue();
-      return choice;
+    locator: (selector: string) => {
+      expect(selector).toBe('[role="menuitemradio"], [role="radio"]');
+      return {
+        filter: ({ hasText }: { hasText: RegExp }) => {
+          expect(hasText.test("PersonalizedThis chat can reference plugins")).toBeTrue();
+          return choice;
+        },
+      };
     },
   };
   const page = {
@@ -106,6 +110,83 @@ test("an Unpersonalized Temporary Chat is switched through its owned radio menu 
     "personalized-visible",
     "unpersonalized-hidden",
   ]);
+});
+
+test("a localized already-Personalized Temporary Chat is proved by connector catalog access without clicking UI", async () => {
+  const diagnostics: string[] = [];
+  const absent = visibleLocator(() => 0);
+  const page = { getByRole: () => absent } as any;
+
+  expect(await ensureChatGptPersonalizedConnectorAccess(
+    page,
+    async checkpoint => { diagnostics.push(checkpoint); },
+    async () => true,
+  )).toBe("already-personalized");
+  expect(diagnostics).toEqual(["personalization-already-enabled"]);
+});
+
+test("a localized Unpersonalized Temporary Chat toggles the structural state and proves connector access", async () => {
+  let connectorCatalogAvailable = false;
+  let menuOpen = false;
+  let personalized = false;
+  const diagnostics: string[] = [];
+  const absent = visibleLocator(() => 0);
+  const choices = {
+    filter: () => choices,
+    count: async () => 2,
+    nth: (index: number) => ({
+      getAttribute: async (name: string) => {
+        if (name === "aria-checked") return String(index === (personalized ? 1 : 0));
+        if (name === "data-state") return index === (personalized ? 1 : 0) ? "checked" : "unchecked";
+        return null;
+      },
+      click: async () => {
+        expect(index).toBe(1);
+        personalized = true;
+        connectorCatalogAvailable = true;
+        menuOpen = false;
+      },
+    }),
+  };
+  const menu = {
+    waitFor: async ({ state }: { state: string }) => {
+      expect(state).toBe("visible");
+      expect(menuOpen).toBeTrue();
+    },
+    locator: (selector: string) => {
+      expect(selector).toBe('[role="menuitemradio"], [role="radio"]');
+      return choices;
+    },
+  };
+  const control = {
+    getAttribute: async (name: string) => {
+      expect(name).toBe("aria-controls");
+      return "localized-personalization-menu";
+    },
+    click: async () => { menuOpen = true; },
+  };
+  const controls = {
+    filter: () => controls,
+    count: async () => 1,
+    first: () => control,
+  };
+  const page = {
+    getByRole: () => absent,
+    locator: (selector: string) => {
+      if (selector.includes('button[aria-haspopup="menu"]')) return controls;
+      expect(selector).toBe('[id="localized-personalization-menu"]');
+      return menu;
+    },
+    keyboard: { press: async () => {} },
+  } as any;
+
+  expect(await ensureChatGptPersonalizedConnectorAccess(
+    page,
+    async checkpoint => { diagnostics.push(checkpoint); },
+    async () => connectorCatalogAvailable,
+  )).toBe("enabled");
+  expect(diagnostics).toEqual(["personalization-unpersonalized", "personalization-enabled"]);
+  expect(personalized).toBeTrue();
 });
 
 test("ambiguous personalization controls fail before connector selection", async () => {

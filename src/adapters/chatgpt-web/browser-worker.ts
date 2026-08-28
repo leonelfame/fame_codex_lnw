@@ -171,10 +171,59 @@ function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterErr
 
 export type ChatGptPersonalizationPreflight = "already-personalized" | "enabled";
 
+const CHATGPT_PERSONALIZATION_CONTROL_SELECTOR = [
+  '[data-testid="thread-header-right-actions"] button[aria-haspopup="menu"]',
+  '#conversation-header-actions button[aria-haspopup="menu"]',
+].join(", ");
+const CHATGPT_PERSONALIZATION_CHOICE_SELECTOR = '[role="menuitemradio"], [role="radio"]';
+
+async function toggleChatGptPersonalizationChoice(page: Page): Promise<void> {
+  const controls = page.locator(CHATGPT_PERSONALIZATION_CONTROL_SELECTOR).filter({ visible: true });
+  if (await controls.count() !== 1) {
+    throw chatGptConnectorUnavailableError(
+      "ChatGPT Temporary Chat did not expose one structural personalization control",
+    );
+  }
+  const control = controls.first();
+  await control.click();
+  const menuId = await control.getAttribute("aria-controls");
+  if (!menuId) {
+    await page.keyboard.press("Escape").catch(() => {});
+    throw chatGptConnectorUnavailableError(
+      "ChatGPT opened the Temporary Chat personalization control without an owned menu",
+    );
+  }
+  const menu = page.locator(`[id=${JSON.stringify(menuId)}]`);
+  await menu.waitFor({ state: "visible", timeout: 5_000 });
+  const choices = menu.locator(CHATGPT_PERSONALIZATION_CHOICE_SELECTOR).filter({ visible: true });
+  if (await choices.count() !== 2) {
+    await page.keyboard.press("Escape").catch(() => {});
+    throw chatGptConnectorUnavailableError(
+      "ChatGPT personalization menu did not expose exactly two checkable states",
+    );
+  }
+  const checked: boolean[] = [];
+  for (let index = 0; index < 2; index += 1) {
+    const choice = choices.nth(index);
+    const ariaChecked = await choice.getAttribute("aria-checked");
+    const dataState = await choice.getAttribute("data-state");
+    checked.push(ariaChecked === "true" || dataState === "checked");
+  }
+  if (checked.filter(Boolean).length !== 1) {
+    await page.keyboard.press("Escape").catch(() => {});
+    throw chatGptConnectorUnavailableError(
+      "ChatGPT personalization menu did not expose one checked state",
+    );
+  }
+  await choices.nth(checked[0] ? 1 : 0).click();
+  await settleChatGptUi();
+}
+
 /** New Temporary Chats may suppress connectors until this exact browser conversation is Personalized. */
 export async function ensureChatGptPersonalizedConnectorAccess(
   page: Page,
   captureDiagnostic?: (checkpoint: string) => Promise<void>,
+  proveConfiguredConnectorAccess?: () => Promise<boolean>,
 ): Promise<ChatGptPersonalizationPreflight> {
   const personalized = page
     .getByRole("button", { name: "Personalized", exact: true })
@@ -189,9 +238,32 @@ export async function ensureChatGptPersonalizedConnectorAccess(
     personalizedCount = await personalized.count();
     unpersonalizedCount = await unpersonalized.count();
     if (personalizedCount === 0 && unpersonalizedCount === 0) {
-      await captureDiagnostic?.("personalization-control-missing");
+      if (!proveConfiguredConnectorAccess) {
+        await captureDiagnostic?.("personalization-control-missing");
+        throw chatGptConnectorUnavailableError(
+          "ChatGPT Temporary Chat did not expose a verifiable personalization control",
+        );
+      }
+      if (await proveConfiguredConnectorAccess()) {
+        await captureDiagnostic?.("personalization-already-enabled");
+        return "already-personalized";
+      }
+      await captureDiagnostic?.("personalization-unpersonalized");
+      await toggleChatGptPersonalizationChoice(page);
+      if (await proveConfiguredConnectorAccess()) {
+        await captureDiagnostic?.("personalization-enabled");
+        return "enabled";
+      }
+      try {
+        await toggleChatGptPersonalizationChoice(page);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [restoreError],
+          "ChatGPT personalization changed but connector access was not proven and the original state could not be restored",
+        );
+      }
       throw chatGptConnectorUnavailableError(
-        "ChatGPT Temporary Chat did not expose a verifiable personalization control",
+        "The configured ChatGPT connector remained unavailable after the structural personalization state changed",
       );
     }
   }
@@ -217,7 +289,9 @@ export async function ensureChatGptPersonalizedConnectorAccess(
   }
   const menu = page.locator(`[id=${JSON.stringify(menuId)}]`);
   await menu.waitFor({ state: "visible", timeout: 5_000 });
-  const choice = menu.getByRole("radio", { name: /^Personalized/ });
+  const choice = menu
+    .locator(CHATGPT_PERSONALIZATION_CHOICE_SELECTOR)
+    .filter({ hasText: /^Personalized/ });
   if (await choice.count() !== 1) {
     throw chatGptConnectorUnavailableError(
       "ChatGPT personalization menu did not expose one exact Personalized choice",
@@ -2001,18 +2075,38 @@ export class ChatGptBrowserWorker {
     catalogRefreshAvailable = false,
     attemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 },
   ): Promise<Locator> {
-    await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic);
-    let composer = await this.activeComposer(page);
+    let composer: Locator;
+    const menuRows = page.locator('.__menu-item[tabindex="0"]');
+    const appResult = menuRows.filter({
+      has: page.getByText(this.config.appName, { exact: true }),
+    });
+    await ensureChatGptPersonalizedConnectorAccess(
+      page,
+      captureDiagnostic,
+      async () => {
+        composer = await this.activeComposer(page);
+        await composer.fill("");
+        await composer.focus();
+        await settleChatGptUi();
+        await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, { delay: 25 });
+        try {
+          await appResult.waitFor({ state: "visible", timeout: 2_500 });
+          return true;
+        } catch (error) {
+          if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+          return false;
+        } finally {
+          await composer.fill("").catch(() => {});
+        }
+      },
+    );
+    composer = await this.activeComposer(page);
     await composer.fill("");
     if (await this.connectorIsSelected(composer)) {
       await captureDiagnostic?.("connector-already-selected");
       return composer;
     }
 
-    const menuRows = page.locator('.__menu-item[tabindex="0"]');
-    const appResult = menuRows.filter({
-      has: page.getByText(this.config.appName, { exact: true }),
-    });
     let firstMenuCaptured = false;
     while (attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
       attemptBudget.triggerAttempts += 1;
