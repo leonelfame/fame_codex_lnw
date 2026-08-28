@@ -12,10 +12,12 @@ case "$APPIMAGE_PATH" in
 esac
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-web-gpt-appimage-smoke.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
-chmod 0755 "$APPIMAGE_PATH"
+SMOKE_APPIMAGE="$TEMP_DIR/$(basename -- "$APPIMAGE_PATH")"
+cp "$APPIMAGE_PATH" "$SMOKE_APPIMAGE"
+chmod 0755 "$SMOKE_APPIMAGE"
 (
   cd "$TEMP_DIR"
-  "$APPIMAGE_PATH" --appimage-extract >/dev/null
+  "$SMOKE_APPIMAGE" --appimage-extract >/dev/null
 )
 APP_DIR="$TEMP_DIR/squashfs-root"
 LIBNOTIFY="$(find "$APP_DIR" -type f -name 'libnotify.so.4' -print -quit)"

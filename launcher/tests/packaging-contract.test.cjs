@@ -182,6 +182,8 @@ test("Linux packaging replaces libnotify in an owned AppImage toolset before ass
   assert.match(source, /getAppImageTools\("0\.0\.0", Arch\.x64\)/);
   assert.match(source, /APPIMAGE_TOOLS_PATH/);
   assert.match(source, /must not replace the shared download cache/);
+  assert.match(smoke, /cp "\$APPIMAGE_PATH" "\$SMOKE_APPIMAGE"/);
+  assert.doesNotMatch(smoke, /chmod 0755 "\$APPIMAGE_PATH"/);
   assert.match(license, /GNU LESSER GENERAL PUBLIC LICENSE/);
   assert.match(license, /libnotify-0\.8\.7\.tar\.xz/);
 });
