@@ -742,6 +742,7 @@ export async function callTurnBroker<T>(
     const socket = createConnection(socketPath);
     let buffered = "";
     let settled = false;
+    let response: BrokerResponse | undefined;
     const onAbort = () => finishError(new DOMException("ChatGPT web turn broker call aborted", "AbortError"));
     const cleanup = () => signal?.removeEventListener("abort", onAbort);
     const finishError = (error: Error) => {
@@ -751,6 +752,18 @@ export async function callTurnBroker<T>(
       cleanup();
       socket.destroy();
       rejectCall(error);
+    };
+    const finishResponse = () => {
+      if (settled) return;
+      if (!response) {
+        finishError(new Error("ChatGPT web turn broker closed the connection"));
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      if (response.error) rejectCall(new Error(response.error));
+      else resolveCall(response.result as T);
     };
     const timer = timeoutMs === null
       ? undefined
@@ -762,10 +775,12 @@ export async function callTurnBroker<T>(
     }
     socket.setEncoding("utf8");
     socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
-    socket.once("close", () => finishError(new Error("ChatGPT web turn broker closed the connection")));
+    // The server owns response termination. Waiting for the pipe/socket to close before resolving
+    // prevents callers from retiring the broker while Bun still has a named-pipe write in flight.
+    socket.once("close", finishResponse);
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...request })}\n`));
     socket.on("data", chunk => {
-      if (settled) return;
+      if (settled || response) return;
       buffered += chunk;
       if (buffered.length > MAX_BROKER_LINE_CHARS) {
         finishError(new Error("ChatGPT web turn broker response exceeds size limit"));
@@ -773,23 +788,18 @@ export async function callTurnBroker<T>(
       }
       const newline = buffered.indexOf("\n");
       if (newline < 0) return;
-      let response: BrokerResponse;
+      let parsed: BrokerResponse;
       try {
-        response = JSON.parse(buffered.slice(0, newline)) as BrokerResponse;
+        parsed = JSON.parse(buffered.slice(0, newline)) as BrokerResponse;
       } catch (error) {
         finishError(new Error(`ChatGPT web turn broker returned invalid JSON: ${errorOf(error).message}`));
         return;
       }
-      if (response.id !== id) {
+      if (parsed.id !== id) {
         finishError(new Error("ChatGPT web turn broker response id mismatch"));
         return;
       }
-      settled = true;
-      clearTimeout(timer);
-      cleanup();
-      socket.end();
-      if (response.error) rejectCall(new Error(response.error));
-      else resolveCall(response.result as T);
+      response = parsed;
     });
   });
 }
