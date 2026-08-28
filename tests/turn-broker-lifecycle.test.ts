@@ -13,6 +13,7 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
   const replayable = sessions.getOrCreate("turn-a", () => ({
     mode: "read-only",
     browser: Promise.resolve("done"),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
@@ -21,6 +22,7 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
   sessions.getOrCreate("turn-b", () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
@@ -40,6 +42,7 @@ test("targeted tab cancellation settles one trace and keeps a terminal replay to
   const target = sessions.getOrCreate("target", () => ({
     mode: "read-only",
     browser: new Promise<string>((_resolve, reject) => { rejectTarget = reject; }),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => {
@@ -50,6 +53,7 @@ test("targeted tab cancellation settles one trace and keeps a terminal replay to
   sessions.getOrCreate("other", () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { otherCancelled += 1; },
@@ -73,6 +77,7 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   const active = sessions.getOrCreate("long-turn", () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
@@ -93,6 +98,7 @@ test("five active turns coexist and a sixth fails closed", () => {
   const runtime = () => ({
     mode: "read-only" as const,
     browser: new Promise<string>(() => {}),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
@@ -121,6 +127,7 @@ test("settled replay sessions expire from their last use instead of their creati
     return {
       mode: "read-only" as const,
       browser: Promise.resolve("done"),
+      physicalSettlement: Promise.resolve(),
       trace: new ChatGptTraceFeed(),
       text: new ChatGptTextFeed(),
       cancel: () => {},

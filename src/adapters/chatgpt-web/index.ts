@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { releaseLauncherRetainedConversation } from "../../launcher-browser-host";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
@@ -11,13 +12,25 @@ import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebC
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
+import { ChatGptExternalTurnProgress } from "./turn-progress";
+import {
+  canonicalizeCompactionHandoff,
+  existingStructuredCompactionRun,
+  requestRetainedCompactionHandoff,
+  runStructuredCompactionOnce,
+  settleActiveCompactionSource,
+} from "./compaction-handoff";
+import {
+  chatGptConversationKey,
+  retainedConversationResumeRequest,
+} from "./conversation-key";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -61,7 +74,7 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Pro
 function cancellableBrowserTurn(
   run: Promise<string>,
   controller: AbortController,
-): { browser: Promise<string>; cancel: (reason?: Error) => void } {
+): { browser: Promise<string>; physicalSettlement: Promise<void>; cancel: (reason?: Error) => void } {
   let rejectCancellation!: (error: Error) => void;
   const cancellation = new Promise<never>((_resolve, reject) => {
     rejectCancellation = reject;
@@ -72,6 +85,9 @@ function cancellableBrowserTurn(
     // The helper keeps the same abort signal and remains responsible for its normal end/cleanup
     // handshake, but the Codex Responses turn no longer waits on that process cleanup.
     browser: Promise.race([run, cancellation]),
+    // `browser` is the fast client-facing result. Replacement ownership must wait for the actual
+    // worker promise, whose finally block completes the launcher /turn/end handshake.
+    physicalSettlement: run.then(() => undefined, () => undefined),
     cancel(reason?: Error) {
       if (!controller.signal.aborted) controller.abort(reason);
       // Explicit targeted cancellation ends the Codex Responses turn immediately. Generic
@@ -181,6 +197,25 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
   for (const event of events) emit(event);
 }
 
+function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
+  const normalized = error instanceof Error ? error : new Error(String(error));
+  if (normalized instanceof ChatGptWebAdapterError) return normalized;
+  const phase = session.runtime.submission?.phase;
+  if (!phase || phase === "prepared") return normalized;
+  const ambiguous = phase === "send_activated";
+  return new ChatGptWebAdapterError(
+    ambiguous
+      ? `ChatGPT Send was activated, but acceptance could not be proven; the prompt will not be resent: ${normalized.message}`
+      : `ChatGPT failed after accepting the Web prompt; the prompt will not be resent: ${normalized.message}`,
+    {
+      status: 502,
+      errorType: "server_error",
+      code: ambiguous ? "chatgpt_submission_ambiguous" : "chatgpt_submitted_turn_failed",
+      retryable: false,
+    },
+  );
+}
+
 function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSession): CodexToolResultMessage[] {
   const byId = new Map<string, CodexToolResultMessage>();
   for (const message of parsed.context.messages) {
@@ -206,6 +241,7 @@ export function createChatGptWebAdapter(
 ): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
+  const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
   const experimentalBiggerContext = provider.chatgptWeb?.experimentalBiggerContext;
   if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
@@ -217,6 +253,10 @@ export function createChatGptWebAdapter(
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
   const executionNamespace = chatGptWebExecutionNamespace(provider);
+  const retainedLauncherDescriptor = provider.chatgptWeb?.browserHost === "launcher"
+    && provider.chatgptWeb.browserHostDescriptorPath
+    ? resolve(expandUserPath(provider.chatgptWeb.browserHostDescriptorPath))
+    : undefined;
   const environmentStore = new ChatGptThreadEnvironmentStore(
     provider.chatgptWeb?.threadEnvironmentStatePath
       ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
@@ -247,14 +287,31 @@ export function createChatGptWebAdapter(
     const checkpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
-    const experimentalMultipartParts = experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities)
+    const conversationKey = !parsed._compactionRequest
+      && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
+      && mode.localTools
+      && retainedLauncherDescriptor
+      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
       : undefined;
-    const compileOptions = {
-      captureLunaCheckpoint,
-      ...(experimentalMultipartParts !== undefined
-        ? { experimentalMultipartParts }
-        : {}),
+    const resumeInput = conversationKey
+      ? retainedConversationResumeRequest(checkpointInput.parsed)
+      : undefined;
+    const retainConversation = conversationKey !== undefined;
+    const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
+      ? async () => {
+        await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
+      }
+      : undefined;
+    const compileOptionsFor = (input: CodexParsedRequest) => {
+      const experimentalMultipartParts = experimentalBiggerContext
+        ? resolveBiggerContextMultipartParts(input, turnCapabilities)
+        : undefined;
+      return {
+        captureLunaCheckpoint,
+        ...(experimentalMultipartParts !== undefined
+          ? { experimentalMultipartParts }
+          : {}),
+      };
     };
     if (captureLunaCheckpoint) {
       console.info(
@@ -279,6 +336,13 @@ export function createChatGptWebAdapter(
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
+    const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
+    // A canonical compaction request is side-effect free and remains safe to rebuild after an
+    // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
+    const submissionLifecycle = parsed._compactionRequest ? {} : {
+      onSendActivated: () => { submission.phase = "send_activated" as const; },
+      onSubmitted: () => { submission.phase = "accepted" as const; },
+    };
     if (!mode.localTools) {
       const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
         traceId,
@@ -290,12 +354,13 @@ export function createChatGptWebAdapter(
             checkpointInput.parsed,
             turnCapabilities,
             undefined,
-            compileOptions,
+            compileOptionsFor(checkpointInput.parsed),
           ),
           release: () => {},
         }),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
+        ...submissionLifecycle,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
@@ -307,47 +372,59 @@ export function createChatGptWebAdapter(
       return {
         mode: "read-only",
         browser: browserTurn.browser,
+        physicalSettlement: browserTurn.physicalSettlement,
         trace,
         text,
+        usageInput: checkpointInput.parsed,
+        submission,
         cancel: browserTurn.cancel,
       };
     }
     if (!environment) throw new Error("Tool-capable ChatGPT web mode requires a trusted Codex environment");
     const token = deferred<string>();
+    const externalProgress = new ChatGptExternalTurnProgress();
     let tokenSettled = false;
     let activeToken: string | undefined;
+    const prepareWith = async (input: CodexParsedRequest) => {
+      const turnToken = activeToken ?? await broker.register(
+        environment,
+        timeoutMs === undefined ? undefined : timeoutMs + 60_000,
+        traceId,
+      );
+      activeToken = turnToken;
+      if (!tokenSettled) {
+        tokenSettled = true;
+        token.resolve(turnToken);
+      }
+      try {
+        const compiled = compileChatGptWebPrompt(
+          input,
+          turnCapabilities,
+          turnToken,
+          compileOptionsFor(input),
+        );
+        return { ...compiled, release: () => {} };
+      } catch (error) {
+        await broker.revoke(turnToken);
+        activeToken = undefined;
+        throw error;
+      }
+    };
     const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
-      prepare: async () => {
-        const turnToken = await broker.register(
-          environment,
-          timeoutMs === undefined ? undefined : timeoutMs + 60_000,
-          traceId,
-        );
-        activeToken = turnToken;
-        tokenSettled = true;
-        token.resolve(turnToken);
-        try {
-          const compiled = compileChatGptWebPrompt(
-            checkpointInput.parsed,
-            turnCapabilities,
-            turnToken,
-            compileOptions,
-          );
-          return { ...compiled, release: () => {} };
-        } catch (error) {
-          await broker.revoke(turnToken);
-          throw error;
-        }
-      },
+      prepare: () => prepareWith(checkpointInput.parsed),
+      ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
+      ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
+      ...submissionLifecycle,
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
+      externalProgress,
       ...(captureLunaCheckpoint ? {
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
@@ -362,9 +439,18 @@ export function createChatGptWebAdapter(
     return {
       mode: "tools",
       token: token.promise,
+      externalProgress,
       browser: browserTurn.browser,
+      physicalSettlement: browserTurn.physicalSettlement,
       trace,
       text,
+      usageInput: checkpointInput.parsed,
+      ...(conversationKey ? { conversationKey } : {}),
+      ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
+      retireCapability: async () => {
+        if (activeToken) await broker.revoke(activeToken);
+      },
+      submission,
       cancel: (reason?: Error) => {
         browserTurn.cancel(reason);
         if (activeToken) {
@@ -409,46 +495,191 @@ export function createChatGptWebAdapter(
         }
       }
       if (parsed._compactionRequest) {
+        const structuredCompactionRequired = parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
+          && configuredCapabilities.localToolsEnabled;
+        if (structuredCompactionRequired && (!retainedLauncherDescriptor || !structuredBroker)) {
+          emit({
+            type: "error",
+            message: "Full-mode ChatGPT compaction requires the launcher retained-conversation lease and its local one-shot control broker; the bridge will not replace it with a read-only summarizer.",
+            status: 409,
+            errorType: "invalid_request_error",
+            code: "compaction_control_unavailable",
+            retryable: false,
+          });
+          return;
+        }
+        if (structuredCompactionRequired) {
+          const compactionExecutionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+          const handoffTraceId = createHash("sha256")
+            .update(`${compactionExecutionKey}:handoff`)
+            .digest("hex")
+            .slice(0, 12);
+          let sharedSummary = existingStructuredCompactionRun(compactionExecutionKey);
+          if (!sharedSummary) {
+            const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
+            const source = sourceConversationKey
+              ? chatGptTurnSessions.findConversationHead(sourceConversationKey)
+              : undefined;
+            if (!source?.conversationKey()) {
+              emit({
+                type: "error",
+                message: "The retained ChatGPT conversation required for context compaction is unavailable; the bridge will not synthesize a replacement chat.",
+                status: 409,
+                errorType: "invalid_request_error",
+                code: "compaction_source_unavailable",
+                retryable: false,
+              });
+              return;
+            }
+            sharedSummary = runStructuredCompactionOnce(
+              compactionExecutionKey,
+              async () => {
+                try {
+                  let rawSummary: string;
+                  if (source.isActive() && source.runtime.mode === "tools") {
+                    rawSummary = await settleActiveCompactionSource(parsed, source, structuredBroker!)
+                      ?? await requestRetainedCompactionHandoff(
+                        worker,
+                        parsed,
+                        source,
+                        structuredBroker!,
+                        configuredCapabilities,
+                        handoffTraceId,
+                        undefined,
+                        timeoutMs,
+                      );
+                  } else {
+                    if (source.isActive()) {
+                      const outcome = await source.browserOutcome;
+                      if (outcome.type === "error") throw outcome.error;
+                      await source.physicalSettlement;
+                    }
+                    rawSummary = await requestRetainedCompactionHandoff(
+                      worker,
+                      parsed,
+                      source,
+                      structuredBroker!,
+                      configuredCapabilities,
+                      handoffTraceId,
+                      undefined,
+                      timeoutMs,
+                    );
+                  }
+                  const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
+                  await chatGptTurnSessions.retireConversationAndWait(source.conversationKey()!);
+                  return summary;
+                } catch (error) {
+                  let handoffError = error instanceof Error ? error : new Error(String(error));
+                  try {
+                    await chatGptTurnSessions.retireConversationAndWait(source.conversationKey()!);
+                  } catch (retirementError) {
+                    handoffError = new AggregateError(
+                      [handoffError, retirementError instanceof Error ? retirementError : new Error(String(retirementError))],
+                      "Structured compaction failed and its retained conversation could not be retired",
+                    );
+                  }
+                  throw handoffError;
+                }
+              },
+            );
+          }
+          emit({ type: "heartbeat" });
+          let summary: string;
+          try {
+            summary = await withAbort(sharedSummary, incoming.abortSignal);
+          } catch (error) {
+            if (incoming.abortSignal?.aborted
+              && error instanceof DOMException
+              && error.name === "AbortError") {
+              // The observer detached; the shared exact compaction round continues and remains
+              // available to a canonical reconnect without a second browser submission.
+              throw error;
+            }
+            const handoffError = error instanceof Error ? error : new Error(String(error));
+            emit({
+              type: "error",
+              message: `The retained ChatGPT agent did not complete the structured context handoff: ${handoffError.message}`,
+              status: 409,
+              errorType: "invalid_request_error",
+              code: "compaction_handoff_failed",
+              retryable: false,
+            });
+            return;
+          }
+          emit({ type: "text_delta", text: summary, phase: "final_answer" });
+          emitBrowserCompletion(
+            { type: "final", answer: summary },
+            estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities),
+            emit,
+          );
+          chatGptWebTurnRetryPolicy.clear(retryKey);
+          return;
+        }
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
         await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
-      await chatGptTurnSessions.waitForRetirement(executionKey);
+      const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
-      const session = chatGptTurnSessions.getOrCreate(
+      const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
         executionKey,
+        ownerKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
         traceId,
       );
+      const roundKey = chatGptTurnRoundKey(parsed);
+      const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
+        // Journal the complete synchronous event batch before touching the HTTP observer. If the
+        // observer disconnects midway through emission, an exact reconnect can replay the entire
+        // canonical batch instead of losing the already-drained tail.
+        session.appendRoundEvents(roundKey, events);
+        for (const event of events) emit(event);
+      };
+      const emitRoundBatch = (
+        produce: (buffer: (event: AdapterEvent) => void) => void,
+      ): void => {
+        const events: AdapterEvent[] = [];
+        produce(event => events.push(event));
+        emitRoundEvents(events);
+      };
+      const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
         emit({ type: "heartbeat" });
         await session.runExclusive(async () => {
+          const replay = session.roundEvents(roundKey);
+          replayEvents(replay, emit);
+          if (session.roundCompleted(roundKey)) {
+            const failure = session.roundFailure(roundKey);
+            if (failure) throw failure;
+            return;
+          }
+          if (session.roundHasTerminalEvent(roundKey)) {
+            session.completeRound(roundKey);
+            return;
+          }
           const settled = session.settledOutcome();
           if (settled) {
             if (settled.type === "error") throw settled.error;
-            let reasoning = session.reasoningForFinalReplay();
-            const replay = session.eventsForFinalReplay();
-            if (replay.length > 0) {
-              replayEvents(replay, emit);
-            } else {
-              const events: AdapterEvent[] = [];
-              const emitCaptured = (event: AdapterEvent) => {
-                events.push(event);
-                emit(event);
-              };
-              if (!parsed._compactionRequest) emitReadOnlyContextWarning(parsed, turnCapabilities, emitCaptured);
-              const trace = session.runtime.trace.drain();
-              reasoning = trace.map(event => event.text);
-              emitTraceEvents(trace, emitCaptured);
-              emitTextDeltas(session.runtime.text.drain(), emitCaptured);
-              if (session.runtime.text.value() !== settled.answer) {
-                throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
-              }
-              session.setFinalReasoning(reasoning);
-              session.setFinalEvents(events);
+            const trace = session.runtime.trace.drain();
+            session.appendRoundReasoning(roundKey, trace.map(event => event.text));
+            if (replay.length === 0 && !parsed._compactionRequest) {
+              emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
             }
-            emitBrowserCompletion(settled, estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities), emit);
+            emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
+            emitRoundBatch(buffer => emitTextDeltas(session.runtime.text.drain(), buffer));
+            if (session.runtime.text.value() !== settled.answer) {
+              throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
+            }
+            const reasoning = session.roundReasoning(roundKey);
+            session.setFinalReasoning(reasoning);
+            session.setFinalEvents(session.roundEvents(roundKey));
+            emitRoundBatch(buffer => emitBrowserCompletion(
+              settled,
+              estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities),
+              buffer,
+            ));
+            session.completeRound(roundKey);
             chatGptWebTurnRetryPolicy.clear(retryKey);
             return;
           }
@@ -464,8 +695,13 @@ export function createChatGptWebAdapter(
               const results = currentToolResults(parsed, session);
               if (results.length === 0) {
                 const reasoning = session.reasoningForOutstandingReplay();
-                replayEvents(session.eventsForOutstandingReplay(), emit);
-                emitToolBatch(outstanding, estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
+                if (replay.length === 0) emitRoundEvents(session.eventsForOutstandingReplay());
+                emitRoundBatch(buffer => emitToolBatch(
+                  outstanding,
+                  estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning, toolRequests: outstanding }, turnCapabilities),
+                  buffer,
+                ));
+                session.completeRound(roundKey);
                 return;
               }
               if (results.length !== outstanding.length) {
@@ -473,6 +709,7 @@ export function createChatGptWebAdapter(
               }
               for (const message of results) {
                 await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
+                session.runtime.externalProgress.recordToolResult();
                 session.markResultDelivered(message.toolCallId);
               }
             }
@@ -482,25 +719,32 @@ export function createChatGptWebAdapter(
 
           const toolWaitAbort = new AbortController();
           try {
-            const roundReasoning: string[] = [];
-            const roundEvents: AdapterEvent[] = [];
-            const emitRound = (event: AdapterEvent) => {
-              roundEvents.push(event);
-              emit(event);
-            };
+            const roundReasoning = session.roundReasoning(roundKey);
             const emitNewTrace = (trace: ChatGptTraceEvent[]) => {
               roundReasoning.push(...trace.map(event => event.text));
-              emitTraceEvents(trace, emitRound);
+              session.appendRoundReasoning(roundKey, trace.map(event => event.text));
+              emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
             };
-            const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            if (!parsed._compactionRequest) emitReadOnlyContextWarning(parsed, turnCapabilities, emitRound);
+            const emitNewText = (deltas: string[]) => emitRoundBatch(buffer => emitTextDeltas(deltas, buffer));
+            if (replay.length === 0 && !parsed._compactionRequest) {
+              emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
+            }
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
+            const externalProgress = session.runtime.mode === "tools"
+              ? session.runtime.externalProgress
+              : undefined;
             const nextTools = turnToken
-              ? broker.nextToolBatch(turnToken, toolWaitAbort.signal).then(requests => ({ type: "tools" as const, requests }))
+              ? broker.nextToolBatch(turnToken, toolWaitAbort.signal).then(requests => {
+                if (!externalProgress) {
+                  throw new Error("ChatGPT broker returned tools for a read-only browser turn");
+                }
+                externalProgress.recordToolBatch(requests.length);
+                return { type: "tools" as const, requests };
+              })
               : undefined;
             const browserOutcome = session.browserOutcome.then(outcome => ({ type: "browser" as const, outcome }));
-            let nextTrace = session.runtime.trace.next(toolWaitAbort.signal).then(event => ({ type: "trace" as const, event }));
+            let nextTrace = session.runtime.trace.wait(toolWaitAbort.signal).then(() => ({ type: "trace" as const }));
             let nextText = session.runtime.text.wait(toolWaitAbort.signal).then(() => ({ type: "text" as const }));
             for (;;) {
               const next = await withAbort(
@@ -513,8 +757,8 @@ export function createChatGptWebAdapter(
                 incoming.abortSignal,
               );
               if (next.type === "trace") {
-                emitNewTrace([next.event]);
-                nextTrace = session.runtime.trace.next(toolWaitAbort.signal).then(event => ({ type: "trace" as const, event }));
+                emitNewTrace(session.runtime.trace.drain());
+                nextTrace = session.runtime.trace.wait(toolWaitAbort.signal).then(() => ({ type: "trace" as const }));
                 continue;
               }
               if (next.type === "text") {
@@ -525,18 +769,20 @@ export function createChatGptWebAdapter(
               emitNewTrace(session.runtime.trace.drain());
               emitNewText(session.runtime.text.drain());
               if (next.type === "browser") {
+                const completedOutcome = next.outcome;
                 session.setFinalReasoning(roundReasoning);
-                session.setFinalEvents(roundEvents);
+                session.setFinalEvents(session.roundEvents(roundKey));
                 if (turnToken) await broker.revoke(turnToken);
-                if (next.outcome.type === "error") throw next.outcome.error;
-                if (session.runtime.text.value() !== next.outcome.answer) {
+                if (completedOutcome.type === "error") throw completedOutcome.error;
+                if (session.runtime.text.value() !== completedOutcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }
-                emitBrowserCompletion(
-                  next.outcome,
-                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
-                  emit,
-                );
+                emitRoundBatch(buffer => emitBrowserCompletion(
+                  completedOutcome,
+                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities),
+                  buffer,
+                ));
+                session.completeRound(roundKey);
                 chatGptWebTurnRetryPolicy.clear(retryKey);
                 return;
               }
@@ -545,12 +791,13 @@ export function createChatGptWebAdapter(
               }
               if (next.requests.length === 0) throw new Error("ChatGPT tool bridge returned an empty batch");
               validateBatchTools(parsed, next.requests);
-              session.setOutstanding(next.requests, roundReasoning, roundEvents);
-              emitToolBatch(
+              session.setOutstanding(next.requests, roundReasoning, session.roundEvents(roundKey));
+              emitRoundBatch(buffer => emitToolBatch(
                 next.requests,
                 estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
-                emit,
-              );
+                buffer,
+              ));
+              session.completeRound(roundKey);
               return;
             }
           } finally {
@@ -558,10 +805,16 @@ export function createChatGptWebAdapter(
           }
         });
       } catch (error) {
-        const handledError = error instanceof ChatGptWebAdapterError && error.retryable
-          ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, error)
-          : error;
-        if (!(error instanceof ChatGptWebAdapterError && error.retryable)) {
+        if (incoming.abortSignal?.aborted && error instanceof DOMException && error.name === "AbortError") {
+          // The HTTP observer detached. Keep the exact browser execution and its round journal so
+          // the same canonical request can reconnect without another ChatGPT submission.
+          throw error;
+        }
+        const turnError = submittedTurnFailure(session, error);
+        const handledError = turnError instanceof ChatGptWebAdapterError && turnError.retryable
+          ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, turnError)
+          : turnError;
+        if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
           chatGptWebTurnRetryPolicy.clear(retryKey);
         }
         if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
@@ -577,7 +830,7 @@ export function createChatGptWebAdapter(
           void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
         }
         if (handledError instanceof ChatGptWebAdapterError) {
-          emit({
+          emitRoundEvent({
             type: "error",
             message: handledError.message,
             status: handledError.status,
@@ -585,10 +838,12 @@ export function createChatGptWebAdapter(
             code: handledError.code,
             retryable: handledError.retryable,
           });
+          session.completeRound(roundKey);
           return;
         }
+        session.failRound(roundKey, turnError);
         chatGptWebTurnRetryPolicy.clear(retryKey);
-        throw error;
+        throw turnError;
       } finally {
         clearInterval(heartbeat);
       }

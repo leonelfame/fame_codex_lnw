@@ -77,13 +77,15 @@ and development connectors installed without renaming, refreshing, or deleting e
 ## Browser lifecycle
 
 The desktop launcher owns one persistent Electron partition and up to five task-bound browser
-tabs. Each Codex task is leased an independent `WebContentsView` and surface ID; Playwright attaches
-to that exact surface through a launcher-owned loopback CDP endpoint. Model turns never launch a
-second browser or copy state between turn tabs. Each tab opens a fresh Temporary Chat, shares only
-the local login partition, and keeps its own document and lifecycle. Completed tabs remain
-inspectable until closed. Closing a running tab destroys its page and terminates that browser turn.
-A sixth concurrent turn fails explicitly; the cap avoids excessive parallel traffic that could
-trigger account abuse controls.
+tabs. Each task/model/effort/compaction epoch owns one exact `WebContentsView` lease; sequential
+native messages reuse that surface, while each message receives a fresh turn-bound MCP token and
+keeps all of its MCP tool rounds inside one ChatGPT response. Compaction asks the same retained Web
+agent for a one-shot structured checkpoint, waits for the response and physical helper cleanup,
+then closes the old surface. The next epoch gets a new Temporary Chat. Model messages never copy
+state between tabs. Tabs share only the local login
+partition and keep independent documents and lifecycles. Closing a running tab destroys its page
+and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
+parallel traffic that could trigger account abuse controls.
 
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being
@@ -106,11 +108,14 @@ Top-level `model_context_window` raises only the proxied native rows' advertised
 Codex to apply its own configured context override without clamping. Routed ChatGPT Web models
 retain their measured adapter-owned limits.
 
-Routed compaction v1/v2 runs as a dedicated read-only browser summarization turn with no broker or
-local tools, then returns the native replacement-history shape expected by Codex. A prompt-level
-checkpoint marker is translated into a visible Codex trace item; every later tool action in the
-same turn continues to present the current turn capability. Visible ChatGPT status rows become
-reasoning summaries, while stable prose between rows becomes native Codex commentary.
+In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
+capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool
+environment. Missing source state or an invalid handoff fails explicitly. Browser-only mode keeps a
+dedicated read-only browser summarization turn, then returns the native replacement-history shape
+expected by Codex. A prompt-level checkpoint marker is translated into a visible Codex trace item;
+every later tool action in the same turn continues to present the current turn capability. Visible
+ChatGPT status rows become reasoning summaries, while stable prose between rows becomes native
+Codex commentary.
 
 ## Installation and service lifecycle
 

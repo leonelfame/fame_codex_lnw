@@ -34,8 +34,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/prepare-windows-baseline-bun.ps1 -Version 1.4.0 -GitHubEnv $env:GITHUB_ENV
+      - name: Prepare compatible Linux libnotify
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config libglib2.0-dev libgdk-pixbuf-2.0-dev binutils
+          ./scripts/prepare-linux-libnotify.sh
       - run: bun run verify
       - run: bun run app:package
+      - name: Verify Linux AppImage ABI on current Arch
+        if: runner.os == 'Linux'
+        run: |
+          artifact="$(find launcher/artifacts -maxdepth 1 -name '*-linux-x64.AppImage' -print -quit)"
+          test -n "$artifact"
+          docker run --rm -v "$PWD:/work:ro" -e APPIMAGE_PATH="/work/$artifact" archlinux:base \
+            sh -lc 'pacman -Sy --noconfirm binutils file glibc >/dev/null && /work/launcher/scripts/smoke-linux-appimage-symbols.sh "$APPIMAGE_PATH"'
       - name: Ensure virtual display is available
         if: runner.os == 'Linux'
         run: command -v xvfb-run || (sudo apt-get update && sudo apt-get install -y xvfb)
@@ -89,15 +102,15 @@ jobs:
         run: |
           expected="v$(jq -r .version package.json)"
           test "$GITHUB_REF_NAME" = "$expected"
-      - name: Add licenses, installers, and demo
+      - name: Add licenses and installers
         run: |
           cp LICENSE release-assets/LICENSE
           cp LICENSES/Bun-1.4.0.md release-assets/Bun-1.4.0.md
+          cp LICENSES/libnotify-0.8.7-LGPL-2.1.md release-assets/libnotify-0.8.7-LGPL-2.1.md
           cp dist/THIRD_PARTY_NOTICES.txt release-assets/THIRD_PARTY_NOTICES.txt
           cp scripts/install.sh release-assets/install.sh
           cp scripts/install-launcher.sh release-assets/install-launcher.sh
           cp scripts/install-launcher.ps1 release-assets/install-launcher.ps1
-          cp assets/demo.gif "release-assets/codex-web-gpt-${GITHUB_REF_NAME#v}-demo.gif"
       - name: Flatten release assets
         run: |
           cd release-assets

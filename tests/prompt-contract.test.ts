@@ -49,7 +49,12 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(tokenMatches).toHaveLength(1);
   expect(compiled.text).toContain("[retired turn handle]");
   expect(transportOnly).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
-  expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects, and keep calling tools until the requested work is complete and verified.");
+  expect(transportOnly).toContain("Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
+  expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects.");
+  expect(transportOnly).toContain("A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
+  expect(transportOnly).toContain("After a deterministic tool failure, update the working hypothesis from that result");
+  expect(transportOnly).toContain("do not repeat the same call unless its inputs or observable state changed.");
+  expect(transportOnly).toContain("Continue using the available tools until the requested work is complete and verified.");
   expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex_tool_call/);

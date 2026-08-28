@@ -84,32 +84,29 @@ function installLinuxFile(source, target) {
 
 function updateLinux(job) {
   requireFile(job.source, "Linux AppImage");
+  requireFile(job.runnerSource, "Linux AppImage runner");
   const wrapper = job.wrapper && path.isAbsolute(job.wrapper) ? job.wrapper : null;
-  let launchTarget = job.target;
-  if (wrapper) {
-    const versionsRoot = path.dirname(path.dirname(job.target));
-    const nextTarget = path.join(versionsRoot, job.version, path.basename(job.target));
-    installLinuxFile(job.source, nextTarget);
-    const wrapperNext = `${wrapper}.updating-${process.pid}`;
-    fs.writeFileSync(wrapperNext, [
-      "#!/bin/sh",
-      "set -eu",
-      'export APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"',
-      `export CODEX_WEB_GPT_LAUNCHER_EXECUTABLE=${shellQuote(wrapper)}`,
-      `export CODEX_WEB_GPT_APPIMAGE=${shellQuote(nextTarget)}`,
-      `exec ${shellQuote(nextTarget)} "$@"`,
-      "",
-    ].join("\n"), { mode: 0o755 });
-    fs.renameSync(wrapperNext, wrapper);
-    if (path.dirname(job.target) !== path.dirname(nextTarget)
-      && path.dirname(path.dirname(job.target)) === versionsRoot) {
-      fs.rmSync(path.dirname(job.target), { recursive: true, force: true });
-    }
-    launchTarget = wrapper;
-  } else {
-    installLinuxFile(job.source, job.target);
+  if (!wrapper) throw new Error("Linux update job requires an absolute stable launcher wrapper");
+  const versionsRoot = path.dirname(path.dirname(job.target));
+  const nextTarget = path.join(versionsRoot, job.version, path.basename(job.target));
+  const runner = path.join(versionsRoot, "run-appimage");
+  installLinuxFile(job.source, nextTarget);
+  installLinuxFile(job.runnerSource, runner);
+  const wrapperNext = `${wrapper}.updating-${process.pid}`;
+  fs.writeFileSync(wrapperNext, [
+    "#!/bin/sh",
+    "set -eu",
+    `export CODEX_WEB_GPT_LAUNCHER_EXECUTABLE=${shellQuote(wrapper)}`,
+    `export CODEX_WEB_GPT_APPIMAGE=${shellQuote(nextTarget)}`,
+    `exec ${shellQuote(runner)} ${shellQuote(nextTarget)} "$@"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  fs.renameSync(wrapperNext, wrapper);
+  if (path.dirname(job.target) !== path.dirname(nextTarget)
+    && path.dirname(path.dirname(job.target)) === versionsRoot) {
+    fs.rmSync(path.dirname(job.target), { recursive: true, force: true });
   }
-  launch(launchTarget);
+  launch(wrapper);
 }
 
 function relaunchExisting(job) {

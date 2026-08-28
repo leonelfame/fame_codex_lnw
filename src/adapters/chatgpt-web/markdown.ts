@@ -10,6 +10,7 @@ const turndown = new TurndownService({
   strongDelimiter: "**",
   linkStyle: "inlined",
 });
+
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
 turndown.addRule("removeImages", {

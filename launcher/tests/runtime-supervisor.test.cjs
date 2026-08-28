@@ -85,8 +85,9 @@ test("Linux autostart launches the durable AppImage invisibly", () => {
   );
   assert.match(
     entry,
-    /^Exec=\/usr\/bin\/env APPIMAGE_EXTRACT_AND_RUN=1 CODEX_WEB_GPT_APPIMAGE="\/home\/example\/Applications\/Codex Web GPT\.AppImage" "\/home\/example\/Applications\/Codex Web GPT\.AppImage" --hidden$/m,
+    /^Exec="\/home\/example\/Applications\/Codex Web GPT\.AppImage" --hidden$/m,
   );
+  assert.doesNotMatch(entry, /APPIMAGE_EXTRACT_AND_RUN/);
   assert.match(entry, /^Terminal=false$/m);
   assert.match(entry, /^X-GNOME-Autostart-enabled=true$/m);
 });
@@ -96,7 +97,6 @@ test("Linux autostart escapes desktop-entry field codes in executable paths", ()
     { getPath: () => "/tmp/transient-electron" },
     "/home/example/100% ready/Codex Web GPT.AppImage",
   );
-  assert.match(entry, /CODEX_WEB_GPT_APPIMAGE="\/home\/example\/100%% ready\/Codex Web GPT\.AppImage"/);
   assert.match(entry, /"\/home\/example\/100%% ready\/Codex Web GPT\.AppImage" --hidden/);
 });
 
@@ -105,7 +105,6 @@ test("Linux autostart follows the stable installer wrapper across app updates", 
   process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE = "/home/example/.local/bin/codex-web-gpt";
   try {
     const entry = linuxDesktopEntry({ getPath: () => "/tmp/versioned-appimage-mount" });
-    assert.match(entry, /CODEX_WEB_GPT_APPIMAGE="\/home\/example\/\.local\/bin\/codex-web-gpt"/);
     assert.match(entry, /"\/home\/example\/\.local\/bin\/codex-web-gpt" --hidden/);
   } finally {
     if (previous === undefined) delete process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
@@ -151,11 +150,12 @@ test("launcher runtime ownership cannot cross production and DEV profiles", () =
   );
 });
 
-test("DEV runtime supervision starts only the isolated MCP tunnel", async () => {
+test("DEV runtime supervision ignores launcher version mismatch and starts only the isolated MCP tunnel", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-tunnel-supervisor-"));
   const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
   fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
   const config = launcherConfig(descriptorPath, {
+    releaseVersion: "9.9.9",
     purpose: "dev-harness",
     mode: "full",
     appName: "Codex Native2 DEV",

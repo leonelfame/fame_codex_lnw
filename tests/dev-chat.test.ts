@@ -13,8 +13,12 @@ import {
   type BrokerToolResult,
 } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig, providerConfig } from "../src/config";
-import { defaultDevChatModel, DevChatDriver } from "../src/dev-chat/driver";
-import { createDevContextFiller, DevChatStore } from "../src/dev-chat/session";
+import { defaultDevChatModel, DEV_CHAT_TOOLS, DevChatDriver } from "../src/dev-chat/driver";
+import {
+  createDevCoherentContextPayload,
+  createDevContextFiller,
+  DevChatStore,
+} from "../src/dev-chat/session";
 import { startDevChatTransport } from "../src/dev-chat/transport";
 import type { CodexProviderConfig } from "../src/types";
 
@@ -86,6 +90,25 @@ test("named DEV state and deterministic context filler persist independently", (
   expect(store.list()).toMatchObject([{ name: "compaction-lab", inputItems: 1 }]);
   store.reset(opened.state);
   expect(store.load("compaction-lab")).toMatchObject({ input: [], turns: 0, syntheticFills: 0 });
+});
+
+test("coherent DEV MCP payloads are bounded, deterministic, and distinct", () => {
+  const first = createDevCoherentContextPayload(1, 3_000);
+  const repeated = createDevCoherentContextPayload(1, 3_000);
+  const second = createDevCoherentContextPayload(2, 3_000);
+  expect(first).toEqual(repeated);
+  expect(first.tokens).toBeGreaterThanOrEqual(3_000);
+  expect(first.tokens).toBeLessThan(3_500);
+  expect(first.text).toContain("Segment 1/3: Architecture and data ownership");
+  expect(first.text).toContain("No action is requested by this record");
+  expect(second.text).toContain("Segment 2/3: Operations and incident chronology");
+  expect(second.text).not.toBe(first.text);
+  expect(() => createDevCoherentContextPayload(0, 3_000)).toThrow("segment must be 1, 2, or 3");
+  expect(() => createDevCoherentContextPayload(1, 999)).toThrow("1000 to 95000 tokens");
+  expect(DEV_CHAT_TOOLS).toContainEqual(expect.objectContaining({
+    type: "function",
+    name: "mcp__dev_simulator__large_context_payload",
+  }));
 });
 
 test("new DEV chats default to the cheapest account-supported browser model", () => {

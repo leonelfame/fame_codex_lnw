@@ -8,6 +8,7 @@ import {
   extractChatGptTurnUserRevision,
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
 export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
@@ -20,7 +21,7 @@ export interface ChatGptTraceEvent {
 }
 
 interface TraceWaiter {
-  resolve: (event: ChatGptTraceEvent) => void;
+  resolve: () => void;
   reject: (error: Error) => void;
   signal?: AbortSignal;
   onAbort?: () => void;
@@ -34,25 +35,22 @@ export class ChatGptTraceFeed {
     const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
     const normalizedEvent = { ...event, text: normalized };
+    this.queued.push(normalizedEvent);
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;
-    if (!waiter) {
-      this.queued.push(normalizedEvent);
-      return;
-    }
+    if (!waiter) return;
     this.waiters.delete(waiter);
     if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-    waiter.resolve(normalizedEvent);
+    waiter.resolve();
   }
 
   drain(): ChatGptTraceEvent[] {
     return this.queued.splice(0);
   }
 
-  next(signal?: AbortSignal): Promise<ChatGptTraceEvent> {
-    const queued = this.queued.shift();
-    if (queued !== undefined) return Promise.resolve(queued);
+  wait(signal?: AbortSignal): Promise<void> {
+    if (this.queued.length > 0) return Promise.resolve();
     if (signal?.aborted) return Promise.reject(new DOMException("trace wait aborted", "AbortError"));
-    return new Promise<ChatGptTraceEvent>((resolveWait, rejectWait) => {
+    return new Promise<void>((resolveWait, rejectWait) => {
       const waiter: TraceWaiter = { resolve: resolveWait, reject: rejectWait, ...(signal ? { signal } : {}) };
       if (signal) {
         waiter.onAbort = () => {
@@ -117,13 +115,25 @@ export class ChatGptTextFeed {
 
 interface ChatGptTurnRuntimeBase {
   browser: Promise<string>;
+  /** Physical helper/Playwright settlement, including the launcher end/release acknowledgement. */
+  physicalSettlement: Promise<void>;
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
+  usageInput?: CodexParsedRequest;
+  conversationKey?: string;
+  releaseRetainedConversation?: () => Promise<void>;
+  /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
+  retireCapability?: () => void | Promise<void>;
+  submission?: { phase: "prepared" | "send_activated" | "accepted" };
   cancel: (reason?: Error) => void;
 }
 
 export type ChatGptTurnRuntime =
-  | (ChatGptTurnRuntimeBase & { mode: "tools"; token: Promise<string> })
+  | (ChatGptTurnRuntimeBase & {
+    mode: "tools";
+    token: Promise<string>;
+    externalProgress: ChatGptExternalTurnProgress;
+  })
   | (ChatGptTurnRuntimeBase & { mode: "read-only" });
 
 function executionKey(parsed: CodexParsedRequest, payload: unknown): string {
@@ -159,6 +169,23 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   });
 }
 
+/** Exact canonical Responses request identity inside one long-lived browser execution. */
+export function chatGptTurnRoundKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for round replay");
+  const body = parsed._rawBody;
+  if (!body || typeof body !== "object" || Array.isArray(body)
+    || !Array.isArray((body as { input?: unknown }).input)) {
+    throw new Error("ChatGPT web requires the complete native Codex input for round replay");
+  }
+  return executionKey(parsed, {
+    threadId: identity.threadId,
+    turnId: identity.turnId,
+    purpose: parsed._compactionRequest ? "compaction" : "response",
+    input: (body as { input: unknown[] }).input,
+  });
+}
+
 /** Stable identity for limiting automatic retries of one native Codex turn. */
 export function chatGptTurnRetryKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
@@ -168,6 +195,20 @@ export function chatGptTurnRetryKey(parsed: CodexParsedRequest): string {
     turnId: identity.turnId,
     purpose: parsed._compactionRequest ? "compaction" : "response",
   })).digest("hex");
+}
+
+/** One native Codex thread may own at most one live ChatGPT browser surface. */
+export function chatGptThreadOwnershipKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  const owner = identity.threadId
+    ? { kind: "thread", id: identity.threadId }
+    : identity.promptCacheKey
+      ? { kind: "prompt_cache", id: identity.promptCacheKey }
+      : identity.turnId
+        ? { kind: "turn", id: identity.turnId }
+        : undefined;
+  if (!owner) throw new Error("ChatGPT web requires native Codex turn identity metadata for browser ownership");
+  return createHash("sha256").update(JSON.stringify(owner)).digest("hex");
 }
 
 /** Locate the browser response that a native mid-turn compaction replaces. */
@@ -187,6 +228,7 @@ export class ChatGptTurnSession {
   readonly createdAt = Date.now();
   private lastTouchedAt = this.createdAt;
   readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
+  readonly physicalSettlement: Promise<void>;
   private readonly outstandingById = new Map<string, BrokerToolRequest>();
   private readonly deliveredResultIds = new Set<string>();
   private outstandingReasoning: string[] = [];
@@ -194,9 +236,28 @@ export class ChatGptTurnSession {
   private outstandingPrelude: AdapterEvent[] = [];
   private finalPrelude: AdapterEvent[] = [];
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
+  private settledPhysical = false;
   private tail: Promise<void> = Promise.resolve();
+  private capabilityRetirementScheduled = false;
+  private readonly rounds = new Map<string, {
+    events: AdapterEvent[];
+    reasoning: string[];
+    completed: boolean;
+    failure?: Error;
+  }>();
 
-  constructor(readonly runtime: ChatGptTurnRuntime, readonly traceId?: string) {
+  constructor(
+    readonly runtime: ChatGptTurnRuntime,
+    readonly traceId?: string,
+    readonly ownerKey?: string,
+  ) {
+    this.physicalSettlement = runtime.physicalSettlement.then(
+      () => { this.settledPhysical = true; },
+      error => {
+        this.settledPhysical = true;
+        throw error;
+      },
+    );
     this.browserOutcome = runtime.browser
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
@@ -210,6 +271,7 @@ export class ChatGptTurnSession {
     this.touch();
     const run = this.tail.then(task);
     this.tail = run.then(() => undefined, () => undefined);
+    this.scheduleCapabilityRetirement();
     return run;
   }
 
@@ -229,8 +291,17 @@ export class ChatGptTurnSession {
     return this.settledBrowserOutcome;
   }
 
+  conversationKey(): string | undefined {
+    return this.runtime.conversationKey;
+  }
+
   isActive(): boolean {
     return this.settledBrowserOutcome === undefined;
+  }
+
+  /** The client-visible browser result can settle before launcher/helper cleanup does. */
+  isPhysicallySettled(): boolean {
+    return this.settledPhysical;
   }
 
   setOutstanding(requests: BrokerToolRequest[], reasoning: string[] = [], prelude: AdapterEvent[] = []): void {
@@ -282,21 +353,109 @@ export class ChatGptTurnSession {
     return [...this.finalPrelude];
   }
 
+  roundEvents(key: string): AdapterEvent[] {
+    return [...this.round(key).events];
+  }
+
+  roundReasoning(key: string): string[] {
+    return [...this.round(key).reasoning];
+  }
+
+  appendRoundEvent(key: string, event: AdapterEvent): void {
+    this.appendRoundEvents(key, [event]);
+  }
+
+  appendRoundEvents(key: string, events: readonly AdapterEvent[]): void {
+    if (events.length === 0) return;
+    const round = this.round(key);
+    if (round.completed) throw new Error("cannot append to a completed ChatGPT native round");
+    round.events.push(...events);
+  }
+
+  appendRoundReasoning(key: string, values: readonly string[]): void {
+    if (values.length === 0) return;
+    const round = this.round(key);
+    if (round.completed) throw new Error("cannot append reasoning to a completed ChatGPT native round");
+    round.reasoning.push(...values);
+  }
+
+  completeRound(key: string): void {
+    this.round(key).completed = true;
+  }
+
+  failRound(key: string, error: Error): void {
+    const round = this.round(key);
+    round.failure = error;
+    round.completed = true;
+  }
+
+  roundCompleted(key: string): boolean {
+    return this.rounds.get(key)?.completed === true;
+  }
+
+  roundFailure(key: string): Error | undefined {
+    return this.rounds.get(key)?.failure;
+  }
+
+  roundHasTerminalEvent(key: string): boolean {
+    return this.rounds.get(key)?.events.some(event => event.type === "done" || event.type === "error") === true;
+  }
+
   cancel(reason?: Error): void {
     this.runtime.cancel(reason);
+  }
+
+  private scheduleCapabilityRetirement(): void {
+    if (this.capabilityRetirementScheduled || !this.runtime.retireCapability) return;
+    this.capabilityRetirementScheduled = true;
+    // Register only after the first observer entered `runExclusive`. This ensures an immediately
+    // completed mocked/real browser cannot revoke its token ahead of the browser-outcome branch.
+    // At physical settlement, read the current tail so every tool-result/reconnect observer that
+    // was already admitted finishes before the capability is retired.
+    void this.physicalSettlement
+      .then(() => this.tail)
+      .then(() => this.runtime.retireCapability!())
+      .catch(error => {
+        console.error(
+          `[chatgpt-web] failed to retire settled turn capability: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  }
+
+  private round(key: string) {
+    let round = this.rounds.get(key);
+    if (round) return round;
+    round = { events: [], reasoning: [], completed: false };
+    this.rounds.set(key, round);
+    while (this.rounds.size > 512) {
+      const oldestCompleted = [...this.rounds].find(([, candidate]) => candidate.completed);
+      if (!oldestCompleted) {
+        throw new Error("ChatGPT native round journal is full (512 unfinished rounds)");
+      }
+      this.rounds.delete(oldestCompleted[0]);
+    }
+    return round;
   }
 }
 
 export class ChatGptTurnSessions {
   private readonly entries = new Map<string, ChatGptTurnSession>();
+  private readonly conversationHeads = new Map<string, ChatGptTurnSession>();
   private readonly retirements = new Map<string, Promise<void>>();
+  private readonly ownerRetirements = new Map<string, Promise<void>>();
+  private readonly conversationRetirements = new Map<string, Promise<void>>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
   ) {}
 
-  getOrCreate(key: string, start: () => ChatGptTurnRuntime, traceId?: string): ChatGptTurnSession {
+  getOrCreate(
+    key: string,
+    start: () => ChatGptTurnRuntime,
+    traceId?: string,
+    ownerKey?: string,
+  ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
     if (existing) {
@@ -310,9 +469,87 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start(), traceId);
+    const session = new ChatGptTurnSession(start(), traceId, ownerKey);
     this.entries.set(key, session);
+    const conversationKey = session.conversationKey();
+    if (conversationKey) this.conversationHeads.set(conversationKey, session);
     return session;
+  }
+
+  async getOrCreateAfterOwnerRetirement(
+    key: string,
+    ownerKey: string,
+    start: () => ChatGptTurnRuntime,
+    traceId?: string,
+  ): Promise<ChatGptTurnSession> {
+    for (;;) {
+      const existing = this.entries.get(key);
+      if (existing) {
+        existing.touch();
+        return existing;
+      }
+      const pending = this.retirements.get(key) ?? this.ownerRetirements.get(ownerKey);
+      if (pending) {
+        await pending;
+        continue;
+      }
+      const activeOwner = [...this.entries].find(([ownedKey, session]) => (
+        ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
+      ));
+      if (activeOwner) {
+        const [, ownedSession] = activeOwner;
+        // A different native message for the same thread is sequential work, not permission to
+        // kill the response already using that retained conversation. Wait for its complete
+        // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
+        // only paths that preempt an active owner.
+        await ownedSession.physicalSettlement;
+        continue;
+      }
+      return this.getOrCreate(key, start, traceId, ownerKey);
+    }
+  }
+
+  find(key: string): ChatGptTurnSession | undefined {
+    const session = this.entries.get(key);
+    session?.touch();
+    return session;
+  }
+
+  findConversationHead(conversationKey: string): ChatGptTurnSession | undefined {
+    const session = this.conversationHeads.get(conversationKey);
+    session?.touch();
+    return session;
+  }
+
+  async retireConversationAndWait(conversationKey: string): Promise<number> {
+    const pending = this.conversationRetirements.get(conversationKey);
+    if (pending) {
+      await pending;
+      return 0;
+    }
+    const matches = [...this.entries].filter(([, session]) => (
+      session.conversationKey() === conversationKey
+    ));
+    if (matches.length === 0) return 0;
+    this.conversationHeads.delete(conversationKey);
+    for (const [key, session] of matches) {
+      if (this.entries.get(key) === session) this.entries.delete(key);
+      if (session.isActive()) session.cancel();
+    }
+    const release = matches.findLast(([, session]) => (
+      session.runtime.releaseRetainedConversation !== undefined
+    ))?.[1].runtime.releaseRetainedConversation;
+    const retirement = Promise.all(matches.map(([, session]) => session.physicalSettlement))
+      .then(async () => { await release?.(); });
+    this.conversationRetirements.set(conversationKey, retirement);
+    try {
+      await retirement;
+    } finally {
+      if (this.conversationRetirements.get(conversationKey) === retirement) {
+        this.conversationRetirements.delete(conversationKey);
+      }
+    }
+    return matches.length;
   }
 
   async waitForRetirement(key: string): Promise<void> {
@@ -329,28 +566,24 @@ export class ChatGptTurnSessions {
     if (!session) return false;
 
     this.entries.delete(key);
-    session.cancel();
-    const retirement = session.browserOutcome.then(() => undefined);
-    this.retirements.set(key, retirement);
-    try {
-      await retirement;
-    } finally {
-      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
-    }
+    this.forgetConversationHead(session);
+    await this.beginRetirement(key, session);
     return true;
   }
 
   retire(key: string, session: ChatGptTurnSession): boolean {
     if (this.entries.get(key) !== session) return false;
-    session.cancel();
     this.entries.delete(key);
+    this.forgetConversationHead(session);
+    this.beginRetirement(key, session);
     return true;
   }
 
   clear(): number {
     const cancelled = this.entries.size;
-    for (const session of this.entries.values()) session.cancel();
+    for (const [key, session] of this.entries) this.beginRetirement(key, session);
     this.entries.clear();
+    this.conversationHeads.clear();
     return cancelled;
   }
 
@@ -358,7 +591,7 @@ export class ChatGptTurnSessions {
     const sessions = [...this.entries.values()]
       .filter(session => session.traceId === traceId && session.isActive());
     for (const session of sessions) session.cancel(reason);
-    await Promise.all(sessions.map(session => session.browserOutcome.then(() => undefined)));
+    await Promise.all(sessions.map(session => session.physicalSettlement));
     return sessions.length;
   }
 
@@ -385,7 +618,39 @@ export class ChatGptTurnSessions {
       if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
       session.cancel();
       this.entries.delete(key);
+      this.forgetConversationHead(session);
     }
+  }
+
+  private forgetConversationHead(session: ChatGptTurnSession): void {
+    const conversationKey = session.conversationKey();
+    if (conversationKey && this.conversationHeads.get(conversationKey) === session) {
+      this.conversationHeads.delete(conversationKey);
+    }
+  }
+
+  private beginRetirement(key: string, session: ChatGptTurnSession): Promise<void> {
+    const existing = this.retirements.get(key);
+    if (existing) return existing;
+    session.cancel();
+    const retirement = session.physicalSettlement;
+    this.retirements.set(key, retirement);
+    void retirement.then(() => {
+      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
+    });
+    if (session.ownerKey) {
+      const previous = this.ownerRetirements.get(session.ownerKey);
+      const ownerRetirement = previous
+        ? Promise.all([previous, retirement]).then(() => undefined)
+        : retirement;
+      this.ownerRetirements.set(session.ownerKey, ownerRetirement);
+      void ownerRetirement.then(() => {
+        if (this.ownerRetirements.get(session.ownerKey!) === ownerRetirement) {
+          this.ownerRetirements.delete(session.ownerKey!);
+        }
+      });
+    }
+    return retirement;
   }
 }
 

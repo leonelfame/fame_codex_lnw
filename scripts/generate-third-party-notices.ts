@@ -78,6 +78,10 @@ const sections = [...visited.values()]
   });
 
 const bunLicense = readFileSync(join(root, "LICENSES", "Bun-1.4.0.md"), "utf8").trim();
+const libnotifyLicense = readFileSync(
+  join(root, "LICENSES", "libnotify-0.8.7-LGPL-2.1.md"),
+  "utf8",
+).trim();
 const output = [
   "codex-chatgpt-web third-party notices",
   "",
@@ -88,6 +92,11 @@ const output = [
   "Bun 1.4.0 runtime",
   "=".repeat(80),
   bunLicense,
+  "",
+  "=".repeat(80),
+  "libnotify 0.8.7 (LGPL-2.1-or-later; Linux launcher only)",
+  "=".repeat(80),
+  libnotifyLicense,
   "",
   ...sections,
   "",

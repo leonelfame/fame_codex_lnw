@@ -30,7 +30,7 @@ Type=Application
 Version=1.0
 Name=Codex Web GPT
 Comment=Start the Codex Web GPT launcher in the background
-Exec=/usr/bin/env APPIMAGE_EXTRACT_AND_RUN=1 CODEX_WEB_GPT_APPIMAGE=${desktopExecArgument(executable)} ${desktopExecArgument(executable)} --hidden
+Exec=${desktopExecArgument(executable)} --hidden
 Terminal=false
 X-GNOME-Autostart-enabled=true
 `;

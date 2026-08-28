@@ -18,6 +18,7 @@ import { parseRequest } from "../responses/parser";
 import { compactRequest, responseRequest, routeChatGptWebRequest } from "../server";
 import { namespacedToolName, type AdapterEvent, type CodexProviderConfig } from "../types";
 import {
+  createDevCoherentContextPayload,
   createDevContextFiller,
   type DevChatModel,
   type DevChatState,
@@ -100,12 +101,29 @@ const simulatedFunction = (name: string, description: string) => ({
   description: `DEV simulator: ${description}. Arguments are recorded and no side effect occurs.`,
 });
 
+const DEV_LARGE_CONTEXT_TOOL = "mcp__dev_simulator__large_context_payload";
+const largeContextPayloadTool = {
+  type: "function",
+  name: DEV_LARGE_CONTEXT_TOOL,
+  description: "Return a deterministic, coherent, inert project dossier segment for context-retention and compaction tests.",
+  parameters: {
+    type: "object",
+    properties: {
+      segment: { type: "integer", enum: [1, 2, 3] },
+      target_tokens: { type: "integer", minimum: 1_000, maximum: 95_000 },
+    },
+    required: ["segment", "target_tokens"],
+    additionalProperties: false,
+  },
+} as const;
+
 export const DEV_CHAT_TOOLS: readonly Record<string, unknown>[] = [
   simulatedFunction("exec_command", "native command execution"),
   simulatedFunction("write_stdin", "native command-session continuation"),
   { type: "custom", name: "apply_patch", description: "DEV simulator: records patch text and changes no file." },
   simulatedFunction("view_image", "native image inspection"),
   simulatedFunction("request_user_input", "native user input"),
+  largeContextPayloadTool,
   {
     type: "namespace", name: "mcp__dev_simulator",
     description: "Synthetic deferred MCP tools for inventory and generic dispatch tests.",
@@ -234,6 +252,31 @@ function toolCalls(output: unknown[]): DevToolCall[] {
 }
 
 function simulatedReceipt(state: DevChatState, turnId: string, call: DevToolCall): Record<string, unknown> {
+  if (call.name === DEV_LARGE_CONTEXT_TOOL) {
+    if (!call.input || typeof call.input !== "object" || Array.isArray(call.input)) {
+      throw new Error("DEV large context payload requires a JSON object");
+    }
+    const input = call.input as Record<string, unknown>;
+    if (Object.keys(input).some(key => key !== "segment" && key !== "target_tokens")) {
+      throw new Error("DEV large context payload received an unexpected argument");
+    }
+    const payload = createDevCoherentContextPayload(
+      Number(input.segment),
+      Number(input.target_tokens),
+    );
+    return {
+      type: "codex_dev_coherent_context_payload",
+      simulated: true,
+      side_effects_performed: false,
+      chat: state.name,
+      turn_id: turnId,
+      call_id: call.callId,
+      tool: { name: call.name, kind: call.kind },
+      segment: input.segment,
+      measured_tokens: payload.tokens,
+      output: payload.text,
+    };
+  }
   return {
     type: "codex_dev_simulated_tool_result",
     simulated: true,

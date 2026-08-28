@@ -16,8 +16,20 @@ function redactText(value) {
     : redacted;
 }
 
+function redactHttpUrls(value) {
+  return value.replace(/https?:\/\/[^\s"'`<>]+/gi, (candidate) => {
+    const trailing = candidate.match(/[),.;:!?]+$/)?.[0] || "";
+    const url = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    try {
+      return `${new URL(url).origin}${trailing}`;
+    } catch {
+      return "[redacted-url]";
+    }
+  });
+}
+
 function redactExportText(value) {
-  return redactText(value)
+  return redactHttpUrls(redactText(value))
     .replace(/\b[A-Za-z]:\\+Users\\+[^\\/\r\n"'`<>|]+/gi, "[user-home]")
     .replace(/\/(?:Users|home)\/[^/\r\n"'`<>]+/g, "[user-home]")
     .replace(/((?:visible rows|sidebar (?:rows|titles)|conversation titles):)\s*[^\r\n]*/gi, "$1 [redacted]");

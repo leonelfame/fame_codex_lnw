@@ -88,6 +88,9 @@ try {
   } else if (process.platform === "linux") {
     executable = artifact(/-linux-x64\.AppImage$/, "Linux AppImage");
     fs.chmodSync(executable, 0o755);
+    run(path.join(launcherRoot, "scripts", "smoke-linux-appimage-symbols.sh"), [executable], {
+      timeout: 120_000,
+    });
     command = "xvfb-run";
     args = ["-a", executable, "--launcher-smoke-test"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";

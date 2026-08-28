@@ -35,8 +35,8 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 ```
 
 Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
-routes only the selected model turn through a fresh ChatGPT Temporary Chat; in full mode, MCP
-connects ChatGPT back to the tools of that same Codex task.
+routes only the selected model task through a task-bound ChatGPT Temporary Chat; in full mode, MCP
+connects ChatGPT back to the tools of that same Codex task until its next compaction boundary.
 
 > [!TIP]
 > I also built **[ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice)**, a local
@@ -55,10 +55,14 @@ connects ChatGPT back to the tools of that same Codex task.
   another host model. The original model picker, task lifecycle, streaming, tracing, and tool UI
   remain intact.
 - **Local-first task sessions.** Codex remains the source of truth for task history on your
-  computer. Every browser turn starts in a fresh ChatGPT Temporary Chat and receives the current
-  compiled context. Measured browser ceilings trigger compaction, while Luna carries completed
-  state through an adaptive rolling checkpoint. Browser chats are never reused across tasks or
-  added to normal ChatGPT history.
+  computer. Sequential native messages in one task reuse the same ChatGPT Temporary Chat until
+  compaction; each message gets a new turn-bound MCP capability, while all of that message's tool
+  rounds stay inside one Web response. At compaction, that exact agent submits the checkpoint
+  through a one-shot MCP control capability before its retained surface is closed and the next
+  compaction epoch starts a new Temporary Chat. Measured
+  browser ceilings trigger compaction, while Luna carries completed state through an adaptive
+  rolling checkpoint. Browser chats are never reused across tasks or added to normal ChatGPT
+  history.
 - **The full Codex harness over MCP.** In Full mode, every effort available to the signed-in account—
   Luna, Instant, Medium, High, Extra High, and Pro—can use the active Codex task's filesystem,
   shell, images, approvals, and configured tools/apps through the same turn-bound MCP capability.

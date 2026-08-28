@@ -290,7 +290,6 @@ test("launcher update transaction upgrades its owned full runtime with saved con
   assert.deepEqual(result, {
     updated: true,
     mode: "full",
-    bridgeEnabled: true,
     fromVersion: "1.1.1",
     toVersion: "1.1.3",
     connectorMigrated: false,
@@ -324,23 +323,18 @@ test("launcher migrates the legacy connector identity even when the release vers
   assert.equal(result.fromVersion, result.toVersion);
 });
 
-test("launcher update transaction preserves a deliberately disconnected Codex route", async () => {
+test("launcher update transaction does not preserve a stale disconnected route preference", async () => {
   const fixture = hostFor({
     mode: "browser-only",
     browserHost: "launcher",
     releaseVersion: "1.1.1",
   });
-  let disabled = 0;
-  fixture.host.bridgeStatus = async () => ({ installed: true, active: false, errors: [] });
-  fixture.host.setBridgeEnabled = async (enabled) => {
-    assert.equal(enabled, false);
-    disabled += 1;
-  };
 
   const result = await fixture.host.upgradeManagedRuntime();
 
-  assert.equal(result.bridgeEnabled, false);
-  assert.equal(disabled, 1);
+  assert.equal(result.updated, true);
+  assert.equal("bridgeEnabled" in result, false);
+  assert.equal(fixture.invocation().args.includes("disconnect"), false);
 });
 
 test("launcher update transaction leaves current and externally owned runtimes unchanged", async () => {
@@ -475,18 +469,18 @@ function bridgeFixture({ active }) {
   return { calls, host, supervisor };
 }
 
-test("bridge connection starts a healthy runtime before routing Codex to it", async () => {
+test("launcher connects an inactive installed route", async () => {
   const fixture = bridgeFixture({ active: false });
-  const result = await fixture.host.setBridgeEnabled(true);
+  const result = await fixture.host.connectBridgeRoute();
   assert.equal(result.active, true);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:start", "route connect", "route status"]);
+  assert.deepEqual(fixture.calls, ["route status", "route connect", "route status"]);
 });
 
-test("bridge disconnection proves idleness and stops the runtime before restoring the prior route", async () => {
+test("launcher leaves an already connected route unchanged", async () => {
   const fixture = bridgeFixture({ active: true });
-  const result = await fixture.host.setBridgeEnabled(false);
-  assert.equal(result.active, false);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect", "route status"]);
+  const result = await fixture.host.connectBridgeRoute();
+  assert.equal(result.active, true);
+  assert.deepEqual(fixture.calls, ["route status"]);
 });
 
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
@@ -499,49 +493,8 @@ test("bridge connection rejects a route command that did not reach the requested
     }
     return { stdout: JSON.stringify({ changed: false, active: false }) };
   };
-  await assert.rejects(fixture.host.setBridgeEnabled(true), /remained disconnected/);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:start", "route connect", "runtime:stop"]);
-});
-
-test("bridge disconnection restarts the existing runtime if restoring the prior route fails", async () => {
-  const fixture = bridgeFixture({ active: true });
-  fixture.host.run = async (_name, args) => {
-    const action = args.join(" ");
-    fixture.calls.push(action);
-    if (action === "route status") {
-      return { stdout: JSON.stringify({ installed: true, active: true, errors: [] }) };
-    }
-    throw new Error("synthetic route restore failure");
-  };
-  await assert.rejects(fixture.host.setBridgeEnabled(false), /synthetic route restore failure/);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect", "runtime:start"]);
-});
-
-test("bridge disconnection rejects a command that reports success without changing the active config", async () => {
-  const fixture = bridgeFixture({ active: true });
-  fixture.host.run = async (_name, args) => {
-    const action = args.join(" ");
-    fixture.calls.push(action);
-    if (action === "route status") {
-      return { stdout: JSON.stringify({ installed: true, active: true, errors: [] }) };
-    }
-    if (action === "route disconnect") {
-      return { stdout: JSON.stringify({ changed: true, active: false }) };
-    }
-    throw new Error(`Unexpected command: ${action}`);
-  };
-
-  await assert.rejects(
-    fixture.host.setBridgeEnabled(false),
-    /route restore did not persist in the active config/,
-  );
-  assert.deepEqual(fixture.calls, [
-    "route status",
-    "runtime:stop",
-    "route disconnect",
-    "route status",
-    "runtime:start",
-  ]);
+  await assert.rejects(fixture.host.connectBridgeRoute(), /remained disconnected/);
+  assert.deepEqual(fixture.calls, ["route status", "route connect", "runtime:stop"]);
 });
 
 test("startup recovery can restore the Codex route without requiring a healthy local runtime", async () => {

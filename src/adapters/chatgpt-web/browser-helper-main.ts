@@ -5,6 +5,7 @@ import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } fr
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
+import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 
 interface RunMessage {
@@ -22,7 +23,11 @@ interface RunMessage {
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
-    prepared: CompiledChatGptWebPrompt;
+    nativeConnector?: boolean;
+    resumeAvailable?: boolean;
+    retainConversation?: boolean;
+    requireRetainedConversation?: boolean;
+    conversationKey?: string;
     compaction?: boolean;
     captureLunaCheckpoint?: boolean;
   };
@@ -51,7 +56,12 @@ interface SmokeMessage {
 }
 
 type MaintenanceMessage = VerifyMessage | InspectMessage | SmokeMessage;
-type InputMessage = RunMessage | MaintenanceMessage | { type: "abort"; id: string } | { type: "shutdown" };
+type InputMessage = RunMessage
+  | MaintenanceMessage
+  | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
+  | { type: "send_activation_ack"; id: string }
+  | { type: "abort"; id: string }
+  | { type: "shutdown" };
 
 let outputFailure: Error | undefined;
 const handleOutputFailure = (error: Error): void => {
@@ -62,9 +72,7 @@ const handleOutputFailure = (error: Error): void => {
 const protocolOutput = createProcessLineWriter(stdout, handleOutputFailure);
 const diagnosticOutput = createProcessLineWriter(stderr, handleOutputFailure);
 
-const writeProtocol = (message: unknown): void => {
-  protocolOutput.write(JSON.stringify(message));
-};
+const writeProtocol = (message: unknown): boolean => protocolOutput.write(JSON.stringify(message));
 
 const diagnostic = (...values: unknown[]): void => {
   diagnosticOutput.write(values.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" "));
@@ -74,6 +82,11 @@ console.warn = diagnostic;
 console.error = diagnostic;
 
 const abortControllers = new Map<string, AbortController>();
+const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();
+const sendActivationWaiters = new Map<string, {
+  resolve: () => void;
+  reject: (error: Error) => void;
+}>();
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | undefined;
 
@@ -87,6 +100,12 @@ function requestShutdown(): Promise<void> {
   protocolOutput.close();
   diagnosticOutput.close();
   for (const controller of abortControllers.values()) controller.abort();
+  for (const selection of preparedSelections.values()) selection.cancel();
+  preparedSelections.clear();
+  for (const waiter of sendActivationWaiters.values()) {
+    waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
+  }
+  sendActivationWaiters.clear();
   input.close();
   void closeChatGptBrowserWorkers().then(
     () => {
@@ -107,16 +126,21 @@ async function run(message: RunMessage): Promise<void> {
     throw new Error("Browser helper turn identity is invalid");
   }
   if (abortControllers.has(message.id)) throw new Error(`Browser helper turn already exists: ${message.id}`);
-  if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {
-    throw new Error("Browser helper prompt is invalid");
+  if (message.turn.resumeAvailable !== undefined && typeof message.turn.resumeAvailable !== "boolean") {
+    throw new Error("Browser helper resume availability is invalid");
   }
-  if (message.turn.prepared.multipart !== undefined) {
-    const multipart = message.turn.prepared.multipart;
-    if (!multipart || !Array.isArray(multipart.parts)
-      || (multipart.parts.length !== 2 && multipart.parts.length !== 3)
-      || multipart.parts.some(part => typeof part !== "string") || typeof multipart.commit !== "string") {
-      throw new Error("Browser helper multipart prompt is invalid");
-    }
+  if (message.turn.nativeConnector !== undefined && typeof message.turn.nativeConnector !== "boolean") {
+    throw new Error("Browser helper native connector flag is invalid");
+  }
+  if (message.turn.retainConversation !== undefined && typeof message.turn.retainConversation !== "boolean") {
+    throw new Error("Browser helper conversation retention flag is invalid");
+  }
+  if (message.turn.requireRetainedConversation !== undefined
+    && typeof message.turn.requireRetainedConversation !== "boolean") {
+    throw new Error("Browser helper retained-conversation requirement is invalid");
+  }
+  if (message.turn.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(message.turn.conversationKey)) {
+    throw new Error("Browser helper conversation key is invalid");
   }
   if (message.turn.compaction !== undefined && typeof message.turn.compaction !== "boolean") {
     throw new Error("Browser helper compaction flag is invalid");
@@ -138,15 +162,45 @@ async function run(message: RunMessage): Promise<void> {
   };
   const abortController = new AbortController();
   abortControllers.set(message.id, abortController);
+  const promptSelection = createBrowserHelperPromptSelection();
+  preparedSelections.set(message.id, promptSelection);
+  const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,
-    prepare: async () => ({ ...message.turn.prepared, release: () => {} }),
+    ...(message.turn.nativeConnector ? { nativeConnector: true } : {}),
+    prepare: prepareSelected,
+    ...(message.turn.resumeAvailable ? { prepareResume: prepareSelected } : {}),
+    ...(message.turn.retainConversation ? { retainConversation: true } : {}),
+    ...(message.turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
+    ...(message.turn.conversationKey ? { conversationKey: message.turn.conversationKey } : {}),
     abortSignal: abortController.signal,
     ...(message.turn.compaction ? { compaction: true } : {}),
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
+    onPreparedSelected: reused => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
+        throw new Error("Browser helper could not request prompt selection");
+      }
+      return promptSelection.wait().then(() => undefined);
+    },
+    onSendActivated: () => new Promise<void>((resolve, reject) => {
+      if (sendActivationWaiters.has(message.id)) {
+        reject(new Error("Browser helper Send activation already awaits acknowledgement"));
+        return;
+      }
+      sendActivationWaiters.set(message.id, { resolve, reject });
+      if (!writeProtocol({ type: "event", id: message.id, event: "send_activated" })) {
+        sendActivationWaiters.delete(message.id);
+        reject(new Error("Browser helper could not request the Send activation boundary"));
+      }
+    }),
+    onSubmitted: () => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "submitted" })) {
+        throw new Error("Browser helper could not persist ChatGPT submission evidence");
+      }
+    },
     onReasoningSummary: (text, continuation) => writeProtocol({
       type: "event",
       id: message.id,
@@ -183,6 +237,11 @@ async function run(message: RunMessage): Promise<void> {
       } : {}),
     });
   } finally {
+    preparedSelections.get(message.id)?.cancel();
+    preparedSelections.delete(message.id);
+    const sendWaiter = sendActivationWaiters.get(message.id);
+    sendActivationWaiters.delete(message.id);
+    sendWaiter?.reject(new DOMException("Browser helper turn ended before Send acknowledgement", "AbortError"));
     abortControllers.delete(message.id);
   }
 }
@@ -249,7 +308,45 @@ input.on("line", line => {
     writeProtocol({ type: "error", id: "protocol", message: "Browser helper received invalid JSON" });
     return;
   }
-  if (message.type === "abort") abortControllers.get(message.id)?.abort();
+  if (message.type === "prepared_selected_ack") {
+    const prepared = message.prepared;
+    if (!prepared || typeof prepared.text !== "string" || !Array.isArray(prepared.images)) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper prompt selection is invalid" });
+      abortControllers.get(message.id)?.abort();
+      return;
+    }
+    if (prepared.multipart !== undefined) {
+      const multipart = prepared.multipart;
+      if (!multipart || !Array.isArray(multipart.parts)
+        || (multipart.parts.length !== 2 && multipart.parts.length !== 3)
+        || multipart.parts.some(part => typeof part !== "string")
+        || typeof multipart.commit !== "string") {
+        writeProtocol({ type: "error", id: message.id, message: "Browser helper multipart prompt is invalid" });
+        abortControllers.get(message.id)?.abort();
+        return;
+      }
+    }
+    const selection = preparedSelections.get(message.id);
+    if (!selection) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending prompt selection" });
+      return;
+    }
+    selection.select(prepared);
+  } else if (message.type === "send_activation_ack") {
+    const waiter = sendActivationWaiters.get(message.id);
+    if (!waiter) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending Send activation" });
+      return;
+    }
+    sendActivationWaiters.delete(message.id);
+    waiter.resolve();
+  } else if (message.type === "abort") {
+    abortControllers.get(message.id)?.abort();
+    preparedSelections.get(message.id)?.cancel();
+    const waiter = sendActivationWaiters.get(message.id);
+    sendActivationWaiters.delete(message.id);
+    waiter?.reject(new DOMException("Browser helper turn aborted before Send acknowledgement", "AbortError"));
+  }
   else if (message.type === "shutdown") {
     void requestShutdown();
   } else if (message.type === "verify") {

@@ -1026,7 +1026,7 @@ class RuntimeSupervisor {
       this.clearState();
       return { status: "ready", daemonPid: null, tunnelPid: null };
     }
-    if (config.releaseVersion !== this.app.getVersion()) {
+    if (!tunnelOnly && config.releaseVersion !== this.app.getVersion()) {
       const ownershipState = this.readState();
       if ((!tunnelOnly && await this.proxyHealth(config)) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {

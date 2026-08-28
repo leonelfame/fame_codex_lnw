@@ -43,9 +43,19 @@ After optional Full/MCP setup, the same command also exposes simulated outer too
 bun run dev:chat tool-lab "Use a command tool and explain the simulated receipt"
 ```
 
-Reusing the same name continues its canonical Responses history. Each model turn still opens a
-fresh Temporary Chat, exactly like production; the complete named history is compiled into that
-turn by the existing prompt owner. New chats use the cheapest account-supported browser mode:
+The direct DEV tool `mcp__dev_simulator__large_context_payload` accepts the explicit arguments
+`segment` (1, 2, or 3) and `target_tokens` (1,000 to 95,000). It returns deterministic, coherent,
+inert prose through the real simulated MCP-result path so a live named chat can exercise retention
+and automatic compaction without embedding a giant fixture in the user prompt. It is advertised
+directly rather than through deferred tool search so the test can prove the requested call happened.
+
+Reusing the same name continues its canonical Responses history. Sequential native messages in the
+same compaction epoch lease one Temporary Chat, exactly like production. Every message receives a
+new turn-bound MCP token, and all MCP tool rounds for that message remain inside the same ChatGPT
+response. On an exact native compaction request, the same Web agent submits the checkpoint through
+a one-shot MCP control call in that chat; only then does the surface close and the next epoch open a
+new Temporary Chat. The complete named history remains owned by the existing prompt compiler. New
+chats use the cheapest account-supported browser mode:
 Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
 
 Interactive commands:
@@ -89,8 +99,15 @@ remains three times the selected mode's base limit.
 Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
 must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
 Images, the MCP connector, and the private `turn_token` are attached only to the final part.
-Compaction always uses the three-message path, even when its resulting summary will fit into a later
-single-message turn, so the complete expanded history remains available to the summarizer.
+In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If
+the source Web response is still waiting on a tool boundary, its canonical tool results finish that
+response first. The exact retained chat then receives one strict checkpoint message with only the
+one-shot MCP control capability and no ordinary work capability. The checkpoint never rides in the
+tail of a potentially huge tool result, and its wait is capped at five minutes independently of the
+normal turn timeout.
+The old surface closes only after both the structured handoff and that Web response complete; the
+next epoch then starts a fresh Temporary Chat. Browser-only mode has no retained MCP boundary and keeps the three-message
+compaction path so its summarizer receives the complete expanded history.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final
 commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
@@ -98,7 +115,7 @@ and auto-compaction ceilings are reported as 3× while the switch is active, but
 stage must still fit the selected ChatGPT mode's measured one-message boundary.
 
 Small turns add no requests. Two-part turns add two staging requests and acknowledgements; three-part
-turns and compaction add three. Large turns are therefore slower and may increase the probability of
+turns add three. Browser-only compaction also uses three stages. Large turns are therefore slower and may increase the probability of
 rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured
 28,000-token browser transport budget.

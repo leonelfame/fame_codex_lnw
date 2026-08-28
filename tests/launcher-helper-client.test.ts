@@ -19,15 +19,26 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
   writeFileSync(helper, `
     const readline = require("node:readline").createInterface({ input: process.stdin });
     const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+    let active;
     send({ type: "ready" });
     readline.on("line", line => {
       const message = JSON.parse(line);
       if (message.type === "shutdown") process.exit(0);
-      if (message.type !== "run") return;
+      if (message.type === "run") {
+        active = message;
+        send({ type: "event", id: message.id, event: "prepared_selected", reused: false });
+        return;
+      }
+      if (message.type === "prepared_selected_ack") {
+        send({ type: "event", id: message.id, event: "send_activated" });
+        return;
+      }
+      if (message.type !== "send_activation_ack") return;
+      send({ type: "event", id: message.id, event: "submitted" });
       send({ type: "event", id: message.id, event: "reasoning", text: "Reading project" });
       send({ type: "event", id: message.id, event: "reasoning", text: " files", continuation: true });
       send({ type: "event", id: message.id, event: "text", text: "done" });
-      if (message.turn.captureLunaCheckpoint) send({
+      if (active.turn.captureLunaCheckpoint) send({
         type: "event",
         id: message.id,
         event: "luna_checkpoint",
@@ -77,6 +88,8 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
+  let sendActivated = false;
+  let submitted = false;
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
   try {
@@ -86,6 +99,8 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
       reasoning: "high",
       capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
       prepare: async () => ({ text: "inspect", images: [], release: () => { released = true; } }),
+      onSendActivated: () => { sendActivated = true; },
+      onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
@@ -97,6 +112,8 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
       { text: " files", continuation: true },
     ]);
     expect(deltas).toEqual(["done"]);
+    expect(sendActivated).toBe(true);
+    expect(submitted).toBe(true);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {
@@ -115,7 +132,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
 });
 
 test("launcher helper protocol preserves multipart context and the compaction flag", async () => {
-  let sent: Record<string, unknown> | undefined;
+  const sent: Record<string, unknown>[] = [];
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2 DEV",
     browserHost: "launcher",
@@ -128,19 +145,32 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   });
   const internal = client as unknown as {
     pending: Map<string, { resolve(value: string): void }>;
+    child?: unknown;
     ensureChild(): Promise<void>;
     send(message: Record<string, unknown>): Promise<void>;
     finish(id: string): void;
+    handleLine(child: unknown, line: string): void;
   };
+  const child = {};
+  internal.child = child;
   internal.ensureChild = async () => {};
   internal.send = async message => {
-    sent = message;
-    if (message.type !== "run" || typeof message.id !== "string") return;
-    queueMicrotask(() => {
-      const pending = internal.pending.get(message.id as string);
-      internal.finish(message.id as string);
-      pending?.resolve("done");
-    });
+    sent.push(message);
+    if (typeof message.id !== "string") return;
+    if (message.type === "run") {
+      queueMicrotask(() => internal.handleLine(child, JSON.stringify({
+        type: "event",
+        id: message.id,
+        event: "prepared_selected",
+        reused: false,
+      })));
+    } else if (message.type === "prepared_selected_ack") {
+      queueMicrotask(() => internal.handleLine(child, JSON.stringify({
+        type: "result",
+        id: message.id,
+        text: "done",
+      })));
+    }
   };
 
   await expect(client.run({
@@ -159,15 +189,18 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     onTextDelta() {},
   })).resolves.toBe("done");
 
-  expect(sent).toMatchObject({
+  expect(sent[0]).toMatchObject({
     type: "run",
     turn: {
       compaction: true,
-      prepared: {
+    },
+  });
+  expect(sent[1]).toMatchObject({
+    type: "prepared_selected_ack",
+    prepared: {
         text: "commit",
         multipart: { parts: ["{\"part\":1}", "{\"part\":2}", "{\"part\":3}"], commit: "commit" },
         trimmedCompactionMessages: 4,
-      },
     },
   });
 });
@@ -218,7 +251,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
   })).rejects.toMatchObject({ name: "AbortError" });
 
   expect(messages).toEqual(["run", "abort"]);
-  expect(released).toBe(true);
+  expect(released).toBe(false);
 });
 
 test("structured helper errors preserve the ChatGPT adapter failure contract", async () => {

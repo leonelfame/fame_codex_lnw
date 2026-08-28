@@ -31,6 +31,7 @@ const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
+const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
@@ -112,6 +113,28 @@ function allowedAuthUrl(value) {
       || parsed.pathname === "/login";
   }
   return AUTH_PROVIDER_HOSTS.has(parsed.hostname);
+}
+
+function navigationOriginForLog(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.origin
+      : parsed.protocol;
+  } catch {
+    return "invalid-url";
+  }
+}
+
+function navigationErrorForLog(error) {
+  if (!error || typeof error !== "object") return { errorType: typeof error };
+  const detail = {
+    errorType: typeof error.name === "string" && error.name ? error.name : "Error",
+  };
+  if (typeof error.code === "string" || typeof error.code === "number") {
+    detail.errorCode = error.code;
+  }
+  return detail;
 }
 
 function isTemporaryChatUrl(value) {
@@ -207,6 +230,7 @@ class BrowserHost {
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
+    this.sessionRefreshOperation = null;
     this.cloudflareChallengeRecovery = null;
     this.cloudflareChallengeRecoveryArmed = true;
     this.cloudflareChallengeRecoveryDelayMs = CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS;
@@ -292,8 +316,9 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
-  createTurnTab(traceId, helperPid) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS) {
+  createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
+    if (this.turnTabs.size >= MAX_BROWSER_TABS
+      && !BrowserHost.prototype.evictOldestRetainedTurnTab.call(this)) {
       throw new Error(
         `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
@@ -317,6 +342,9 @@ class BrowserHost {
       id,
       surfaceId,
       traceId,
+      conversationKey,
+      connectorIdentity,
+      connectorBound: false,
       helperPid,
       view,
       status: "running",
@@ -348,6 +376,15 @@ class BrowserHost {
       this.removeTurnTab(tab, true);
     });
     return tab;
+  }
+
+  evictOldestRetainedTurnTab() {
+    const retained = [...this.turnTabs.values()]
+      .filter(tab => tab.status === "ready")
+      .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
+    if (!retained) return false;
+    this.removeTurnTab(retained, false);
+    return true;
   }
 
   zoomShell(action) {
@@ -497,12 +534,24 @@ class BrowserHost {
     contents.on("did-start-navigation", (_event, url, _inPlace, mainFrame) => {
       if (!mainFrame) return;
       this.armHomeNavigationTimeout(contents, url);
+      if (this.manualOperation === "ChatGPT login") {
+        this.logger.info("browser.auth_navigation_started", {
+          surface: "primary",
+          origin: navigationOriginForLog(url),
+        });
+      }
       this.setState(this.activeTraceId || this.manualOperation
         ? { url, loading: true }
         : { status: "loading", message: "Opening ChatGPT", url, loading: true });
     });
     contents.on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
+      if (this.manualOperation === "ChatGPT login") {
+        this.logger.info("browser.auth_navigation_completed", {
+          surface: "primary",
+          origin: navigationOriginForLog(contents.getURL()),
+        });
+      }
       this.setState({ url: contents.getURL(), loading: false });
       void this.applyViewportCss();
       void this.markOwnedSurface()
@@ -528,7 +577,17 @@ class BrowserHost {
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
       if (!mainFrame || errorCode === -3) return;
       this.clearHomeNavigationTimeout();
-      this.logger.error("browser.navigation_failed", { errorCode, errorDescription, url });
+      this.logger.error(
+        this.manualOperation === "ChatGPT login"
+          ? "browser.auth_navigation_failed"
+          : "browser.navigation_failed",
+        {
+          ...(this.manualOperation === "ChatGPT login" ? { surface: "primary" } : {}),
+          errorCode,
+          errorDescription,
+          origin: navigationOriginForLog(url),
+        },
+      );
       this.setState({ status: "error", message: errorDescription, url, loading: false });
     });
     contents.on("render-process-gone", (_event, details) => {
@@ -545,7 +604,7 @@ class BrowserHost {
       if (contents.isDestroyed() || !contents.isLoadingMainFrame()) return;
       contents.stop();
       const message = "ChatGPT did not finish loading within 60 seconds. Check your connection and retry.";
-      this.logger.error("browser.navigation_timeout", { url });
+      this.logger.error("browser.navigation_timeout", { origin: navigationOriginForLog(url) });
       this.setState({ status: "error", message, url, loading: false });
     }, BROWSER_NAVIGATION_TIMEOUT_MS);
     this.homeNavigationTimeout.unref?.();
@@ -767,6 +826,12 @@ class BrowserHost {
 
   reapExpiredTurnTabs(now = Date.now()) {
     for (const tab of [...this.turnTabs.values()]) {
+      if (tab.status === "ready") {
+        if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
+        this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
+        this.removeTurnTab(tab, false);
+        continue;
+      }
       if (tab.status !== "running") continue;
       const bootstrapExpired = tab.bootstrapReady !== true
         && now >= (tab.bootstrapDeadlineAt ?? Number.POSITIVE_INFINITY);
@@ -931,7 +996,10 @@ class BrowserHost {
         contents.stop();
         const message = "The ChatGPT sign-in page did not finish loading within 60 seconds. Check your connection and try again.";
         this.authNavigationError = new Error(message);
-        this.logger.error("browser.auth_navigation_timeout", { url });
+        this.logger.error("browser.auth_navigation_timeout", {
+          surface: "popup",
+          origin: navigationOriginForLog(url),
+        });
         this.closeAuthView(authView, true, false);
         this.setState({ status: "error", message, url, loading: false });
       }, BROWSER_NAVIGATION_TIMEOUT_MS);
@@ -945,7 +1013,12 @@ class BrowserHost {
       loading: true,
     });
     contents.on("did-start-navigation", (_event, url, _inPlace, mainFrame) => {
-      if (mainFrame) armNavigationTimeout(url);
+      if (!mainFrame) return;
+      armNavigationTimeout(url);
+      this.logger.info("browser.auth_navigation_started", {
+        surface: "popup",
+        origin: navigationOriginForLog(url),
+      });
     });
     contents.on("did-start-loading", () => this.setState({ loading: true }));
     contents.on("did-stop-loading", () => {
@@ -954,6 +1027,10 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       clearNavigationTimeout();
+      this.logger.info("browser.auth_navigation_completed", {
+        surface: "popup",
+        origin: navigationOriginForLog(contents.getURL()),
+      });
       this.setState({ url: contents.getURL(), loading: false });
       void this.probeAuthentication();
     });
@@ -967,7 +1044,12 @@ class BrowserHost {
       clearNavigationTimeout();
       const message = `ChatGPT sign-in page failed to load: ${errorDescription}`;
       this.authNavigationError = new Error(message);
-      this.logger.error("browser.auth_navigation_failed", { errorCode, errorDescription, url });
+      this.logger.error("browser.auth_navigation_failed", {
+        surface: "popup",
+        errorCode,
+        errorDescription,
+        origin: navigationOriginForLog(url),
+      });
       this.closeAuthView(authView, true, false);
       this.setState({ status: "error", message, url, loading: false });
     });
@@ -988,7 +1070,11 @@ class BrowserHost {
           clearNavigationTimeout();
           const message = `ChatGPT sign-in page failed to open: ${error instanceof Error ? error.message : String(error)}`;
           this.authNavigationError = new Error(message);
-          this.logger.error("browser.auth_window_open_failed", { url, message });
+          this.logger.error("browser.auth_window_open_failed", {
+            surface: "popup",
+            origin: navigationOriginForLog(url),
+            ...navigationErrorForLog(error),
+          });
           this.closeAuthView(authView, true, false);
           this.setState({ status: "error", message, url, loading: false });
         });
@@ -1024,7 +1110,8 @@ class BrowserHost {
     if (refreshMain && this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
       void this.view.webContents.loadURL(TEMPORARY_CHAT_URL).catch((error) => {
         this.logger.error("browser.auth_refresh_failed", {
-          message: error instanceof Error ? error.message : String(error),
+          origin: navigationOriginForLog(TEMPORARY_CHAT_URL),
+          ...navigationErrorForLog(error),
         });
       });
     }
@@ -1126,15 +1213,41 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  beginTurn(traceId, reveal, helperPid) {
+  beginTurn(
+    traceId,
+    reveal,
+    helperPid,
+    conversationKey,
+    connectorIdentity,
+    requireRetainedConversation = false,
+  ) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
     if (this.userCancelledTurnOwners.has(traceId)) {
       throw new BrowserTurnCancelledError(traceId);
     }
-    const existing = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    if (sameTrace && (sameTrace.conversationKey !== conversationKey
+      || sameTrace.connectorIdentity !== connectorIdentity)) {
+      throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
+    }
+    const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
+      tab.status === "ready"
+      && tab.conversationKey === conversationKey
+      && tab.connectorIdentity === connectorIdentity
+      && (!connectorIdentity || tab.connectorBound === true)
+    )) : [];
+    if (retainedMatches.length > 1) {
+      throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
+    }
+    const exactRetained = retainedMatches[0];
+    if (sameTrace?.status === "ready" && sameTrace !== exactRetained) {
+      throw new Error(`ChatGPT browser turn ${traceId} is retained under different conversation metadata`);
+    }
+    const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
     if (existing) {
+      const reused = existing.status === "ready";
       if (existing.status === "running" && existing.helperPid !== helperPid) {
         if (processRunning(existing.helperPid)) {
           throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
@@ -1148,11 +1261,14 @@ class BrowserHost {
         });
       }
       existing.helperPid = helperPid;
+      existing.traceId = traceId;
       existing.status = "running";
       existing.loading = true;
       existing.message = "ChatGPT is working";
-      existing.bootstrapReady = false;
-      existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
+      if (!reused) {
+        existing.bootstrapReady = false;
+        existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
+      }
       existing.lastHeartbeatAt = Date.now();
       if (!existing.view.webContents.isDestroyed()) {
         existing.view.webContents.setBackgroundThrottling(false);
@@ -1163,18 +1279,34 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
-      return { surfaceId: existing.surfaceId, tabId: existing.id };
+      return {
+        surfaceId: existing.surfaceId,
+        tabId: existing.id,
+        reused,
+        connectorBound: existing.connectorBound === true,
+      };
     }
-    const tab = this.createTurnTab(traceId, helperPid);
+    if (requireRetainedConversation) {
+      throw new Error("The retained ChatGPT conversation is no longer available");
+    }
+    const tab = this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity);
     this.selectedTabId = tab.id;
     if (reveal) this.show();
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    return { surfaceId: tab.surfaceId, tabId: tab.id };
+    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
   }
 
-  async endTurn(traceId, helperPid, status, hideAfterTurn, message) {
+  async endTurn(
+    traceId,
+    helperPid,
+    status,
+    hideAfterTurn,
+    message,
+    retain = false,
+    connectorBound = false,
+  ) {
     const tab = [...this.turnTabs.values()].find((candidate) => candidate.traceId === traceId);
     if (!tab) {
       const closedOwner = this.closedTurnOwners.get(traceId);
@@ -1198,8 +1330,20 @@ class BrowserHost {
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
+    if (status === "completed"
+      && retain
+      && tab.conversationKey
+      && (!tab.connectorIdentity || connectorBound)) {
+      tab.connectorBound = connectorBound === true;
+      tab.lastHeartbeatAt = Date.now();
+      if (hideAfterTurn && !this.activeTraceId) this.hide();
+      this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
+      this.publishState?.(this.snapshot());
+      this.writeDescriptor();
+      return { cancelledByUser };
+    }
     // A browser tab represents an active Codex turn, not durable task history. Retaining terminal
-    // tabs leaked one slot per response/compaction until the five-tab safety limit made later
+    // tabs leaked one slot per response/compaction until the bounded tab limit made later
     // turns fail. The result already lives in Codex; release the browser document on every
     // terminal path while leaving other concurrently running tabs untouched.
     this.removeTurnTab(tab, false);
@@ -1231,19 +1375,29 @@ class BrowserHost {
       this.show();
       return this.loginOperation;
     }
-    const operation = this.withManualOperation("ChatGPT login", async () => {
-      this.authNavigationError = null;
-      this.show();
-      this.logger.info("browser.login_opened");
-      const current = this.view.webContents.getURL();
-      if (!current.startsWith(CHATGPT_ORIGIN)) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    const operation = (async () => {
+      const sessionRefresh = this.sessionRefreshOperation;
+      if (sessionRefresh) {
+        try {
+          await sessionRefresh;
+        } catch {
+          // An explicit login is the recovery path after a failed saved-session refresh.
+        }
       }
-      await this.probeAuthentication();
-      const authenticated = await this.waitForAuthenticated();
-      await this.runSessionInspection(false);
-      return authenticated;
-    });
+      return await this.withManualOperation("ChatGPT login", async () => {
+        this.authNavigationError = null;
+        this.show();
+        this.logger.info("browser.login_opened");
+        const current = this.view.webContents.getURL();
+        if (!current.startsWith(CHATGPT_ORIGIN)) {
+          await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        }
+        await this.probeAuthentication();
+        const authenticated = await this.waitForAuthenticated();
+        await this.runSessionInspection(false);
+        return authenticated;
+      });
+    })();
     const tracked = operation.finally(() => {
       if (this.loginOperation === tracked) this.loginOperation = null;
     });
@@ -1274,8 +1428,9 @@ class BrowserHost {
     });
   }
 
-  async refreshAuthentication() {
-    return await this.withManualOperation("session refresh", async () => {
+  refreshAuthentication() {
+    if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
+    const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
       if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
         await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
@@ -1286,6 +1441,12 @@ class BrowserHost {
       }
       return this.snapshot();
     });
+    let tracked;
+    tracked = operation.finally(() => {
+      if (this.sessionRefreshOperation === tracked) this.sessionRefreshOperation = null;
+    });
+    this.sessionRefreshOperation = tracked;
+    return tracked;
   }
 
   async probeAuthentication() {
@@ -1585,5 +1746,7 @@ module.exports = {
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  navigationErrorForLog,
+  navigationOriginForLog,
   TEMPORARY_CHAT_URL,
 };

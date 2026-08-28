@@ -162,11 +162,11 @@ const DROPPED_IMAGE_NOTE =
   `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
 
 /**
- * Every turn opens a fresh Temporary Chat, so ChatGPT keeps nothing from the previous one: an image
- * the task still reasons about has to be re-attached on each turn or it stops existing for the
- * model. Carrying the conversation's images forward is therefore the contract, not a leak - the
- * only bound is ChatGPT's per-message limit, and the overflow is dropped from the oldest end so the
- * images the task is working on survive.
+ * A fresh compaction epoch receives the complete canonical context, so every still-relevant image
+ * must be attached on that first message. Retained continuation messages send only their new
+ * canonical suffix because prior images remain in the same Temporary Chat. The per-message image
+ * limit still drops overflow from the oldest end so the images the task is actively working on
+ * survive.
  */
 interface ImageBudget {
   seen: number;
@@ -400,7 +400,11 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
-      "Use actual Codex Native results as evidence for local observations and effects, and keep calling tools until the requested work is complete and verified.",
+      "Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
+      "Use actual Codex Native results as evidence for local observations and effects.",
+      "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
+      "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
+      "Continue using the available tools until the requested work is complete and verified.",
     ]
     : [
       `This is ChatGPT Web ${mode.displayLabel} with no Codex Native bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,

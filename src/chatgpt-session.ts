@@ -8,7 +8,7 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
-  'button[aria-haspopup="menu"][data-tone="neutral"]:has([data-animated-slider-trigger="true"])',
+  'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
 ].join(", ");
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
@@ -137,7 +137,8 @@ export async function detectChatGptAccountCapabilities(
         slider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
           .then(() => "slider" as const),
       ]);
-      if (ready === "items") {
+      const sliderVisible = ready === "slider" || await slider.isVisible().catch(() => false);
+      if (!sliderVisible) {
         return { solAvailable: true, proAvailable: await efforts.count() >= 5 };
       }
       const state = parseChatGptEffortSliderState(

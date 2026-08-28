@@ -40,7 +40,8 @@ test("HTTP turn tracking follows the response stream instead of Bun's global req
 });
 
 test("HTTP turn tracking releases a cancelled response stream", async () => {
-  const turns = new HttpTurnCounter();
+  const failures: unknown[] = [];
+  const turns = new HttpTurnCounter(failure => failures.push(failure));
   const request = new AbortController();
   const response = await turns.track(
     async () => new Response(new ReadableStream<Uint8Array>()),
@@ -52,6 +53,7 @@ test("HTTP turn tracking releases a cancelled response stream", async () => {
   request.abort("client disconnected");
   await cancelled;
   await waitForTurnCount(turns, 0);
+  expect(failures).toEqual([]);
 });
 
 test("HTTP turn tracking uses a tee branch on Windows", async () => {
@@ -86,6 +88,90 @@ test("HTTP turn tracking uses direct pull and cancellation outside Windows", asy
   await reader.cancel("client disconnected");
   await waitForTurnCount(turns, 0);
   expect(sourceCancelled).toBe(true);
+});
+
+test("HTTP turn tracking records privacy-safe client stream failure evidence", async () => {
+  const failures: unknown[] = [];
+  const turns = new HttpTurnCounter(failure => failures.push(failure));
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const response = await turns.track(
+    async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { source = controller; },
+    })),
+    undefined,
+    "darwin",
+    "responses",
+  );
+  const reader = response.body!.getReader();
+
+  source.enqueue(new TextEncoder().encode("safe"));
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe("safe");
+  source.error(Object.assign(new TypeError("private upstream response fragment"), { code: "ECONNRESET" }));
+  await expect(reader.read()).rejects.toThrow("private upstream response fragment");
+  await waitForTurnCount(turns, 0);
+
+  expect(failures).toEqual([{
+    httpTurnId: 1,
+    endpoint: "responses",
+    reader: "client",
+    platform: "darwin",
+    chunks: 1,
+    bytes: 4,
+    errorName: "TypeError",
+    errorCode: "ECONNRESET",
+  }]);
+  expect(JSON.stringify(failures)).not.toContain("private upstream response fragment");
+});
+
+test("HTTP turn tracking records privacy-safe Windows lifecycle failure evidence", async () => {
+  const failures: unknown[] = [];
+  const turns = new HttpTurnCounter(failure => failures.push(failure));
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const response = await turns.track(
+    async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { source = controller; },
+    })),
+    undefined,
+    "win32",
+    "responses",
+  );
+  const reader = response.body!.getReader();
+
+  source.enqueue(new TextEncoder().encode("event"));
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe("event");
+  source.error(Object.assign(new TypeError("sensitive socket detail"), { code: "ECONNRESET" }));
+  await expect(reader.read()).rejects.toThrow("sensitive socket detail");
+  await waitForTurnCount(turns, 0);
+
+  expect(failures).toEqual([{
+    httpTurnId: 1,
+    endpoint: "responses",
+    reader: "windows_lifecycle",
+    platform: "win32",
+    chunks: 1,
+    bytes: 5,
+    errorName: "TypeError",
+    errorCode: "ECONNRESET",
+  }]);
+  expect(JSON.stringify(failures)).not.toContain("sensitive socket detail");
+});
+
+test("HTTP stream diagnostics cannot replace the source failure or retain turn ownership", async () => {
+  const turns = new HttpTurnCounter(() => { throw new Error("diagnostic sink failed"); });
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const response = await turns.track(
+    async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { source = controller; },
+    })),
+    undefined,
+    "darwin",
+    "responses",
+  );
+  const reader = response.body!.getReader();
+
+  source.error(new TypeError("source connection reset"));
+  await expect(reader.read()).rejects.toThrow("source connection reset");
+  await waitForTurnCount(turns, 0);
 });
 
 test("HTTP turn tracking releases a stream whose client disconnected without cancelling", async () => {
@@ -145,6 +231,7 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
   chatGptTurnSessions.getOrCreate("orphan", () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled += 1; },
@@ -185,9 +272,11 @@ test("authenticated targeted cancellation terminates one browser trace without r
   let rejectTarget!: (error: Error) => void;
   let targetCancelled = 0;
   let otherCancelled = 0;
+  const targetBrowser = new Promise<string>((_resolve, reject) => { rejectTarget = reject; });
   const target = chatGptTurnSessions.getOrCreate("target-key", () => ({
     mode: "read-only",
-    browser: new Promise<string>((_resolve, reject) => { rejectTarget = reject; }),
+    browser: targetBrowser,
+    physicalSettlement: targetBrowser.then(() => undefined, () => undefined),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => {
@@ -198,6 +287,7 @@ test("authenticated targeted cancellation terminates one browser trace without r
   chatGptTurnSessions.getOrCreate("other-key", () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
+    physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { otherCancelled += 1; },
@@ -263,9 +353,11 @@ test("a Codex retry after tab cancellation receives terminal HTTP 400 without a 
   const traceId = chatGptWebTraceId(providerConfig(config), parsed);
   let rejectBrowser!: (error: Error) => void;
   chatGptTurnSessions.clear();
+  const cancelledBrowser = new Promise<string>((_resolve, reject) => { rejectBrowser = reject; });
   chatGptTurnSessions.getOrCreate("cancelled-replay", () => ({
     mode: "read-only",
-    browser: new Promise<string>((_resolve, reject) => { rejectBrowser = reject; }),
+    browser: cancelledBrowser,
+    physicalSettlement: cancelledBrowser.then(() => undefined, () => undefined),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: reason => rejectBrowser(reason ?? new Error("cancelled")),

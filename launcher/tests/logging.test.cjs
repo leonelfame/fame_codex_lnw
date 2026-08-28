@@ -64,7 +64,7 @@ test("launcher activity restores valid records from the previous process", () =>
   }
 });
 
-test("exported launcher logs remove local usernames and private ChatGPT titles", () => {
+test("exported launcher logs remove local usernames, private ChatGPT titles, and URL paths", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-export-"));
   const filePath = path.join(root, "launcher.jsonl");
   const destinationPath = path.join(root, "shared", "diagnostics.jsonl");
@@ -85,16 +85,20 @@ test("exported launcher logs remove local usernames and private ChatGPT titles",
         line: "config loaded from /Users/local-person/.codex/config.toml",
         prompt: "private prompt",
         connector: "Codex Native2",
+        url: "https://chatgpt.com/c/private-conversation?state=oauth-secret&email=private@example.com",
+        message: "failed while loading 'https://accounts.google.com/o/oauth2/v2/auth?state=oauth-secret&login_hint=private@example.com'",
       },
     })}\n`);
 
     assert.equal(exportSanitizedLogs({ filePath, destinationPath }), 2);
     const exported = fs.readFileSync(destinationPath, "utf8");
-    assert.doesNotMatch(exported, /private\.user|local-person|Private roadmap|Health notes|private prompt/);
+    assert.doesNotMatch(exported, /private\.user|local-person|Private roadmap|Health notes|private prompt|private-conversation|oauth-secret|private@example\.com/);
     assert.match(exported, /\[user-home\]/);
     assert.match(exported, /visible rows: \[redacted\]/);
     assert.match(exported, /Codex Native2/);
     assert.match(exported, /"prompt":"\[redacted\]"/);
+    assert.match(exported, /https:\/\/chatgpt\.com/);
+    assert.match(exported, /https:\/\/accounts\.google\.com/);
     assert.throws(
       () => exportSanitizedLogs({ filePath, destinationPath: filePath }),
       /Refusing to overwrite a launcher source log/,

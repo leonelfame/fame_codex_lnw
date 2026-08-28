@@ -15,7 +15,21 @@ const {
   BrowserHost,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  navigationErrorForLog,
+  navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
+
+test("authentication diagnostics retain only origin and non-sensitive error metadata", () => {
+  assert.equal(
+    navigationOriginForLog("https://accounts.google.com/o/oauth2/v2/auth?state=secret&login_hint=user@example.com"),
+    "https://accounts.google.com",
+  );
+  assert.equal(navigationOriginForLog("not a URL with user@example.com"), "invalid-url");
+  assert.deepEqual(
+    navigationErrorForLog(Object.assign(new Error("loading https://chatgpt.com/c/private"), { code: "ERR_ABORTED" })),
+    { errorType: "Error", errorCode: "ERR_ABORTED" },
+  );
+});
 
 test("only an explicit Cloudflare challenge on a ChatGPT backend response triggers recovery", () => {
   assert.equal(isChatGptCloudflareChallengeResponse({
@@ -409,6 +423,40 @@ test("concurrent embedded login requests share one authentication operation", as
   resolveLogin({ authenticated: true });
   assert.deepEqual(await first, { authenticated: true });
   assert.equal(inspections, 1);
+});
+
+test("explicit login waits for an in-flight saved-session refresh before taking browser ownership", async () => {
+  const calls = [];
+  let finishRefresh;
+  const sessionRefreshOperation = new Promise((resolve) => { finishRefresh = resolve; });
+  const fixture = {
+    state: { authenticated: false },
+    sessionRefreshOperation,
+    loginOperation: null,
+    authNavigationError: null,
+    activateHomeSurface() {},
+    show() {},
+    snapshot: () => ({ authenticated: true }),
+    logger: { info() {} },
+    view: { webContents: {
+      getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      loadURL: async () => {},
+    } },
+    probeAuthentication: async () => calls.push("probe"),
+    waitForAuthenticated: async () => ({ authenticated: true }),
+    runSessionInspection: async () => calls.push("inspect"),
+    withManualOperation: async (name, action) => {
+      calls.push(name);
+      return await action();
+    },
+  };
+
+  const login = BrowserHost.prototype.openLogin.call(fixture);
+  await Promise.resolve();
+  assert.deepEqual(calls, []);
+  finishRefresh();
+  await login;
+  assert.deepEqual(calls, ["ChatGPT login", "probe", "inspect"]);
 });
 
 test("launcher quit remains gated through an active embedded-browser operation", () => {
@@ -853,7 +901,12 @@ test("a replacement helper takes over only after the previous owner exited", () 
 
   const lease = BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid);
 
-  assert.deepEqual(lease, { surfaceId: tab.surfaceId, tabId: tab.id });
+  assert.deepEqual(lease, {
+    surfaceId: tab.surfaceId,
+    tabId: tab.id,
+    reused: false,
+    connectorBound: false,
+  });
   assert.equal(tab.helperPid, process.pid);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0][0], "browser.stale_turn_owner_replaced");
@@ -1040,6 +1093,34 @@ test("launcher session refresh resolves persisted authentication before setup ac
     ["probe"],
     ["state", { status: "ready", message: "ChatGPT is ready" }],
   ]);
+});
+
+test("concurrent launcher session refresh requests share one browser operation", async () => {
+  let finishProbe;
+  let operations = 0;
+  const fixture = {
+    sessionRefreshOperation: null,
+    state: { authenticated: false },
+    snapshot: () => ({ authenticated: true }),
+    setState() {},
+    probeAuthentication: async () => await new Promise((resolve) => { finishProbe = resolve; }),
+    withManualOperation: async (_name, action) => {
+      operations += 1;
+      return await action();
+    },
+    view: { webContents: {
+      getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      loadURL: async () => {},
+    } },
+  };
+
+  const first = BrowserHost.prototype.refreshAuthentication.call(fixture);
+  const second = BrowserHost.prototype.refreshAuthentication.call(fixture);
+  assert.equal(first, second);
+  assert.equal(operations, 1);
+  finishProbe({ authenticated: true });
+  await first;
+  assert.equal(fixture.sessionRefreshOperation, null);
 });
 
 test("manual browser operations disable background throttling until completion", async () => {
@@ -1258,16 +1339,21 @@ test("a failed runtime cancellation keeps the running DOM attached", async () =>
   assert.deepEqual(closed, []);
 });
 
-test("a later provider round reuses its task tab and restores active ownership", () => {
+test("a later provider round reuses only its exact connector-bound conversation", () => {
   const throttling = [];
+  const conversationKey = "a".repeat(64);
   const tab = {
     id: "tab-reused",
     surfaceId: "surface-reused",
-    traceId: "trace_reused",
+    traceId: "trace_previous",
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: true,
     helperPid: 111,
     status: "ready",
     loading: false,
     message: "Task completed",
+    bootstrapReady: true,
     view: {
       webContents: {
         isDestroyed: () => false,
@@ -1288,16 +1374,139 @@ test("a later provider round reuses its task tab and restores active ownership",
     logger: { info: (event) => events.push(event) },
   });
 
-  const lease = BrowserHost.prototype.beginTurn.call(fixture, "trace_reused", false, 222);
+  const lease = BrowserHost.prototype.beginTurn.call(
+    fixture,
+    "trace_next",
+    false,
+    222,
+    conversationKey,
+    "Codex Native2",
+  );
 
-  assert.deepEqual(lease, { surfaceId: "surface-reused", tabId: "tab-reused" });
+  assert.deepEqual(lease, {
+    surfaceId: "surface-reused",
+    tabId: "tab-reused",
+    reused: true,
+    connectorBound: true,
+  });
+  assert.equal(tab.traceId, "trace_next");
   assert.equal(tab.helperPid, 222);
   assert.equal(tab.status, "running");
   assert.equal(tab.loading, true);
   assert.equal(tab.message, "ChatGPT is working");
+  assert.equal(tab.bootstrapReady, true);
   assert.equal(fixture.selectedTabId, tab.id);
   assert.deepEqual(throttling, [false]);
   assert.deepEqual(events, ["visible", "published", "descriptor", "browser.tab_reused"]);
+});
+
+test("a retained conversation is not reused for a different connector identity", () => {
+  const conversationKey = "b".repeat(64);
+  const retained = {
+    id: "retained",
+    traceId: "trace_old",
+    status: "ready",
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: true,
+  };
+  const created = { id: "fresh", surfaceId: "surface-fresh" };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[retained.id, retained]]),
+    userCancelledTurnOwners: new Map(),
+    createTurnTab: (...args) => {
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector"]);
+      return created;
+    },
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    logger: { info() {} },
+  });
+
+  const lease = BrowserHost.prototype.beginTurn.call(
+    fixture,
+    "trace_next",
+    false,
+    222,
+    conversationKey,
+    "Other Connector",
+  );
+
+  assert.deepEqual(lease, {
+    surfaceId: "surface-fresh",
+    tabId: "fresh",
+    reused: false,
+    connectorBound: false,
+  });
+  assert.equal(retained.status, "ready");
+});
+
+test("a connector conversation is not reused until its connector was bound", () => {
+  const conversationKey = "c".repeat(64);
+  const retained = {
+    id: "retained",
+    traceId: "trace_old",
+    status: "ready",
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: false,
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[retained.id, retained]]),
+    userCancelledTurnOwners: new Map(),
+    createTurnTab: () => ({ id: "fresh", surfaceId: "surface-fresh" }),
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    logger: { info() {} },
+  });
+
+  assert.deepEqual(
+    BrowserHost.prototype.beginTurn.call(
+      fixture,
+      "trace_next",
+      false,
+      222,
+      conversationKey,
+      "Codex Native2",
+    ),
+    {
+      surfaceId: "surface-fresh",
+      tabId: "fresh",
+      reused: false,
+      connectorBound: false,
+    },
+  );
+});
+
+test("a required retained conversation fails before creating a browser tab", () => {
+  let created = false;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map(),
+    userCancelledTurnOwners: new Map(),
+    createTurnTab: () => {
+      created = true;
+      throw new Error("must not allocate a replacement tab");
+    },
+  });
+
+  assert.throws(
+    () => BrowserHost.prototype.beginTurn.call(
+      fixture,
+      "trace_next",
+      false,
+      222,
+      "d".repeat(64),
+      undefined,
+      true,
+    ),
+    /retained ChatGPT conversation is no longer available/,
+  );
+  assert.equal(created, false);
 });
 
 test("five browser tabs are a hard account-safety limit", () => {
@@ -1310,6 +1519,32 @@ test("five browser tabs are a hard account-safety limit", () => {
     () => BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_six", 444),
     /already has 5 browser tabs.*avoid excessive parallel traffic/,
   );
+});
+
+test("a full browser host evicts only its oldest ready tab", () => {
+  const oldest = { id: "oldest", ordinal: 1, status: "ready", lastHeartbeatAt: 10 };
+  const newer = { id: "newer", ordinal: 2, status: "ready", lastHeartbeatAt: 20 };
+  const running = [3, 4, 5].map((ordinal) => ({
+    id: `running-${ordinal}`,
+    ordinal,
+    status: "running",
+    lastHeartbeatAt: 1,
+  }));
+  const removed = [];
+  const fixture = {
+    turnTabs: new Map([oldest, newer, ...running].map(tab => [tab.id, tab])),
+    removeTurnTab(tab, abortRunning) {
+      removed.push([tab.id, abortRunning]);
+      this.turnTabs.delete(tab.id);
+    },
+    window: {
+      contentView: { addChildView() {} },
+    },
+  };
+
+  assert.equal(BrowserHost.prototype.evictOldestRetainedTurnTab.call(fixture), true);
+  assert.deepEqual(removed, [["oldest", false]]);
+  assert.equal(fixture.turnTabs.has("running-3"), true);
 });
 
 test("ending one browser turn does not stop another running tab", async () => {
@@ -1364,6 +1599,127 @@ test("ending one browser turn does not stop another running tab", async () => {
   assert.equal(removedViews, 1);
   assert.equal(active.status, "running");
   assert.equal(fixture.activeTraceId, active.traceId);
+});
+
+test("a completed keyed turn is retained for thirty minutes and preserves its acknowledgement", async () => {
+  const throttling = [];
+  const tab = {
+    id: "tab-retained",
+    surfaceId: "surface-retained",
+    traceId: "trace_retained",
+    conversationKey: "e".repeat(64),
+    connectorIdentity: "Codex Native2",
+    connectorBound: false,
+    helperPid: 777,
+    status: "running",
+    loading: true,
+    view: { webContents: {
+      isDestroyed: () => false,
+      setBackgroundThrottling: (enabled) => throttling.push(enabled),
+    } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    selectedTabId: tab.id,
+    syncViewVisibility() {},
+    writeDescriptor() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    hide() {},
+    logger: { info() {} },
+  });
+
+  const result = await BrowserHost.prototype.endTurn.call(
+    fixture,
+    tab.traceId,
+    tab.helperPid,
+    "completed",
+    true,
+    undefined,
+    true,
+    true,
+  );
+
+  assert.deepEqual(result, { cancelledByUser: false });
+  assert.equal(fixture.turnTabs.get(tab.id), tab);
+  assert.equal(tab.status, "ready");
+  assert.equal(tab.connectorBound, true);
+  assert.equal(Number.isFinite(tab.lastHeartbeatAt), true);
+  assert.deepEqual(throttling, [true]);
+
+  const retainedAt = tab.lastHeartbeatAt;
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, retainedAt + (30 * 60 * 1000) - 1);
+  assert.equal(fixture.turnTabs.has(tab.id), true);
+});
+
+test("a retained browser tab expires at thirty minutes", () => {
+  const removed = [];
+  const tab = {
+    id: "tab-expired",
+    traceId: "trace_expired",
+    status: "ready",
+    lastHeartbeatAt: 100,
+  };
+  const fixture = {
+    turnTabs: new Map([[tab.id, tab]]),
+    logger: { info() {} },
+    removeTurnTab(candidate, abortRunning) {
+      removed.push([candidate.id, abortRunning]);
+      this.turnTabs.delete(candidate.id);
+    },
+  };
+
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 100 + (30 * 60 * 1000));
+
+  assert.deepEqual(removed, [[tab.id, false]]);
+  assert.equal(fixture.turnTabs.size, 0);
+});
+
+test("a completed connector turn without binding is released instead of retained", async () => {
+  let closed = false;
+  const tab = {
+    id: "tab-unbound",
+    traceId: "trace_unbound",
+    conversationKey: "f".repeat(64),
+    connectorIdentity: "Codex Native2",
+    helperPid: 777,
+    status: "running",
+    loading: true,
+    view: { webContents: {
+      isDestroyed: () => false,
+      setBackgroundThrottling() {},
+      close: () => { closed = true; },
+    } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    selectedTabId: tab.id,
+    window: { contentView: { removeChildView() {} } },
+    syncViewVisibility() {},
+    writeDescriptor() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    hide() {},
+    logger: { info() {} },
+  });
+
+  assert.deepEqual(await BrowserHost.prototype.endTurn.call(
+    fixture,
+    tab.traceId,
+    tab.helperPid,
+    "completed",
+    true,
+    undefined,
+    true,
+    false,
+  ), { cancelledByUser: false });
+
+  assert.equal(fixture.turnTabs.size, 0);
+  assert.equal(closed, true);
 });
 
 test("failed and aborted browser turns release their tab slots", async () => {

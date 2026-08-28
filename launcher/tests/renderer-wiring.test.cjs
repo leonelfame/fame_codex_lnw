@@ -68,10 +68,36 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
 });
 
-test("the renderer bridge switch reaches the fail-closed runtime route", () => {
-  assert.match(appSource, /api!\.setBridgeEnabled\(enabled\)/);
-  assert.match(electronMain, /runtimeHost\.setBridgeEnabled\(enabled === true\)/);
-  assert.match(electronMain, /codexRestartRequired:\s*true/);
+test("Bigger Context startup recommendation reuses the persisted setting and setup transaction", () => {
+  assert.match(
+    appSource,
+    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\(\s*snapshot\.state\.coreSetupComplete === true && !snapshot\.state\.experimentalBiggerContext,/,
+  );
+  assert.match(appSource, /&& !biggerContextRecommendationOpen;/);
+  assert.match(appSource, /updateState\(await api!\.setBiggerContext\(enabled\)\)/);
+  assert.match(
+    appSource,
+    /<BiggerContextRecommendation[\s\S]*?checked=\{snapshot\.state\.experimentalBiggerContext\}[\s\S]*?onClose=\{\(\) => setBiggerContextRecommendationOpen\(false\)\}/,
+  );
+  assert.match(appSource, /<Switch checked=\{checked\} disabled=\{busy\} onChange=\{onChange\} \/>/);
+  assert.match(stylesSource, /\.bigger-context-recommendation-backdrop\s*\{[^}]*position:\s*fixed;/s);
+  assert.doesNotMatch(stylesSource, /\.bigger-context-recommendation-backdrop\s*\{[^}]*backdrop-filter:/s);
+  assert.match(stylesSource, /\.bigger-context-recommendation\s*\{[^}]*width:\s*min\(400px, 100%\);[^}]*padding:\s*18px;/s);
+});
+
+test("MCP surfaces use the official local protocol mark", () => {
+  assert.match(appSource, /function McpMark\(\) \{\s*return <i aria-hidden="true" className="mcp-mark" \/>;\s*\}/);
+  assert.match(appSource, /icon === "mcp" \? <McpMark \/> : <Icon name=\{icon\} \/>/);
+  assert.match(appSource, /<McpMark \/>[\s\S]*?copy\.mcpTitle/);
+  assert.doesNotMatch(appSource, /<Icon name="mcp" \/>/);
+  assert.match(stylesSource, /mask:\s*url\("\.\.\/assets\/mcp-mark\.svg"\)/);
+});
+
+test("the configured launcher exposes no persistent bridge opt-out", () => {
+  assert.doesNotMatch(appSource, /setBridgeEnabled|bridgeRouteBody/);
+  assert.doesNotMatch(preloadSource, /launcher:bridge-enabled|setBridgeEnabled/);
+  assert.doesNotMatch(electronMain, /launcher:bridge-enabled|bridge-disabled|bridgeEnabled/);
+  assert.match(electronMain, /runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?runtimeHost\.connectBridgeRoute\(\)/);
 });
 
 test("MCP connection remains unavailable until the model catalog is verified", () => {
@@ -132,6 +158,15 @@ test("MCP verification proves runtime health before checking the connector", () 
 
 test("saved ChatGPT authentication is refreshed before setup is presented", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
+  const productionStartup = electronMain.indexOf("} else void (async () => {");
+  const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
+  const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
+  const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
+  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
+  assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
+  assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
+  assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
+  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 

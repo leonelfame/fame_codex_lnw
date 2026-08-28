@@ -664,74 +664,35 @@ class RuntimeHost {
     }
   }
 
-  async setBridgeEnabled(enabled) {
+  async connectBridgeRoute() {
     this.assertProductionProfile("Codex bridge routing");
-    const desired = enabled === true;
-    const name = desired ? "bridge-connect" : "bridge-disconnect";
+    const name = "bridge-connect";
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = name;
     try {
       const current = await this.bridgeStatus(name);
-      if (!current.installed) throw new Error("Install the Codex integration before changing the bridge route");
-      if (desired) {
-        const runtime = await this.supervisor.startIfConfigured();
-        if (runtime.status !== "ready") {
-          throw new Error(`Local runtime is ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
-        }
-        if (current.active) return current;
-        try {
-          const connected = await this.run(name, ["route", "connect"], {
-            embedded: true,
-            message: "Connecting Codex to the launcher",
-            successMessage: "Codex bridge connected",
-            timeoutMs: 15_000,
-          });
-          const result = parseBridgeRouteResult(connected.stdout, { expectedActive: true });
-          const verified = await this.bridgeStatus(name);
-          if (!verified.installed || !verified.active) {
-            throw new Error("Codex bridge route connection did not persist in the active config");
-          }
-          return result;
-        } catch (error) {
-          let cleanupError;
-          try { await this.supervisor.stopForSetup(); } catch (caught) { cleanupError = caught; }
-          if (!cleanupError) throw error;
-          throw new Error(
-            `${error instanceof Error ? error.message : String(error)}; stopping the unused runtime also failed:`
-            + ` ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          );
-        }
-      }
-
-      await this.supervisor.stopForSetup();
-      if (!current.active) return current;
+      if (!current.installed) throw new Error("Install the Codex integration before connecting the bridge route");
+      if (current.active) return current;
       try {
-        const disconnected = await this.run(name, ["route", "disconnect"], {
+        const connected = await this.run(name, ["route", "connect"], {
           embedded: true,
-          message: "Restoring the previous Codex route",
-          successMessage: "Codex bridge disconnected",
+          message: "Connecting Codex to the launcher",
+          successMessage: "Codex bridge connected",
           timeoutMs: 15_000,
         });
-        const result = parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
+        const result = parseBridgeRouteResult(connected.stdout, { expectedActive: true });
         const verified = await this.bridgeStatus(name);
-        if (!verified.installed || verified.active) {
-          throw new Error("Codex bridge route restore did not persist in the active config");
+        if (!verified.installed || !verified.active) {
+          throw new Error("Codex bridge route connection did not persist in the active config");
         }
         return result;
       } catch (error) {
-        let recoveryError;
-        try {
-          const runtime = await this.supervisor.startIfConfigured();
-          if (runtime.status !== "ready") {
-            throw new Error(`runtime recovery returned ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
-          }
-        } catch (caught) {
-          recoveryError = caught;
-        }
-        if (!recoveryError) throw error;
+        let cleanupError;
+        try { await this.supervisor.stopForSetup(); } catch (caught) { cleanupError = caught; }
+        if (!cleanupError) throw error;
         throw new Error(
-          `${error instanceof Error ? error.message : String(error)}; restoring the previous runtime also failed:`
-          + ` ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+          `${error instanceof Error ? error.message : String(error)}; stopping the unrouted runtime also failed:`
+          + ` ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
         );
       }
     } finally {
@@ -926,7 +887,6 @@ class RuntimeHost {
       || (existing.config?.releaseVersion === currentVersion && !connectorMigrationRequired)) {
       return { updated: false };
     }
-    const route = await this.bridgeStatus("runtime-upgrade-route");
     const args = [
       "setup",
       existing.mode === "full" ? "--full" : "--browser-only",
@@ -943,11 +903,9 @@ class RuntimeHost {
       successMessage: `Launcher runtime upgraded to ${currentVersion}`,
       timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
     });
-    if (!route.active) await this.setBridgeEnabled(false);
     return {
       updated: true,
       mode: existing.mode,
-      bridgeEnabled: route.active,
       fromVersion: existing.config.releaseVersion,
       toVersion: currentVersion,
       connectorMigrated: connectorMigrationRequired,

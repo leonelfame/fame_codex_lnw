@@ -9,6 +9,7 @@ import {
   inspectLauncherBrowserHost,
   notifyLauncherTurn,
   readLauncherBrowserHostDescriptor,
+  releaseLauncherRetainedConversation,
   selectLauncherPage,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
@@ -76,7 +77,7 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
     };
     response.writeHead(200, { "content-type": "application/json" });
     response.end(request.url === "/v1/turn/start"
-      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB"}\n'
+      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":true,"connectorBound":true}\n'
       : request.url === "/v1/turn/end"
         ? '{"ok":true,"cancelledByUser":false}\n'
         : '{"ok":true}\n');
@@ -93,9 +94,23 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       phase: "start",
       traceId: "abc123def456",
       helperPid: process.pid,
-    })).resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB" });
+      conversationKey: "a".repeat(64),
+      connectorIdentity: "Codex Native2",
+      requireRetainedConversation: true,
+    })).resolves.toEqual({
+      surfaceId: "launcher_surface_id_0123456789AB",
+      reused: true,
+      connectorBound: true,
+    });
     expect(received.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
-    expect(received.body).toEqual({ phase: "start", traceId: "abc123def456", helperPid: process.pid });
+    expect(received.body).toEqual({
+      phase: "start",
+      traceId: "abc123def456",
+      helperPid: process.pid,
+      conversationKey: "a".repeat(64),
+      connectorIdentity: "Codex Native2",
+      requireRetainedConversation: true,
+    });
     await notifyLauncherTurn(path, {
       phase: "heartbeat",
       traceId: "abc123def456",
@@ -107,13 +122,51 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       traceId: "abc123def456",
       helperPid: process.pid,
       status: "completed",
+      retain: true,
+      connectorBound: true,
     })).resolves.toEqual({ cancelledByUser: false });
     expect(received.body).toEqual({
       phase: "end",
       traceId: "abc123def456",
       helperPid: process.pid,
       status: "completed",
+      retain: true,
+      connectorBound: true,
     });
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("launcher retained-conversation release uses its authenticated exact-key endpoint", async () => {
+  let received: { url?: string; authorization?: string; body?: unknown } = {};
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    received = {
+      url: request.url,
+      authorization: request.headers.authorization,
+      body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+    };
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true,"released":1}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(releaseLauncherRetainedConversation(path, "b".repeat(64))).resolves.toBe(1);
+    expect(received).toEqual({
+      url: "/v1/turn/release",
+      authorization: "Bearer launcher-control-token-0123456789abcdefghijklmnop",
+      body: { conversationKey: "b".repeat(64) },
+    });
+    await expect(releaseLauncherRetainedConversation(path, "not-a-key"))
+      .rejects.toThrow("retained conversation key is invalid");
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
