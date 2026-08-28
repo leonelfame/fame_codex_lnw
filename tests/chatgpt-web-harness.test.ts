@@ -2604,7 +2604,7 @@ describe("ChatGPT outer-native harness v4", () => {
     environment.tools = [
       { name: "exec_command", description: "Run a Codex command", parameters: { type: "object" } },
     ];
-    const abandonedToken = await broker.register(environment);
+    const abandonedToken = await broker.register(environment, 3_000);
     const replacementToken = await broker.register(environment);
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -2616,6 +2616,7 @@ describe("ChatGPT outer-native harness v4", () => {
 
     try {
       expect(chatGptMcpInvocationTimeout(environment)).toBe(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
+      expect(chatGptMcpInvocationTimeout({ ...environment, expiresAt: 1_500 }, 1_000)).toBe(500);
       await client.connect(transport);
       const abandoned = client.callTool({
         name: "codex_exec",
@@ -2625,7 +2626,7 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(request).toMatchObject({ wireName: "exec_command" });
       await expect(abandoned).rejects.toBeDefined();
 
-      const deadline = Date.now() + 2_000;
+      const deadline = Date.now() + 5_000;
       let abandonedError: unknown;
       do {
         try {
