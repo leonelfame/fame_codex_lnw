@@ -1852,6 +1852,20 @@ test("completed-turn evidence flushes a short-lived reasoning label immediately"
   ]);
 });
 
+test("a structurally completed trailing Pro commentary does not wait for another parsed trace block", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100);
+  const commentary = [{
+    kind: "commentary",
+    text: "The tracked worktree is clean; I’m preserving the untracked user artifacts.",
+    complete: true,
+  }] as const;
+  expect(tracker.observe([...commentary], false, 1_000)).toEqual([]);
+  expect(tracker.observe([...commentary], false, 1_100)).toEqual([{
+    kind: "commentary",
+    text: "The tracked worktree is clean; I’m preserving the untracked user artifacts.",
+  }]);
+});
+
 test("visible DOM trace emits one complete commentary paragraph before the next action", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
   const initial = [
@@ -1914,8 +1928,10 @@ test("response DOM separates streaming commentary from the final Markdown answer
     + "          ?? candidate",
   );
   expect(workerSource).toContain('candidate.closest<HTMLElement>("[data-item-anchor]")');
+  expect(workerSource).toContain("const hasFollowingRenderedSibling = (candidate: HTMLElement)");
+  expect(workerSource).toContain("itemAnchor?.nextElementSibling");
+  expect(workerSource).toContain("block.complete === true || index < blocks.length - 1");
   expect(workerSource).toContain("const traceByKey = new Map<string, ChatGptVisibleTraceBlock>()");
-  expect(workerSource).toContain('block.kind === "commentary" ? { complete: index < blocks.length - 1 }');
   expect(workerSource).toContain('uiControl: candidate.matches("button")');
   expect(workerSource).toContain("!overlapsRenderedAnswer(semantic)");
   expect(workerSource).toContain("!overlapsRenderedAnswer(container)");
