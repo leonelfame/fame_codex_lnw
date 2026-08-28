@@ -59,7 +59,8 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
   compaction; each message gets a new turn-bound MCP capability, while all of that message's tool
   rounds stay inside one Web response. At compaction, that exact agent submits the checkpoint
   through a one-shot MCP control capability before its retained surface is closed and the next
-  compaction epoch starts a new Temporary Chat. Measured
+  compaction epoch starts a new Temporary Chat. If that private chat was already closed, the bridge
+  rebuilds the checkpoint from canonical Codex history in a fresh read-only Temporary Chat. Measured
   browser ceilings trigger compaction, while Luna carries completed state through an adaptive
   rolling checkpoint. Browser chats are never reused across tasks or added to normal ChatGPT
   history.

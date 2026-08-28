@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LAUNCHER_BROWSER_HOST_KIND,
+  LauncherRetainedConversationUnavailableError,
   LauncherBrowserTurnCancelledError,
   inspectLauncherBrowserHost,
   notifyLauncherTurn,
@@ -193,6 +194,34 @@ test("launcher turn control preserves explicit user cancellation as a terminal s
     }).catch(cause => cause);
     expect(error).toBeInstanceOf(LauncherBrowserTurnCancelledError);
     expect((error as Error).message).toBe("turn closed by user");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("launcher turn control preserves a missing retained conversation as a typed signal", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    response.writeHead(409, { "content-type": "application/json" });
+    response.end('{"error":"retained source missing","code":"retained_conversation_unavailable"}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    const error = await notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "missing123456",
+      helperPid: process.pid,
+      conversationKey: "a".repeat(64),
+      requireRetainedConversation: true,
+    }).catch(caught => caught);
+    expect(error).toBeInstanceOf(LauncherRetainedConversationUnavailableError);
+    expect(error.message).toContain("retained source missing");
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
   }

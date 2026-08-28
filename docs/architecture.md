@@ -110,9 +110,10 @@ retain their measured adapter-owned limits.
 
 In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
 capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool
-environment. Missing source state or an invalid handoff fails explicitly. Browser-only mode keeps a
-dedicated read-only browser summarization turn, then returns the native replacement-history shape
-expected by Codex. A prompt-level checkpoint marker is translated into a visible Codex trace item;
+environment. A missing retained source falls back to a dedicated read-only Temporary Chat built from
+canonical Codex history; an invalid or ambiguous handoff still fails explicitly. Browser-only mode
+uses the same read-only summarization path, then returns the native replacement-history shape expected
+by Codex. A prompt-level checkpoint marker is translated into a visible Codex trace item;
 every later tool action in the same turn continues to present the current turn capability. Visible
 ChatGPT status rows become reasoning summaries, while stable prose between rows becomes native
 Codex commentary.

@@ -106,8 +106,10 @@ one-shot MCP control capability and no ordinary work capability. The checkpoint 
 tail of a potentially huge tool result, and its wait is capped at five minutes independently of the
 normal turn timeout.
 The old surface closes only after both the structured handoff and that Web response complete; the
-next epoch then starts a fresh Temporary Chat. Browser-only mode has no retained MCP boundary and keeps the three-message
-compaction path so its summarizer receives the complete expanded history.
+next epoch then starts a fresh Temporary Chat. If the retained private chat was already closed, the
+bridge starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
+has no retained MCP boundary and keeps the three-message compaction path so its summarizer receives
+the complete expanded history.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final
 commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context

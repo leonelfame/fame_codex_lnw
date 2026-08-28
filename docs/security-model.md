@@ -88,8 +88,9 @@ Closing a running tab destroys its page and terminates that turn. The five-tab l
 account traffic. Tool calls remain in the same ChatGPT response. The
 bounded local continuation cache is private, expires, and exists only to implement Codex
 `previous_response_id` replay. Full-mode context compaction accepts a checkpoint only through its
-one-shot MCP control capability in the exact retained source chat; the bridge never parses ordinary
-assistant prose as a handoff.
+one-shot MCP control capability in the exact retained source chat. If that chat no longer exists, a
+fresh tool-free Temporary Chat receives the canonical Codex history; the bridge never parses ordinary
+assistant prose as a structured handoff.
 
 ## Network exposure
 

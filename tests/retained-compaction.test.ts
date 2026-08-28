@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptRetainedConversationUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
 import {
   MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   requestRetainedCompactionHandoff,
@@ -746,7 +747,7 @@ test("a compact HTTP observer can reconnect without sending a second retained-ch
   }
 });
 
-test("structured compact fails closed when its exact retained source is absent", async () => {
+test("structured compact rebuilds canonical context when its retained source is absent", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-missing-retained-compact-"));
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
@@ -763,9 +764,16 @@ test("structured compact fails closed when its exact retained source is absent",
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);
   let browserStarts = 0;
-  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
     browserStarts += 1;
-    return "must not run";
+    expect(turn.requireRetainedConversation).toBeUndefined();
+    expect(turn.conversationKey).toBeUndefined();
+    expect(turn.compaction).toBeTrue();
+    const prepared = await turn.prepare();
+    expect(prepared.text).toContain("Original task");
+    expect(prepared.text).toContain("Continue with the next step");
+    prepared.release();
+    return "Fallback checkpoint from canonical Codex context";
   };
   const compact = request(true);
   const events: AdapterEvent[] = [];
@@ -775,14 +783,73 @@ test("structured compact fails closed when its exact retained source is absent",
       { headers: new Headers() },
       event => events.push(event),
     );
-    expect(browserStarts).toBe(0);
-    expect(events).toEqual([expect.objectContaining({
-      type: "error",
-      code: "compaction_source_unavailable",
-      retryable: false,
-    })]);
+    expect(browserStarts).toBe(1);
+    expect(events.some(event => event.type === "text_delta"
+      && event.text.includes("Fallback checkpoint from canonical Codex context"))).toBeTrue();
+    expect(events.some(event => event.type === "text_delta"
+      && event.text.includes("CODEX_LATEST_USER_PROMPT_JSON"))).toBeTrue();
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
   } finally {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("structured compact rebuilds canonical context when its retained browser disappeared", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-stale-retained-compact-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://stale-retained-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root),
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const sourceRequest = request(false);
+  const namespace = chatGptWebExecutionNamespace(provider);
+  const sourceKey = `${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`;
+  chatGptTurnSessions.getOrCreate(sourceKey, () => ({
+    mode: "read-only",
+    browser: Promise.resolve("source complete"),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, namespace)!,
+    cancel() {},
+  }));
+  await chatGptTurnSessions.find(sourceKey)!.browserOutcome;
+
+  let browserStarts = 0;
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    browserStarts += 1;
+    if (turn.requireRetainedConversation) throw chatGptRetainedConversationUnavailableError();
+    const prepared = await turn.prepare();
+    expect(prepared.text).toContain("Original task");
+    prepared.release();
+    return "Fallback checkpoint after retained browser loss";
+  };
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(
+      request(true),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    expect(browserStarts).toBe(2);
+    expect(events.some(event => event.type === "text_delta"
+      && event.text.includes("Fallback checkpoint after retained browser loss"))).toBeTrue();
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
   }

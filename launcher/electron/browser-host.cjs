@@ -1287,7 +1287,9 @@ class BrowserHost {
       };
     }
     if (requireRetainedConversation) {
-      throw new Error("The retained ChatGPT conversation is no longer available");
+      const error = new Error("The retained ChatGPT conversation is no longer available");
+      error.code = "retained_conversation_unavailable";
+      throw error;
     }
     const tab = this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity);
     this.selectedTabId = tab.id;

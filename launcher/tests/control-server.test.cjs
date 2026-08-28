@@ -106,6 +106,42 @@ test("browser control server authenticates and owns turn visibility", async () =
   }
 });
 
+test("browser control server reports a missing retained conversation as a typed conflict", async () => {
+  const host = {
+    beginTurn: () => {
+      const error = new Error("The retained ChatGPT conversation is no longer available");
+      error.code = "retained_conversation_unavailable";
+      throw error;
+    },
+  };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({ showBrowserDuringTurns: false }),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    const response = await fetch(`${descriptor.endpoint}/v1/turn/start`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        phase: "start",
+        traceId: "missing123456",
+        helperPid: process.pid,
+        conversationKey: "a".repeat(64),
+        requireRetainedConversation: true,
+      }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "The retained ChatGPT conversation is no longer available",
+      code: "retained_conversation_unavailable",
+    });
+  } finally {
+    await server.close();
+  }
+});
+
 test("browser control server releases only ready tabs for an authenticated conversation key", async () => {
   const removed = [];
   const releaseEvents = [];

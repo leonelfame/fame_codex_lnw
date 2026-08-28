@@ -186,9 +186,11 @@ class BrowserControlServer {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn("browser.control_rejected", { message });
       const cancelled = error?.code === "turn_cancelled";
-      writeJson(response, cancelled ? 409 : 400, {
+      const retainedUnavailable = error?.code === "retained_conversation_unavailable";
+      writeJson(response, cancelled || retainedUnavailable ? 409 : 400, {
         error: message,
         ...(cancelled ? { code: "turn_cancelled" } : {}),
+        ...(retainedUnavailable ? { code: "retained_conversation_unavailable" } : {}),
       });
     }
   }

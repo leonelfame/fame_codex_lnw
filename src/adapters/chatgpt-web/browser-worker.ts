@@ -62,6 +62,7 @@ import { loginVerificationMarkerPath } from "../../browser-login";
 import {
   connectLauncherBrowserHost,
   LauncherBrowserTurnCancelledError,
+  LauncherRetainedConversationUnavailableError,
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
@@ -75,6 +76,7 @@ import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
+  chatGptRetainedConversationUnavailableError,
   chatGptStoppedThinkingError,
 } from "./adapter-error";
 import {
@@ -2788,6 +2790,9 @@ export class ChatGptBrowserWorker {
       ...(turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
     }).catch(error => {
       if (error instanceof LauncherBrowserTurnCancelledError) throw chatGptBrowserTabClosedError();
+      if (error instanceof LauncherRetainedConversationUnavailableError) {
+        throw chatGptRetainedConversationUnavailableError();
+      }
       throw error;
     });
     const surfaceId = lease.surfaceId;
@@ -2819,7 +2824,7 @@ export class ChatGptBrowserWorker {
     try {
       if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
       if (turn.requireRetainedConversation && !reused) {
-        throw new Error("The retained ChatGPT conversation is no longer available");
+        throw chatGptRetainedConversationUnavailableError();
       }
       if (reused && !turn.prepareResume) {
         throw new Error("Launcher reused a ChatGPT conversation without a continuation prompt");

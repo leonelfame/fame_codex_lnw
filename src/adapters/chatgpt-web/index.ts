@@ -514,26 +514,37 @@ export function createChatGptWebAdapter(
             .update(`${compactionExecutionKey}:handoff`)
             .digest("hex")
             .slice(0, 12);
+          const runFreshCompactionFallback = async (reason: string): Promise<string> => {
+            console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
+            const fallbackRuntime = startRuntime(
+              parsed,
+              undefined,
+              `${handoffTraceId}_fallback`,
+              turnCapabilities,
+            );
+            try {
+              const rawSummary = await fallbackRuntime.browser;
+              await fallbackRuntime.physicalSettlement;
+              return canonicalizeCompactionHandoff(parsed, rawSummary);
+            } catch (error) {
+              fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
+              await fallbackRuntime.physicalSettlement.catch(() => {});
+              throw error;
+            }
+          };
           let sharedSummary = existingStructuredCompactionRun(compactionExecutionKey);
           if (!sharedSummary) {
             const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
             const source = sourceConversationKey
               ? chatGptTurnSessions.findConversationHead(sourceConversationKey)
               : undefined;
-            if (!source?.conversationKey()) {
-              emit({
-                type: "error",
-                message: "The retained ChatGPT conversation required for context compaction is unavailable; the bridge will not synthesize a replacement chat.",
-                status: 409,
-                errorType: "invalid_request_error",
-                code: "compaction_source_unavailable",
-                retryable: false,
-              });
-              return;
-            }
             sharedSummary = runStructuredCompactionOnce(
               compactionExecutionKey,
               async () => {
+                const retainedKey = source?.conversationKey();
+                if (!source || !retainedKey) {
+                  return runFreshCompactionFallback("source_unavailable_before_handoff");
+                }
                 try {
                   let rawSummary: string;
                   if (source.isActive() && source.runtime.mode === "tools") {
@@ -566,17 +577,21 @@ export function createChatGptWebAdapter(
                     );
                   }
                   const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
-                  await chatGptTurnSessions.retireConversationAndWait(source.conversationKey()!);
+                  await chatGptTurnSessions.retireConversationAndWait(retainedKey);
                   return summary;
                 } catch (error) {
                   let handoffError = error instanceof Error ? error : new Error(String(error));
                   try {
-                    await chatGptTurnSessions.retireConversationAndWait(source.conversationKey()!);
+                    await chatGptTurnSessions.retireConversationAndWait(retainedKey);
                   } catch (retirementError) {
                     handoffError = new AggregateError(
                       [handoffError, retirementError instanceof Error ? retirementError : new Error(String(retirementError))],
                       "Structured compaction failed and its retained conversation could not be retired",
                     );
+                  }
+                  if (handoffError instanceof ChatGptWebAdapterError
+                    && handoffError.code === "compaction_source_unavailable") {
+                    return runFreshCompactionFallback("source_disappeared_before_handoff");
                   }
                   throw handoffError;
                 }

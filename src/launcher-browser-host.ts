@@ -14,6 +14,13 @@ export class LauncherBrowserTurnCancelledError extends Error {
   }
 }
 
+export class LauncherRetainedConversationUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherRetainedConversationUnavailableError";
+  }
+}
+
 export interface LauncherBrowserHostDescriptor {
   version: 2;
   kind: typeof LAUNCHER_BROWSER_HOST_KIND;
@@ -354,6 +361,11 @@ export async function notifyLauncherTurn(
           typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
         );
       }
+      if (response.status === 409 && body.code === "retained_conversation_unavailable") {
+        throw new LauncherRetainedConversationUnavailableError(
+          typeof body.error === "string" ? body.error : "The retained ChatGPT conversation is no longer available",
+        );
+      }
       const detail = typeof body.error === "string" ? body.error : "";
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
@@ -382,7 +394,8 @@ export async function notifyLauncherTurn(
     }
     return {};
   } catch (error) {
-    if (error instanceof LauncherBrowserTurnCancelledError) throw error;
+    if (error instanceof LauncherBrowserTurnCancelledError
+      || error instanceof LauncherRetainedConversationUnavailableError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);

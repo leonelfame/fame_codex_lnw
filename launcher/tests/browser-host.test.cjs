@@ -1504,7 +1504,8 @@ test("a required retained conversation fails before creating a browser tab", () 
       undefined,
       true,
     ),
-    /retained ChatGPT conversation is no longer available/,
+    (error) => error?.code === "retained_conversation_unavailable"
+      && /retained ChatGPT conversation is no longer available/.test(error.message),
   );
   assert.equal(created, false);
 });

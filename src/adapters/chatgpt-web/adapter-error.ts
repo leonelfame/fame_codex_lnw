@@ -44,3 +44,15 @@ export function chatGptStoppedThinkingError(): ChatGptWebAdapterError {
     },
   );
 }
+
+export function chatGptRetainedConversationUnavailableError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "The retained ChatGPT conversation is no longer available.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: "compaction_source_unavailable",
+      retryable: false,
+    },
+  );
+}
