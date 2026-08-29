@@ -355,14 +355,15 @@ class BrowserHost {
       loading: true,
       message: "ChatGPT is working",
       bootstrapReady: false,
+      rendererReady: false,
+      deviceEmulationViewport: null,
+      deviceEmulationDirty: true,
       bootstrapDeadlineAt: Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
       lastHeartbeatAt: Date.now(),
     };
     this.turnTabs.set(id, tab);
     this.window.contentView.addChildView(view);
-    view.setBounds(this.hiddenTurnBounds());
-    // Start running turns with a real renderer viewport even before the first visibility sync.
-    view.setVisible(true);
+    this.presentTurnView(tab, false);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
@@ -441,10 +442,14 @@ class BrowserHost {
     };
     contents.on("will-navigate", blockAuthenticationNavigation);
     contents.on("will-redirect", blockAuthenticationNavigation);
-    contents.on("did-start-navigation", (_event, url, _inPlace, mainFrame) => {
+    contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame) return;
       tab.url = url;
       tab.loading = true;
+      if (!inPlace) {
+        tab.rendererReady = false;
+        tab.deviceEmulationDirty = true;
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-start-loading", () => {
@@ -459,7 +464,9 @@ class BrowserHost {
     contents.on("did-finish-load", () => {
       tab.url = contents.getURL();
       tab.loading = false;
+      tab.rendererReady = true;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
+      this.syncViewVisibility();
       void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
       const encoded = JSON.stringify(tab.surfaceId);
       void contents.executeJavaScript(`(() => {
@@ -890,6 +897,44 @@ class BrowserHost {
     };
   }
 
+  enableHiddenTurnViewport(contents, { width, height }) {
+    contents.enableDeviceEmulation({
+      screenPosition: "desktop",
+      screenSize: { width, height },
+      viewPosition: { x: 0, y: 0 },
+      deviceScaleFactor: 0,
+      viewSize: { width, height },
+      scale: 1,
+    });
+  }
+
+  presentTurnView(tab, visible) {
+    if (visible) {
+      // Establish native on-screen bounds before removing the background viewport contract.
+      tab.view.setBounds(this.bounds);
+      if (tab.rendererReady && tab.deviceEmulationViewport) {
+        tab.view.webContents.disableDeviceEmulation();
+        tab.deviceEmulationViewport = null;
+      }
+      if (tab.rendererReady) tab.deviceEmulationDirty = false;
+    } else {
+      // A WebContentsView born outside a hidden BrowserWindow has a 0x0 renderer even when its
+      // native bounds and View visibility are non-zero. Device emulation gives background turns
+      // an explicit renderer viewport before moving the view outside the launcher surface.
+      const bounds = this.hiddenTurnBounds();
+      if (tab.rendererReady
+        && (tab.deviceEmulationDirty
+          || tab.deviceEmulationViewport?.width !== bounds.width
+          || tab.deviceEmulationViewport?.height !== bounds.height)) {
+        this.enableHiddenTurnViewport(tab.view.webContents, bounds);
+        tab.deviceEmulationViewport = { width: bounds.width, height: bounds.height };
+        tab.deviceEmulationDirty = false;
+      }
+      tab.view.setBounds(bounds);
+    }
+    tab.view.setVisible(visible || tab.status === "running");
+  }
+
   activateHomeSurface() {
     this.selectedTabId = "home";
     this.syncViewVisibility();
@@ -904,10 +949,7 @@ class BrowserHost {
     this.view.setVisible(visible && !this.authView && !selected);
     for (const tab of this.turnTabs.values()) {
       const tabVisible = visible && !this.authView && selected?.id === tab.id;
-      tab.view.setBounds(tabVisible ? this.bounds : this.hiddenTurnBounds());
-      // A running hidden turn must remain composited; setVisible(false) gives Electron a zero
-      // width renderer viewport and makes otherwise valid Playwright actions fail as out of view.
-      tab.view.setVisible(tabVisible || tab.status === "running");
+      this.presentTurnView(tab, tabVisible);
     }
     this.authView?.setVisible(visible);
   }

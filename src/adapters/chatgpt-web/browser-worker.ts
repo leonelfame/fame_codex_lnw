@@ -2645,14 +2645,16 @@ export class ChatGptBrowserWorker {
       const renderedRoots = allMarkdownRoots.filter(candidate => (
         !commentaryRoots.includes(candidate)
       ));
-      // ChatGPT may merge adjacent `.markdown` roots when a streamed answer is finalized. Root
-      // boundaries therefore are not identity: flatten semantic blocks first, then assign keys by
-      // their global answer order so the same answer remains append-only across that reparenting.
+      // ChatGPT may merge adjacent `.markdown` roots or virtualize an old prefix while a streamed
+      // answer is finalized. Root boundaries and visible indices therefore are not identity:
+      // flatten semantic blocks and preserve ChatGPT's source ranges across that reparenting.
       const flattenedMarkdownSegments: Array<{
         tag: string;
         html: string;
         text: string;
         group?: string;
+        sourceStart?: number;
+        sourceEnd?: number;
       }> = [];
       const blockMarkdownTags = new Set([
         "address", "article", "aside", "blockquote", "div", "dl", "fieldset", "figcaption",
@@ -2660,8 +2662,20 @@ export class ChatGptBrowserWorker {
         "li", "main", "nav", "ol", "p", "pre", "section", "table", "ul",
       ]);
       let listGroupIndex = 0;
+      const sourceRange = (candidate: Element): { sourceStart: number; sourceEnd: number } | undefined => {
+        const startAttribute = candidate.getAttribute("data-start");
+        const endAttribute = candidate.getAttribute("data-end");
+        if (startAttribute === null || endAttribute === null) return undefined;
+        if (!startAttribute.trim() || !endAttribute.trim()) return undefined;
+        const sourceStart = Number(startAttribute);
+        const sourceEnd = Number(endAttribute);
+        return Number.isFinite(sourceStart) && Number.isFinite(sourceEnd) && sourceEnd >= sourceStart
+          ? { sourceStart, sourceEnd }
+          : undefined;
+      };
       const appendBlockSegment = (child: HTMLElement) => {
         const tag = child.tagName.toLowerCase();
+        const childRange = sourceRange(child);
         const listItems = tag === "ol" || tag === "ul"
           ? [...child.children].filter(candidate => candidate.tagName === "LI") as HTMLElement[]
           : [];
@@ -2670,11 +2684,14 @@ export class ChatGptBrowserWorker {
             tag,
             html: child.outerHTML,
             text: child.innerText.trim(),
+            ...childRange,
           });
           return;
         }
 
-        const group = `list:${listGroupIndex++}:${tag}`;
+        const group = childRange
+          ? `list:${childRange.sourceStart}:${tag}`
+          : `list:${listGroupIndex++}:${tag}`;
         const orderedStart = tag === "ol" ? Number(child.getAttribute("start") ?? "1") : undefined;
         listItems.forEach((item, itemIndex) => {
           const shell = child.cloneNode(false) as HTMLElement;
@@ -2688,6 +2705,7 @@ export class ChatGptBrowserWorker {
             html: shell.outerHTML,
             text: item.innerText.trim(),
             group,
+            ...sourceRange(item),
           });
         });
       };
@@ -2699,6 +2717,7 @@ export class ChatGptBrowserWorker {
             tag: "root",
             html: markdownRoot.innerHTML,
             text: markdownRoot.innerText.trim(),
+            ...sourceRange(markdownRoot),
           });
           return;
         }
@@ -2706,15 +2725,26 @@ export class ChatGptBrowserWorker {
         let inlineRun: Node[] = [];
         const flushInlineRun = () => {
           if (inlineRun.length === 0) return;
-          const shell = document.createElement("span");
-          inlineRun.forEach(node => shell.append(node.cloneNode(true)));
+          const nodes = inlineRun;
           inlineRun = [];
+          const shell = document.createElement("span");
+          nodes.forEach(node => shell.append(node.cloneNode(true)));
           const text = shell.textContent?.trim() ?? "";
           if (text) {
+            const rangedElements = nodes.flatMap(node => node instanceof Element
+              ? [node, ...node.querySelectorAll<HTMLElement>("[data-start][data-end]")]
+              : []);
+            const ranges = rangedElements
+              .map(sourceRange)
+              .filter((range): range is { sourceStart: number; sourceEnd: number } => range !== undefined);
             flattenedMarkdownSegments.push({
               tag: "inline",
               html: shell.outerHTML,
               text,
+              ...(ranges.length > 0 ? {
+                sourceStart: Math.min(...ranges.map(range => range.sourceStart)),
+                sourceEnd: Math.max(...ranges.map(range => range.sourceEnd)),
+              } : {}),
             });
           }
         };
@@ -2730,10 +2760,15 @@ export class ChatGptBrowserWorker {
         flushInlineRun();
       });
       const markdownSegments = flattenedMarkdownSegments.map((segment, index, segments) => ({
-        key: `${index}:${segment.tag}`,
+        key: segment.sourceStart !== undefined
+          ? `${segment.sourceStart}:${segment.tag}`
+          : `${index}:${segment.tag}`,
+        tag: segment.tag,
         html: segment.html,
         text: segment.text,
         ...(segment.group ? { group: segment.group } : {}),
+        ...(segment.sourceStart !== undefined ? { sourceStart: segment.sourceStart } : {}),
+        ...(segment.sourceEnd !== undefined ? { sourceEnd: segment.sourceEnd } : {}),
         streamable: index < segments.length - 1,
       }));
       const rendered = renderedRoots.at(-1);
@@ -3385,6 +3420,15 @@ export class ChatGptBrowserWorker {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
         if (visible) turn.onTextDelta(visible);
       };
+      const throwMarkdownConsistencyError = (error: unknown): never => {
+        if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
+        throw new ChatGptWebAdapterError(error.message, {
+          status: 502,
+          errorType: "server_error",
+          code: "browser_stream_inconsistent",
+          retryable: false,
+        });
+      };
       const completionTracker = new ChatGptCompletionTracker();
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
@@ -3483,18 +3527,13 @@ export class ChatGptBrowserWorker {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
           }
-          let textDelta: string;
-          try {
-            textDelta = markdownBuffer.observe(snapshot.markdownSegments);
-          } catch (error) {
-            if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
-            throw new ChatGptWebAdapterError(error.message, {
-              status: 502,
-              errorType: "server_error",
-              code: "browser_stream_inconsistent",
-              retryable: false,
-            });
-          }
+          const textDelta = (() => {
+            try {
+              return markdownBuffer.observe(snapshot.markdownSegments);
+            } catch (error) {
+              return throwMarkdownConsistencyError(error);
+            }
+          })();
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
@@ -3507,7 +3546,7 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
           });
           if (domError) throw new Error(domError);
-          if (markdownBuffer.currentSnapshotIsConsistent() && completionTracker.update({
+          if (completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
@@ -3517,7 +3556,13 @@ export class ChatGptBrowserWorker {
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
             }
-            const final = markdownBuffer.finish();
+            const final = (() => {
+              try {
+                return markdownBuffer.finish();
+              } catch (error) {
+                return throwMarkdownConsistencyError(error);
+              }
+            })();
             if (!final.markdown && snapshot.visibleText) {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
