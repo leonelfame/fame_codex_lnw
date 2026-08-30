@@ -3195,6 +3195,18 @@ export class ChatGptBrowserWorker {
           + ` ${redactChatGptUiDiagnostic(cause.message)}`,
         );
         const previousConnection = turnConnection;
+        if (previousConnection) {
+          // The observation timeout races the Playwright operation but cannot cancel the
+          // underlying page.evaluate by itself. Disconnect the stale CDP transport before
+          // opening its replacement so the hung probe cannot contend with its own recovery.
+          turnConnection = undefined;
+          await previousConnection.close().catch(error => {
+            console.warn(
+              `[chatgpt-web] previous browser observation connection did not close before rebind:`
+              + ` ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }
         const connection = await this.runStage(
           turn.traceId,
           `response_page_rebind_${attempt}`,
@@ -3216,14 +3228,6 @@ export class ChatGptBrowserWorker {
         turnConnection = connection.browser;
         page = connection.page;
         diagnosticPage = page;
-        if (previousConnection && previousConnection !== connection.browser) {
-          await previousConnection.close().catch(error => {
-            console.warn(
-              `[chatgpt-web] previous browser observation connection did not close after rebind:`
-              + ` ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-        }
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
         );
