@@ -210,7 +210,13 @@ function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
   return content.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
     if (part.type === "thinking") return { type: "thinking_summary", text: part.thinking };
-    return { type: "tool_call", id: part.id, name: part.name, arguments: part.arguments };
+    return {
+      type: "tool_call",
+      id: part.id,
+      name: part.name,
+      ...(part.namespace ? { namespace: part.namespace } : {}),
+      arguments: part.arguments,
+    };
   });
 }
 
@@ -266,11 +272,18 @@ function messageEnvelope(
       role: "tool_result",
       tool_call_id: message.toolCallId,
       tool_name: message.toolName,
+      ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
       is_error: message.isError,
       content: inputContent(message.content, images, budget),
     };
   }
-  if (message.role === "assistant") return { role: "assistant", content: assistantContent(message.content) };
+  if (message.role === "assistant") {
+    return {
+      role: "assistant",
+      ...(message.phase ? { phase: message.phase } : {}),
+      content: assistantContent(message.content),
+    };
+  }
   return { role: message.role, content: inputContent(message.content, images, budget) };
 }
 
