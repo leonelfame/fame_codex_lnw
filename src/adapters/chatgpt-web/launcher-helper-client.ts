@@ -21,7 +21,7 @@ interface PendingTurn {
 }
 
 type HelperMessage =
-  | { type: "ready" }
+  | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
@@ -43,7 +43,14 @@ function parseHelperMessage(line: string): HelperMessage {
     throw new Error("Launcher browser helper message is not an object");
   }
   const message = value as Record<string, unknown>;
-  if (message.type === "ready") return { type: "ready" };
+  if (message.type === "ready") {
+    const features = message.features;
+    if (features !== undefined
+      && (!Array.isArray(features) || features.some(feature => typeof feature !== "string"))) {
+      throw new Error("Launcher browser helper advertised invalid features");
+    }
+    return { type: "ready", ...(features ? { features: features as string[] } : {}) };
+  }
   if (typeof message.id !== "string" || !message.id) {
     throw new Error("Launcher browser helper message has no turn identity");
   }
@@ -140,6 +147,7 @@ export class LauncherBrowserHelperClient {
   private readyResolve?: () => void;
   private readyReject?: (error: Error) => void;
   private readonly pending = new Map<string, PendingTurn>();
+  private helperFeatures = new Set<string>();
 
   constructor(private readonly config: ResolvedBrowserConfig) {}
 
@@ -311,6 +319,9 @@ export class LauncherBrowserHelperClient {
       return;
     }
     if (message.type === "ready") {
+      // An older helper advertises nothing and must never be sent optional frames: it would route
+      // them to its run handler and destroy the turn with an opaque TypeError.
+      this.helperFeatures = new Set(message.features ?? []);
       this.readyResolve?.();
       this.readyResolve = undefined;
       this.readyReject = undefined;
@@ -419,6 +430,13 @@ export class LauncherBrowserHelperClient {
   private forwardProgress(turn: BrowserTurn, stop: AbortSignal): void {
     const progress = turn.externalProgress;
     if (!progress) return;
+    if (!this.helperFeatures.has("progress")) {
+      console.warn(
+        `[chatgpt-web] browser turn ${turn.traceId} runs without an MCP progress mirror:`
+        + " the launcher browser helper predates the progress frame",
+      );
+      return;
+    }
     void (async () => {
       let revision = 0;
       while (!stop.aborted) {

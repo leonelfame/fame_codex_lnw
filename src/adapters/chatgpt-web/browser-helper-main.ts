@@ -399,12 +399,21 @@ input.on("line", line => {
       id: message.id,
       message: error instanceof Error ? error.message : String(error),
     }));
-  } else {
+  } else if (message.type === "run") {
     void run(message).catch(error => writeProtocol({
       type: "error",
       id: message.id,
       message: error instanceof Error ? error.message : String(error),
     }));
+  } else {
+    // Never treat an unrecognised frame as a run. Doing so dereferenced `message.turn` on a frame
+    // that has none, so a newer daemon speaking to an older helper destroyed the turn with an
+    // opaque TypeError instead of degrading.
+    writeProtocol({
+      type: "error",
+      id: (message as { id?: string }).id ?? "unknown",
+      message: `Browser helper received an unsupported message type: ${String((message as { type?: unknown }).type)}`,
+    });
   }
 });
 input.on("close", () => {
@@ -417,4 +426,6 @@ process.once("SIGTERM", () => {
   void requestShutdown();
 });
 
-writeProtocol({ type: "ready" });
+// Advertise optional frames so a newer daemon can tell whether this helper understands them. An
+// older helper omits the field, and the daemon then withholds those frames instead of breaking it.
+writeProtocol({ type: "ready", features: ["progress"] });
