@@ -470,14 +470,6 @@ function registerIpc({ logger, stateStore }) {
     }
     return browser;
   });
-  handle("launcher:browser-passkey-login", async () => {
-    const browser = await browserHost.openSystemLogin();
-    if (browser.authenticated) {
-      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
-      send("launcher:state-changed", state);
-    }
-    return browser;
-  });
   handle("launcher:browser-logout", async () => {
     const browser = await browserHost.logout();
     const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
@@ -869,7 +861,6 @@ async function start() {
     getConnectorName: () => runtimeHost.browserConnectorName(),
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
-    loginWithSystemBrowser: () => runtimeHost.captureSystemBrowserLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
     publishState: (state) => send("launcher:browser-state", state),

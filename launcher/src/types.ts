@@ -125,7 +125,6 @@ export interface LauncherApi {
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;
-  openPasskeyLogin(): Promise<BrowserState>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;

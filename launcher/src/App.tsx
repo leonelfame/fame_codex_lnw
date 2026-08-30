@@ -918,9 +918,6 @@ function SetupSurface({
     await activateBrowser();
     await api!.openLogin();
   });
-  const openPasskeyLogin = () => run(async () => {
-    await api!.openPasskeyLogin();
-  });
   const smoke = () => run(async () => {
     await activateBrowser();
     await api!.smokeTest();
@@ -948,10 +945,6 @@ function SetupSurface({
           disabled={busy}
           index={1}
           onAction={openLogin}
-          secondaryAction={browser?.authenticated ? undefined : {
-            label: copy.passkeySignIn,
-            onAction: openPasskeyLogin,
-          }}
           title={copy.stepAccount}
         />
         <SetupRow
@@ -1516,7 +1509,6 @@ function SetupRow({
   index,
   onAction,
   repeatable = false,
-  secondaryAction,
   title,
 }: {
   action: string;
@@ -1526,7 +1518,6 @@ function SetupRow({
   index: number;
   onAction: () => void;
   repeatable?: boolean;
-  secondaryAction?: { label: string; onAction: () => void };
   title: string;
 }) {
   return (
@@ -1536,16 +1527,9 @@ function SetupRow({
         <strong>{title}</strong>
         <p>{description}</p>
       </div>
-      <span className="setup-actions">
-        {secondaryAction ? (
-          <button className="text-button" disabled={disabled} onClick={secondaryAction.onAction} type="button">
-            {secondaryAction.label}
-          </button>
-        ) : null}
-        <SecondaryButton disabled={disabled || (complete && !repeatable)} onClick={onAction}>
-          {action}
-        </SecondaryButton>
-      </span>
+      <SecondaryButton disabled={disabled || (complete && !repeatable)} onClick={onAction}>
+        {action}
+      </SecondaryButton>
     </div>
   );
 }
