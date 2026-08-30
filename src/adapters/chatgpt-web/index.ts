@@ -10,6 +10,7 @@ import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
@@ -469,6 +470,10 @@ export function createChatGptWebAdapter(
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
       const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+      const structuredOutputValidator = parsed._compactionRequest
+        ? undefined
+        : createChatGptStructuredOutputValidator(parsed.options.outputFormat);
+      const bufferStructuredOutput = structuredOutputValidator !== undefined;
       const retryKey = `${executionNamespace}:${chatGptTurnRetryKey(parsed)}`;
       const exhaustedRetry = chatGptWebTurnRetryPolicy.exhaustedError(retryKey);
       if (exhaustedRetry) {
@@ -682,9 +687,16 @@ export function createChatGptWebAdapter(
               emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
             }
             emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
-            emitRoundBatch(buffer => emitTextDeltas(session.runtime.text.drain(), buffer));
+            const completedTextDeltas = session.runtime.text.drain();
+            if (!bufferStructuredOutput) {
+              emitRoundBatch(buffer => emitTextDeltas(completedTextDeltas, buffer));
+            }
             if (session.runtime.text.value() !== settled.answer) {
               throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
+            }
+            structuredOutputValidator?.(settled.answer);
+            if (bufferStructuredOutput) {
+              emitRoundBatch(buffer => emitTextDeltas([settled.answer], buffer));
             }
             const reasoning = session.roundReasoning(roundKey);
             session.setFinalReasoning(reasoning);
@@ -740,7 +752,9 @@ export function createChatGptWebAdapter(
               session.appendRoundReasoning(roundKey, trace.map(event => event.text));
               emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
             };
-            const emitNewText = (deltas: string[]) => emitRoundBatch(buffer => emitTextDeltas(deltas, buffer));
+            const emitNewText = (deltas: string[]) => {
+              if (!bufferStructuredOutput) emitRoundBatch(buffer => emitTextDeltas(deltas, buffer));
+            };
             if (replay.length === 0 && !parsed._compactionRequest) {
               emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
             }
@@ -791,6 +805,10 @@ export function createChatGptWebAdapter(
                 if (completedOutcome.type === "error") throw completedOutcome.error;
                 if (session.runtime.text.value() !== completedOutcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
+                }
+                structuredOutputValidator?.(completedOutcome.answer);
+                if (bufferStructuredOutput) {
+                  emitRoundBatch(buffer => emitTextDeltas([completedOutcome.answer], buffer));
                 }
                 emitRoundBatch(buffer => emitBrowserCompletion(
                   completedOutcome,
