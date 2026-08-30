@@ -2855,3 +2855,26 @@ test("mirrored turn progress wakes waiters exactly like the recording instance",
     lastProgressAt: 7_000,
   });
 });
+
+test("mirrored progress rejects frames that regress against the observed state", async () => {
+  const mirror = new ChatGptMirroredTurnProgress();
+  mirror.apply({ revision: 3, lastToolBatchRevision: 3, activeToolCalls: 1, lastProgressAt: 5_000 });
+
+  // Higher revision but contradicting what it already reported: a corrupt or forged frame, not an
+  // ordering artefact, and accepting it would desynchronise observed liveness.
+  expect(() => mirror.apply({
+    revision: 4, lastToolBatchRevision: 2, activeToolCalls: 1, lastProgressAt: 6_000,
+  })).toThrow("regressed against the observed state");
+  expect(() => mirror.apply({
+    revision: 4, lastToolBatchRevision: 3, activeToolCalls: 1, lastProgressAt: 4_000,
+  })).toThrow("regressed against the observed state");
+
+  // Recorded activity always stamps a timestamp, so a progress frame without one is malformed.
+  expect(() => mirror.apply({
+    revision: 5, lastToolBatchRevision: 3, activeToolCalls: 0,
+  })).toThrow("snapshot is invalid");
+
+  expect(mirror.snapshot()).toEqual({
+    revision: 3, lastToolBatchRevision: 3, activeToolCalls: 1, lastProgressAt: 5_000,
+  });
+});

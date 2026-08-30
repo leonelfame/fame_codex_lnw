@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -2253,4 +2253,23 @@ test("answer Markdown is not reclassified as commentary when a later tool call o
   expect(worker).not.toMatch(
     /streamingStatusContainers\.some\(status => \(\s*Boolean\(candidate\.compareDocumentPosition\(status\)/,
   );
+});
+
+test("an accepted turn survives internal observation faults instead of being torn down", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+
+  // A TypeError while reading the page is a defect in this worker, not evidence about ChatGPT.
+  // Failing the turn on one loses an accepted ChatGPT turn that is never resent.
+  expect(MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS).toBeGreaterThan(1);
+  expect(worker).toContain("if (!(error instanceof TypeError)) throw error;");
+  expect(worker).toContain("internalObservationFaults = 0;");
+  expect(worker).toMatch(/internalObservationFaults > MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS/);
+
+  // Liveness may postpone a verdict but never waive it, so a tool call that never returns cannot
+  // hold an undeadlined turn open forever.
+  expect(worker).toMatch(/Date\.now\(\) - sentAt < CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS/);
+  expect(CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
+
+  // Chain-of-thought containment is commentary regardless of document position.
+  expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');
 });

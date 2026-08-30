@@ -927,6 +927,24 @@ export class ChatGptTurnDomHealthTracker {
 
 export const CHATGPT_STOPPED_THINKING_GRACE_MS = 5_000;
 
+/**
+ * Consecutive internal observation faults tolerated before a turn is abandoned.
+ *
+ * A `TypeError` raised while reading the page is a defect in this worker, not evidence about
+ * ChatGPT. Tearing the turn down on one loses an accepted ChatGPT turn that cannot be resent, so
+ * the loop re-observes instead. The budget is consecutive: any successful observation resets it,
+ * and exhausting it still fails closed with the original fault as the cause.
+ */
+export const MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS = 8;
+
+/**
+ * Absolute ceiling on how long proven MCP progress may suppress DOM health checks.
+ *
+ * Liveness is reported while a tool call is outstanding, so a tool that never returns would
+ * otherwise hold a turn open forever whenever the caller supplied no turn deadline.
+ */
+export const CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS = 30 * 60_000;
+
 export class ChatGptStoppedThinkingTracker {
   private visibleSince?: number;
 
@@ -2674,6 +2692,10 @@ export class ChatGptBrowserWorker {
       const firstStreamingStatusContainer = streamingStatusContainers[0];
       const commentaryRoots = allMarkdownRoots.filter(candidate => (
         candidate.closest("[data-streaming-response-status]") !== null
+        // Chain-of-thought components carry reasoning, never the final answer, so containment is a
+        // positional-independent commentary signal. Position alone cannot separate "commentary
+        // between two status containers" from "answer between two tool calls".
+        || candidate.closest('[data-testid^="cot-v5"]') !== null
         // Only Markdown that precedes the FIRST status container is prior commentary. Keying this
         // on "some status follows me" silently reclassified answer text as commentary as soon as a
         // second tool call opened another status container below it, which both zeroed the visible
@@ -3476,7 +3498,9 @@ export class ChatGptBrowserWorker {
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
+      let internalObservationFaults = 0;
       for (;;) {
+       try {
         if (page.isClosed()) {
           throw chatGptBrowserTabClosedError();
         }
@@ -3547,11 +3571,14 @@ export class ChatGptBrowserWorker {
           }
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
-        const externalProgressLive = chatGptExternalProgressIsLive(
-          turn.externalProgress?.snapshot(),
-          Date.now(),
-          CHATGPT_RESPONSE_DOM_GRACE_MS,
-        );
+        // Liveness may postpone a verdict, never waive it: past the ceiling the DOM alone decides,
+        // so a tool call that never returns cannot hold an undeadlined turn open indefinitely.
+        const externalProgressLive = Date.now() - sentAt < CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS
+          && chatGptExternalProgressIsLive(
+            turn.externalProgress?.snapshot(),
+            Date.now(),
+            CHATGPT_RESPONSE_DOM_GRACE_MS,
+          );
         // A stale "Stopped thinking" label is not terminal while the model is still driving tool
         // calls, so the tracker keeps observing but may not cancel the turn.
         if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible) && !externalProgressLive) {
@@ -3645,7 +3672,28 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
+        internalObservationFaults = 0;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+       } catch (error) {
+        // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
+        // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
+        if (!(error instanceof TypeError)) throw error;
+        internalObservationFaults += 1;
+        if (internalObservationFaults > MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS) {
+          throw new Error(
+            `ChatGPT browser observation failed ${internalObservationFaults} times in a row: ${error.message}`,
+            { cause: error },
+          );
+        }
+        console.warn(
+          `[chatgpt-web] browser turn ${turn.traceId} tolerated internal observation fault`
+          + ` ${internalObservationFaults}/${MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS}: ${error.message}`,
+        );
+        await diagnostics.capture(page, "internal-observation-fault");
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+       }
       }
 
       if (this.context && this.config.browserHost === "managed-chrome") {

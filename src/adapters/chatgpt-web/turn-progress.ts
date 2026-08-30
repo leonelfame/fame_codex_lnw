@@ -134,6 +134,16 @@ export class ChatGptMirroredTurnProgress extends ChatGptTurnProgressBroadcaster 
   apply(next: ChatGptExternalTurnProgressSnapshot): boolean {
     assertChatGptTurnProgressSnapshot(next);
     if (next.revision <= this.current.revision) return false;
+    // A frame that advances the revision must not contradict what it already reported: the
+    // recorder only ever moves these forward, so a regression means a corrupt or forged frame
+    // rather than an ordering artefact, and accepting it would desynchronise observed liveness.
+    if (next.lastToolBatchRevision < this.current.lastToolBatchRevision
+      || (next.lastProgressAt === undefined && this.current.lastProgressAt !== undefined)
+      || (next.lastProgressAt !== undefined
+        && this.current.lastProgressAt !== undefined
+        && next.lastProgressAt < this.current.lastProgressAt)) {
+      throw new Error("ChatGPT external progress snapshot regressed against the observed state");
+    }
     this.current = { ...next };
     this.notify(this.snapshot());
     return true;
@@ -149,7 +159,10 @@ export function assertChatGptTurnProgressSnapshot(
     || !finiteIndex(value.lastToolBatchRevision)
     || !finiteIndex(value.activeToolCalls)
     || value.lastToolBatchRevision > value.revision
-    || (value.lastProgressAt !== undefined && !Number.isFinite(value.lastProgressAt))) {
+    || (value.lastProgressAt !== undefined && !Number.isFinite(value.lastProgressAt))
+    // Any recorded activity stamps a timestamp, so a frame claiming progress without one is
+    // malformed and would otherwise report liveness the daemon never observed.
+    || (value.revision > 0 && value.lastProgressAt === undefined)) {
     throw new Error("ChatGPT external progress snapshot is invalid");
   }
 }

@@ -427,9 +427,15 @@ export class LauncherBrowserHelperClient {
         if (stop.aborted) return;
         await this.send({ type: "progress", id: turn.traceId, snapshot });
       }
-    })().catch(() => {
-      // A turn that ends, aborts, or loses its helper stops the mirror; the worker then falls back
-      // to DOM-only health, which is the pre-existing behaviour rather than a new failure mode.
+    })().catch(error => {
+      // Ending, aborting, or losing the helper stops the mirror by design and is not a fault.
+      // Anything else leaves the worker on DOM-only health without saying so, which is exactly the
+      // silent degradation this transport exists to remove, so it is surfaced rather than dropped.
+      if (stop.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      console.warn(
+        `[chatgpt-web] browser turn ${turn.traceId} lost its MCP progress mirror:`
+        + ` ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
   }
 

@@ -86,6 +86,9 @@ console.error = diagnostic;
 
 const abortControllers = new Map<string, AbortController>();
 const turnProgress = new Map<string, ChatGptMirroredTurnProgress>();
+/** Bounded record of finished turns so a late progress frame is dropped instead of resurrected. */
+const retiredTurns = new Set<string>();
+const MAX_RETIRED_TURN_IDS = 256;
 const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();
 const sendActivationWaiters = new Map<string, {
   resolve: () => void;
@@ -253,6 +256,11 @@ async function run(message: RunMessage): Promise<void> {
     sendWaiter?.reject(new DOMException("Browser helper turn ended before Send acknowledgement", "AbortError"));
     abortControllers.delete(message.id);
     turnProgress.delete(message.id);
+    if (retiredTurns.size >= MAX_RETIRED_TURN_IDS) {
+      const oldest = retiredTurns.values().next();
+      if (!oldest.done) retiredTurns.delete(oldest.value);
+    }
+    retiredTurns.add(message.id);
   }
 }
 
@@ -351,9 +359,15 @@ input.on("line", line => {
     sendActivationWaiters.delete(message.id);
     waiter.resolve();
   } else if (message.type === "progress") {
-    // Progress can arrive before the run frame is processed, so the mirror is created on demand
-    // rather than requiring an established turn.
-    const progress = turnProgress.get(message.id) ?? new ChatGptMirroredTurnProgress();
+    // A frame can still be in flight when its turn ends. Recreating a mirror for a retired id would
+    // leak an entry that nothing ever removes, so only an id that is live or not yet started is
+    // accepted; anything else is dropped as late.
+    const existing = turnProgress.get(message.id);
+    const progress = existing
+      ?? (abortControllers.has(message.id) || !retiredTurns.has(message.id)
+        ? new ChatGptMirroredTurnProgress()
+        : undefined);
+    if (!progress) return;
     turnProgress.set(message.id, progress);
     try {
       progress.apply(message.snapshot);
