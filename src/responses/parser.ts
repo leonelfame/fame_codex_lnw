@@ -342,11 +342,6 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           agentMessage.content as unknown[] | string | undefined,
         );
 
-        const hasContent =
-          typeof content === "string"
-            ? content.trim().length > 0
-            : content.length > 0;
-
         // An agent_message is external input delivered to the parent agent. Keep its distinct
         // role and routing metadata so Web history remains semantically equivalent to Responses.
         pendingReasoning.length = 0;
@@ -354,7 +349,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           role: "agentMessage",
           ...(typeof agentMessage.author === "string" ? { author: agentMessage.author } : {}),
           ...(typeof agentMessage.recipient === "string" ? { recipient: agentMessage.recipient } : {}),
-          content: hasContent ? content : "(sub-agent message received)",
+          content,
           timestamp: now,
         };
         messages.push(message);
