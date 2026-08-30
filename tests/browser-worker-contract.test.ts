@@ -2489,7 +2489,8 @@ test("the bundled helper is adopted only for the packaged runtime layout", () =>
   // A consumer callback must not be retried as though the page could not be read.
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
   const heartbeat = worker.indexOf("turn.onHeartbeat?.();");
-  const tryStart = worker.indexOf("       try {\n        observedThisIteration = false;");
+  const tryStart = worker.search(/ {7}try \{\r?\n {8}observedThisIteration = false;/);
   expect(heartbeat).toBeGreaterThan(0);
+  expect(tryStart).toBeGreaterThan(0);
   expect(heartbeat).toBeLessThan(tryStart);
 });
