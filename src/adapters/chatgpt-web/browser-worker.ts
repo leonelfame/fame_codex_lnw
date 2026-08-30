@@ -421,9 +421,14 @@ export async function resolveChatGptToolConfirmation(
   await onVisible?.();
 
   if (autoApprove) {
-    const allowOnce = dialog.getByRole("button", { name: "Allow once", exact: true }).last();
-    await allowOnce.waitFor({ state: "visible", timeout: 10_000 });
-    await allowOnce.press("Enter");
+    // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
+    // current one-shot approval. Keep the matcher anchored so persistent
+    // actions such as "Always allow" cannot match.
+    const allowCurrentAction = dialog
+      .getByRole("button", { name: /^Allow(?: once)?$/ })
+      .last();
+    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 });
+    await allowCurrentAction.press("Enter");
     return true;
   }
 
