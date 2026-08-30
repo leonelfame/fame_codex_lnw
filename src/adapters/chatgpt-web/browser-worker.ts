@@ -624,6 +624,11 @@ const browserStageTimeouts = {
   promptAttachment: 60_000,
   fileAttachment: 120_000,
   send: 20_000,
+  // A Bigger Context stage posts a payload orders of magnitude larger than an ordinary prompt onto
+  // a conversation that already holds the earlier parts, and this budget covers ChatGPT accepting
+  // the submission, not just the click. The ordinary 20s send budget expired mid-acceptance and
+  // destroyed the whole turn while the browser was still working.
+  multipartStageSend: 180_000,
 } as const;
 
 export const CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS = 5_000;
@@ -3459,7 +3464,7 @@ export class ChatGptBrowserWorker {
           const evidence = await this.runStage(
             turn.traceId,
             `multipart_stage_${index + 1}_send`,
-            browserStageTimeouts.send,
+            browserStageTimeouts.multipartStageSend,
             (stageSignal) => this.sendAttachedPrompt(
               page,
               stageBaseline,
@@ -3564,7 +3569,9 @@ export class ChatGptBrowserWorker {
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
         "send",
-        browserStageTimeouts.send,
+        // A multipart commit lands on a conversation already carrying every staged part, so it
+        // needs the same acceptance headroom the stages themselves get.
+        prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
         (stageSignal) => this.sendAttachedPrompt(
           page,
           submissionBaseline,
