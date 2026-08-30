@@ -1895,13 +1895,13 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("if (options.knownKey === observerKey) return { key: observerKey }");
   expect(workerSource).toContain("new MutationObserver(() =>");
   expect(workerSource).toContain('const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
-  expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
+  expect(workerSource).toContain("const selectChatGptAnswerRoots = (");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
   expect(workerSource).toContain("const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>");
-  expect(workerSource).toContain("const firstStreamingStatusContainer = streamingStatusContainers[0]");
-  expect(workerSource).toContain("candidate.compareDocumentPosition(firstStreamingStatusContainer)");
-  expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
-  expect(workerSource).toContain("!commentaryRoots.includes(candidate)");
+  expect(workerSource).toContain("const firstStatusContainer = statusContainers[0]");
+  expect(workerSource).toContain("candidate.compareDocumentPosition(firstStatusContainer)");
+  expect(workerSource).toContain("const renderedRoots = classified.answerRoots;");
+  expect(workerSource).toContain("markdownRoots.filter(candidate => !commentary.includes(candidate))");
   expect(workerSource).toContain('fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join("")');
   expect(workerSource).toContain("const flattenedMarkdownSegments:");
   expect(workerSource).toContain("Root boundaries and visible indices therefore are not identity");
@@ -2240,19 +2240,6 @@ test("live external progress still records that a response DOM was observed", ()
   expect(tracker.update(absent, 3_000)).toContain("response DOM disappeared");
 });
 
-test("answer Markdown is not reclassified as commentary when a later tool call opens a status container", () => {
-  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
-
-  // Commentary is Markdown that precedes the FIRST streaming status container. Keying it on "some
-  // status follows me" made every answer chunk emitted before a second tool call look like prior
-  // commentary, which zeroed the visible text and silently dropped answer content.
-  expect(worker).toContain("const firstStreamingStatusContainer = streamingStatusContainers[0]");
-  expect(worker).toMatch(/candidate\.compareDocumentPosition\(firstStreamingStatusContainer\)/);
-  expect(worker).not.toMatch(
-    /streamingStatusContainers\.some\(status => \(\s*Boolean\(candidate\.compareDocumentPosition\(status\)/,
-  );
-});
-
 test("an accepted turn survives internal observation faults instead of being torn down", () => {
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
 
@@ -2337,4 +2324,73 @@ test("proven progress forgets a Stopped thinking window rather than merely ignor
   expect(tracker.update(true, 6_500)).toBeFalse();
   expect(tracker.update(true, 11_499)).toBeFalse();
   expect(tracker.update(true, 11_500)).toBeTrue();
+});
+
+test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {
+  // The classifier runs inside page.evaluate, so it cannot be imported. Extract and execute the
+  // exact shipped source instead of a copy, which is what lets this test detect a regression in
+  // the code that actually runs rather than in a restatement of it.
+  // domino ships without module typings; it is already present as a turndown dependency and is
+  // the only DOM implementation available to this suite.
+  const { createDocument } = require("@mixmark-io/domino") as {
+    createDocument: (html: string) => {
+      body: { querySelectorAll: (selector: string) => ArrayLike<HTMLElement> };
+    };
+  };
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const source = worker.split("// CHATGPT_COMMENTARY_CLASSIFIER_BEGIN")[1]?.split("// CHATGPT_COMMENTARY_CLASSIFIER_END")[0];
+  if (!source) throw new Error("commentary classifier sentinels are missing from browser-worker.ts");
+  const javascript = source
+    .replace(/:\s*HTMLElement\[\]/g, "")
+    .replace(/\):\s*\{[^}]*\}\s*=>/, ") =>");
+  const selectChatGptAnswerRoots = new Function(
+    `${javascript}; return selectChatGptAnswerRoots;`,
+  )() as (roots: unknown[], statuses: unknown[]) => { answerRoots: Array<{ textContent: string }> };
+
+  const answerFor = (html: string): string => {
+    const document = createDocument(`<body>${html}</body>`);
+    // domino's NodeList is array-like rather than iterable.
+    const roots = Array.from(document.body.querySelectorAll(".markdown"))
+      .filter(candidate => !candidate.parentElement?.closest(".markdown"));
+    const statuses = Array.from(document.body.querySelectorAll("[data-streaming-response-status]"));
+    return selectChatGptAnswerRoots(roots, statuses).answerRoots
+      .map(root => (root.textContent ?? "").trim())
+      .filter(Boolean)
+      .join(" | ");
+  };
+
+  // Commentary that precedes the live status, and commentary nested inside one, stay excluded.
+  expect(answerFor(
+    '<div class="markdown">COMMENTARY</div>'
+    + '<div data-streaming-response-status>live</div>'
+    + '<div class="markdown">ANSWER</div>',
+  )).toBe("ANSWER");
+  expect(answerFor(
+    '<div data-streaming-response-status><div class="markdown">NESTED</div></div>'
+    + '<div class="markdown">ANSWER</div>',
+  )).toBe("ANSWER");
+
+  // Reasoning rendered inside a chain-of-thought component is commentary wherever it sits.
+  expect(answerFor(
+    '<div data-streaming-response-status>s1</div>'
+    + '<div data-testid="cot-v5-block"><div class="markdown">THINKING</div></div>'
+    + '<div class="markdown">ANSWER</div>',
+  )).toBe("ANSWER");
+
+  // The regressions this rule exists for: a second tool call opening a status container below
+  // already-emitted answer text used to blank the visible text and drop answer chunks entirely.
+  expect(answerFor(
+    '<div data-streaming-response-status>s1</div>'
+    + '<div class="markdown">ANSWER</div>'
+    + '<div data-streaming-response-status>s2</div>',
+  )).toBe("ANSWER");
+  expect(answerFor(
+    '<div data-streaming-response-status>s1</div>'
+    + '<div class="markdown">PART ONE</div>'
+    + '<div data-streaming-response-status>s2</div>'
+    + '<div class="markdown">PART TWO</div>',
+  )).toBe("PART ONE | PART TWO");
+
+  // A turn with no status container at all is entirely answer.
+  expect(answerFor('<div class="markdown">ONLY ANSWER</div>')).toBe("ONLY ANSWER");
 });

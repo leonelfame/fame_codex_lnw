@@ -2717,25 +2717,38 @@ export class ChatGptBrowserWorker {
         .filter(renderedInDom);
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]
         .filter(renderedInDom);
-      const firstStreamingStatusContainer = streamingStatusContainers[0];
-      const commentaryRoots = allMarkdownRoots.filter(candidate => (
-        candidate.closest("[data-streaming-response-status]") !== null
-        // Chain-of-thought components carry reasoning, never the final answer, so containment is a
-        // positional-independent commentary signal. Position alone cannot separate "commentary
-        // between two status containers" from "answer between two tool calls".
-        || candidate.closest('[data-testid^="cot-v5"]') !== null
-        // Only Markdown that precedes the FIRST status container is prior commentary. Keying this
-        // on "some status follows me" silently reclassified answer text as commentary as soon as a
-        // second tool call opened another status container below it, which both zeroed the visible
-        // text and dropped every answer chunk emitted between tool calls.
-        || (firstStreamingStatusContainer !== undefined && Boolean(
-          candidate.compareDocumentPosition(firstStreamingStatusContainer)
-          & Node.DOCUMENT_POSITION_FOLLOWING,
-        ))
-      ));
-      const renderedRoots = allMarkdownRoots.filter(candidate => (
-        !commentaryRoots.includes(candidate)
-      ));
+      // CHATGPT_COMMENTARY_CLASSIFIER_BEGIN
+      // Self-contained so the test suite can execute this exact source against a synthetic DOM;
+      // it must not close over anything from the surrounding evaluate scope.
+      const selectChatGptAnswerRoots = (
+        markdownRoots: HTMLElement[],
+        statusContainers: HTMLElement[],
+      ): { commentaryRoots: HTMLElement[]; answerRoots: HTMLElement[] } => {
+        const firstStatusContainer = statusContainers[0];
+        const commentary = markdownRoots.filter(candidate => (
+          candidate.closest("[data-streaming-response-status]") !== null
+          // Chain-of-thought components carry reasoning, never the final answer, so containment is
+          // a position-independent commentary signal. Position alone cannot separate "commentary
+          // between two status containers" from "answer between two tool calls".
+          || candidate.closest('[data-testid^="cot-v5"]') !== null
+          // Only Markdown that precedes the FIRST status container is prior commentary. Keying
+          // this on "some status follows me" silently reclassified answer text as commentary as
+          // soon as a second tool call opened another status container below it, which both zeroed
+          // the visible text and dropped every answer chunk emitted between tool calls.
+          || (firstStatusContainer !== undefined && Boolean(
+            // 4 is Node.DOCUMENT_POSITION_FOLLOWING, inlined to keep this function standalone.
+            candidate.compareDocumentPosition(firstStatusContainer) & 4,
+          ))
+        ));
+        return {
+          commentaryRoots: commentary,
+          answerRoots: markdownRoots.filter(candidate => !commentary.includes(candidate)),
+        };
+      };
+      // CHATGPT_COMMENTARY_CLASSIFIER_END
+      const classified = selectChatGptAnswerRoots(allMarkdownRoots, streamingStatusContainers);
+      const commentaryRoots = classified.commentaryRoots;
+      const renderedRoots = classified.answerRoots;
       // ChatGPT may merge adjacent `.markdown` roots or virtualize an old prefix while a streamed
       // answer is finalized. Root boundaries and visible indices therefore are not identity:
       // flatten semantic blocks and preserve ChatGPT's source ranges across that reparenting.
