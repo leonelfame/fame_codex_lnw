@@ -2180,11 +2180,9 @@ test("the launcher helper transport carries MCP progress into the out-of-process
 
 test("turn cancellation heuristics defer to proven MCP progress in both wait loops", () => {
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
-  const guarded = worker.match(/stoppedThinkingTracker\.update\([^)]*\)\s*&&\s*!externalProgressLive/g) ?? [];
-
   // A stale "Stopped thinking" label must not cancel a turn that is still driving tool calls, and
   // the multipart staging loop must not be the one place that skips the liveness guard.
-  expect(guarded.length).toBe(2);
+  expect((worker.match(/stoppedThinkingTracker\.clear\(\)/g) ?? []).length).toBe(2);
   expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(2);
 });
 
@@ -2261,7 +2259,7 @@ test("an accepted turn survives internal observation faults instead of being tor
   // A TypeError while reading the page is a defect in this worker, not evidence about ChatGPT.
   // Failing the turn on one loses an accepted ChatGPT turn that is never resent.
   expect(MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS).toBeGreaterThan(1);
-  expect(worker).toContain("if (!(error instanceof TypeError)) throw error;");
+  expect(worker).toContain("if (!(error instanceof TypeError) || observedThisIteration) throw error;");
   expect(worker).toContain("internalObservationFaults = 0;");
   expect(worker).toMatch(/internalObservationFaults > MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS/);
 
@@ -2323,4 +2321,20 @@ test("the daemon prefers the browser helper that shipped beside its own entrypoi
 
   // A malformed liveness hint must not destroy an accepted turn that can never be resent.
   expect(helper).toContain("discarded an invalid MCP progress frame");
+});
+
+
+test("proven progress forgets a Stopped thinking window rather than merely ignoring it", () => {
+  const tracker = new ChatGptStoppedThinkingTracker(5_000);
+
+  // The label appears while a tool call is outstanding. Suppressing only the verdict let this
+  // window keep accruing, so the first observation after the tool result cancelled the turn.
+  expect(tracker.update(true, 1_000)).toBeFalse();
+  expect(tracker.update(true, 3_000)).toBeFalse();
+  tracker.clear();
+
+  // Progress has ended and the window starts again from here, not from the original sighting.
+  expect(tracker.update(true, 6_500)).toBeFalse();
+  expect(tracker.update(true, 11_499)).toBeFalse();
+  expect(tracker.update(true, 11_500)).toBeTrue();
 });

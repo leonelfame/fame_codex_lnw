@@ -207,7 +207,6 @@ export class LauncherBrowserHelperClient {
         pending.sent = true;
         const progressForwarding = new AbortController();
         pending.progressForwarding = progressForwarding;
-        this.forwardProgress(turn, progressForwarding.signal);
         void this.send({
           type: "run",
           id: turn.traceId,
@@ -231,7 +230,13 @@ export class LauncherBrowserHelperClient {
             ...(turn.compaction ? { compaction: true } : {}),
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
           },
-        }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
+        })
+          // Only mirror once the run frame is on the wire, so the helper never sees progress for a
+          // turn it has not been told about and cannot accumulate state for unknown ids.
+          .then(() => {
+            if (!progressForwarding.signal.aborted) this.forwardProgress(turn, progressForwarding.signal);
+          })
+          .catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
       });
   }
 

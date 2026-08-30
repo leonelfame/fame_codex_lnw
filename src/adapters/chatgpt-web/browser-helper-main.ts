@@ -86,9 +86,6 @@ console.error = diagnostic;
 
 const abortControllers = new Map<string, AbortController>();
 const turnProgress = new Map<string, ChatGptMirroredTurnProgress>();
-/** Bounded record of finished turns so a late progress frame is dropped instead of resurrected. */
-const retiredTurns = new Set<string>();
-const MAX_RETIRED_TURN_IDS = 256;
 const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();
 const sendActivationWaiters = new Map<string, {
   resolve: () => void;
@@ -256,11 +253,6 @@ async function run(message: RunMessage): Promise<void> {
     sendWaiter?.reject(new DOMException("Browser helper turn ended before Send acknowledgement", "AbortError"));
     abortControllers.delete(message.id);
     turnProgress.delete(message.id);
-    if (retiredTurns.size >= MAX_RETIRED_TURN_IDS) {
-      const oldest = retiredTurns.values().next();
-      if (!oldest.done) retiredTurns.delete(oldest.value);
-    }
-    retiredTurns.add(message.id);
   }
 }
 
@@ -359,15 +351,11 @@ input.on("line", line => {
     sendActivationWaiters.delete(message.id);
     waiter.resolve();
   } else if (message.type === "progress") {
-    // A frame can still be in flight when its turn ends. Recreating a mirror for a retired id would
-    // leak an entry that nothing ever removes, so only an id that is live or not yet started is
-    // accepted; anything else is dropped as late.
-    const existing = turnProgress.get(message.id);
-    const progress = existing
-      ?? (abortControllers.has(message.id) || !retiredTurns.has(message.id)
-        ? new ChatGptMirroredTurnProgress()
-        : undefined);
-    if (!progress) return;
+    // Progress is only meaningful for a turn this helper is actually running. Creating a mirror
+    // for any unrecognised id let late, malformed, or misaddressed frames grow this map without
+    // bound, since nothing would ever remove an entry that has no turn to end it.
+    if (!abortControllers.has(message.id)) return;
+    const progress = turnProgress.get(message.id) ?? new ChatGptMirroredTurnProgress();
     turnProgress.set(message.id, progress);
     try {
       progress.apply(message.snapshot);
