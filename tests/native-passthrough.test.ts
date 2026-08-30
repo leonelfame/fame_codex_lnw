@@ -253,3 +253,65 @@ test("does not invent a models client version from an unrelated user agent", asy
   });
   expect(upstreamRequest!.url).toBe("https://chatgpt.com/backend-api/codex/models");
 });
+
+/** A reset after `data: [DONE]` is a completed stream, while a reset before it is a truncation. */
+function nativeRequest(): Request {
+  return new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: '{"model":"gpt-5.6-sol","stream":true}',
+  });
+}
+
+function resettingEventStream(prefix: string[]): Response {
+  const encoder = new TextEncoder();
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent < prefix.length) {
+        controller.enqueue(encoder.encode(prefix[sent]!));
+        sent += 1;
+        return;
+      }
+      const reset = new Error("The socket connection was closed unexpectedly");
+      (reset as Error & { code?: string }).code = "ECONNRESET";
+      controller.error(reset);
+    },
+  });
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+test("an upstream reset after the turn completed closes the client stream normally", async () => {
+  const response = await forwardNativeCodexRequest(
+    nativeRequest(),
+    "responses",
+    async () => resettingEventStream([
+      'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+      "data: [DONE]\n\n",
+    ]),
+  );
+
+  const body = await response.text();
+  expect(body).toContain("response.completed");
+  expect(body).toEndWith("data: [DONE]\n\n");
+});
+
+test("an upstream reset that truncated the turn is still surfaced as a failure", async () => {
+  const response = await forwardNativeCodexRequest(
+    nativeRequest(),
+    "responses",
+    async () => resettingEventStream(['event: response.output_text.delta\ndata: {"delta":"half"}\n\n']),
+  );
+
+  await expect(response.text()).rejects.toThrow();
+});
+
+test("a non-event-stream body is passed through untouched", async () => {
+  const response = await forwardNativeCodexRequest(
+    nativeRequest(),
+    "responses",
+    async () => new Response('{"ok":true}', { status: 200, headers: { "content-type": "application/json" } }),
+  );
+
+  expect(await response.text()).toBe('{"ok":true}');
+});
