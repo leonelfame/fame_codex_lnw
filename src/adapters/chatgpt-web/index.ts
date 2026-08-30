@@ -646,7 +646,7 @@ export function createChatGptWebAdapter(
           return;
         }
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
-        await chatGptTurnSessions.retireAndWait(responseExecutionKey);
+        await chatGptTurnSessions.retireAndWait(responseExecutionKey, incoming.abortSignal);
       }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
@@ -656,6 +656,7 @@ export function createChatGptWebAdapter(
         ownerKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
         traceId,
+        incoming.abortSignal,
       );
       const roundKey = chatGptTurnRoundKey(parsed);
       const emitRoundEvents = (events: readonly AdapterEvent[]): void => {

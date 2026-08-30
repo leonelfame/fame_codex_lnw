@@ -1227,6 +1227,30 @@ describe("ChatGPT outer-native harness v4", () => {
     sessions.clear();
   });
 
+  test("retained compaction retirement remains abortable for a disconnected observer", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let finishBrowser!: () => void;
+    const browser = new Promise<string>(resolveBrowser => { finishBrowser = () => resolveBrowser("stopped"); });
+    sessions.getOrCreate("abort-retirement", () => ({
+      mode: "read-only",
+      browser,
+      physicalSettlement: browser.then(() => undefined),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => {},
+    }));
+
+    const retirement = sessions.retireAndWait("abort-retirement");
+    const observerAbort = new AbortController();
+    const observer = sessions.retireAndWait("abort-retirement", observerAbort.signal);
+    observerAbort.abort();
+    await expect(observer).rejects.toMatchObject({ name: "AbortError" });
+
+    finishBrowser();
+    await expect(retirement).resolves.toBeTrue();
+    sessions.clear();
+  });
+
   test("keeps inline images out of the context JSON and prepares native browser attachments", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = parsed();
@@ -2911,6 +2935,21 @@ test("an interrupted turn's abort notice is not mistaken for the next turn's ins
     .toThrow(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
 });
 
+test("a literal turn-aborted instruction with the current turn id remains user input", () => {
+  const request = rawWireRequest(environmentXml);
+  const literal = "<turn_aborted>please explain what this tag means</turn_aborted>";
+  ((request._rawBody as { input: unknown[] }).input).push({
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: literal }],
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+  });
+
+  expect(extractChatGptTurnUserRevision(request)).toEqual([
+    { type: "input_text", text: literal },
+  ]);
+});
+
 describe("adapter liveness covers every path through a turn", () => {
   // The Responses bridge cancels a turn after DEFAULT_STALL_TIMEOUT_SEC without a single adapter
   // event (bridge.ts, `upstream_stall_timeout`). Any window inside runTurn that awaits without
@@ -3001,6 +3040,53 @@ describe("adapter liveness covers every path through a turn", () => {
     expect(heartbeats[0]).toBeLessThan(2_000);
     expect(heartbeats.at(-1)).toBeGreaterThanOrEqual(CHATGPT_WEB_ADAPTER_HEARTBEAT_MS);
   }, 40_000);
+
+  test("aborting while waiting for a previous owner settles the observer promptly", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://abort-owner-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const releases: Array<() => void> = [];
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = turn => new Promise<string>(resolve => {
+      releases.push(() => {
+        turn.onTextDelta("owner completed");
+        resolve("owner completed");
+      });
+    });
+    try {
+      const adapter = createChatGptWebAdapter(provider);
+      const ownerAbort = new AbortController();
+      const owner = adapter.runTurn!(
+        livenessRequest("turn_abort_owner", "thread_abort_owner", false),
+        { headers: new Headers(), abortSignal: ownerAbort.signal },
+        () => {},
+      ).catch(() => {});
+      await Bun.sleep(100);
+
+      const observerAbort = new AbortController();
+      const observer = adapter.runTurn!(
+        livenessRequest("turn_abort_observer", "thread_abort_owner", false),
+        { headers: new Headers(), abortSignal: observerAbort.signal },
+        () => {},
+      );
+      observerAbort.abort();
+      await expect(Promise.race([
+        observer,
+        Bun.sleep(500).then(() => { throw new Error("observer remained blocked after abort"); }),
+      ])).rejects.toMatchObject({ name: "AbortError" });
+
+      const ownerReleaseCount = releases.length;
+      for (const release of releases) release();
+      await owner;
+      await Bun.sleep(50);
+      expect(releases.length).toBe(ownerReleaseCount);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  }, 10_000);
 
   test("a compaction turn proves it is alive while the summarizing browser turn runs", async () => {
     const started = Date.now();

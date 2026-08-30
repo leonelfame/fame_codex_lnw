@@ -107,8 +107,6 @@ function endToEndHeaders(source: Headers): Headers {
 
 /** Terminator every Responses SSE stream ends with; nothing after it carries meaning. */
 const SSE_TERMINATOR = "data: [DONE]";
-/** Enough trailing bytes to recognise the terminator across a chunk boundary. */
-const SSE_TAIL_WINDOW = 64;
 
 /**
  * ChatGPT's backend routinely resets the native Codex connection instead of closing it cleanly,
@@ -128,22 +126,39 @@ function withUncleanCloseTolerance(
   if (!isEventStream) return body;
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let tail = "";
+  let lineBuffer = "";
   let completed = false;
   let bytes = 0;
+  const inspectLines = (text: string): void => {
+    lineBuffer += text;
+    let newline = lineBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = lineBuffer.slice(0, newline).replace(/\r$/, "");
+      lineBuffer = lineBuffer.slice(newline + 1);
+      if (line === SSE_TERMINATOR) completed = true;
+      newline = lineBuffer.indexOf("\n");
+    }
+  };
+  const inspectTrailingLine = (): void => {
+    // A reset can arrive before the final line separator. Treat only an exact unterminated
+    // terminator line as complete; text embedded in a JSON data payload must not qualify.
+    if (lineBuffer.replace(/\r$/, "") === SSE_TERMINATOR) completed = true;
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const chunk = await reader.read();
         if (chunk.done) {
+          inspectLines(decoder.decode());
+          inspectTrailingLine();
           controller.close();
           return;
         }
         bytes += chunk.value.byteLength;
-        tail = (tail + decoder.decode(chunk.value, { stream: true })).slice(-SSE_TAIL_WINDOW);
-        if (tail.includes(SSE_TERMINATOR)) completed = true;
+        inspectLines(decoder.decode(chunk.value, { stream: true }));
         controller.enqueue(chunk.value);
       } catch (error) {
+        inspectTrailingLine();
         if (!completed) {
           controller.error(error);
           return;

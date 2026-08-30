@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bridgeToResponsesSSE } from "../src/bridge";
-import { DEFAULT_STALL_TIMEOUT_SEC, resolveStallTimeoutSec } from "../src/stall-timeout";
+import { DEFAULT_STALL_TIMEOUT_SEC, MAX_STALL_TIMEOUT_SEC, resolveStallTimeoutSec } from "../src/stall-timeout";
 import type { AdapterEvent } from "../src/types";
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -63,4 +63,6 @@ test("the stall budget is configurable and falls back to the shipped default", (
   expect(resolveStallTimeoutSec(Number.NaN)).toBe(DEFAULT_STALL_TIMEOUT_SEC);
   expect(resolveStallTimeoutSec(900)).toBe(900);
   expect(resolveStallTimeoutSec(0)).toBe(1);
+  expect(resolveStallTimeoutSec(Number.MAX_VALUE)).toBe(MAX_STALL_TIMEOUT_SEC);
+  expect(resolveStallTimeoutSec(MAX_STALL_TIMEOUT_SEC + 1)).toBe(MAX_STALL_TIMEOUT_SEC);
 });

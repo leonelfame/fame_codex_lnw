@@ -296,6 +296,20 @@ test("an upstream reset after the turn completed closes the client stream normal
   expect(body).toEndWith("data: [DONE]\n\n");
 });
 
+test("an upstream reset is not hidden by a [DONE] string inside JSON content", async () => {
+  const response = await forwardNativeCodexRequest(
+    nativeRequest(),
+    "responses",
+    async () => resettingEventStream([
+      'event: response.output_text.delta\ndata: {"delta":"literal data: [DONE] text"}\n\n',
+    ]),
+  );
+
+  // The marker is part of the JSON string, not an SSE data line. The upstream reset therefore
+  // truncated the turn and must remain visible to the native client.
+  await expect(response.text()).rejects.toThrow();
+});
+
 test("an upstream reset that truncated the turn is still surfaced as a failure", async () => {
   const response = await forwardNativeCodexRequest(
     nativeRequest(),

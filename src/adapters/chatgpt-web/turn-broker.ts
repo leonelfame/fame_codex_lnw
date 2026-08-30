@@ -162,11 +162,11 @@ export interface TurnBrokerOwner {
 }
 
 /**
- * Bytes available for a Unix socket path. Linux allows 108, macOS and the BSDs 104; the smaller
- * bound is used everywhere so a path that works on one developer's machine is not silently
- * unbindable on another's.
+ * Bytes available for a Unix socket path. Linux allows 108, macOS and the BSDs expose a 104-byte
+ * sun_path including its terminating NUL; the smaller usable bound is used everywhere so a path
+ * that works on one developer's machine is not silently unbindable on another's.
  */
-const MAX_UNIX_SOCKET_PATH_BYTES = 104;
+const MAX_UNIX_SOCKET_PATH_BYTES = 103;
 
 export class TurnBroker implements TurnBrokerOwner {
   static forSocket(path: string): TurnBroker {
