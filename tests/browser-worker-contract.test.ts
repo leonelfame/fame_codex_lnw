@@ -2549,3 +2549,20 @@ test("Bigger Context stage sends get a budget sized for their payload", () => {
   // The ordinary send budget is unchanged for ordinary prompts.
   expect(worker).toContain("send: 20_000,");
 });
+
+test("a staged Bigger Context part gets an acknowledgement window sized to its payload", () => {
+  // A staged part is two orders of magnitude larger than an ordinary prompt and ChatGPT reads all of
+  // it before answering. On this machine the same payload acknowledged at 19s and at 30s, and once
+  // took over 72s — which the ordinary grace turned into "ChatGPT accepted the message but did not
+  // expose its assistant turn in the DOM", losing an accepted turn that was merely slow.
+  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
+
+  // No MCP activity exists yet while a part is being ingested, so nothing else can vouch for the
+  // turn: this window is the only thing between a slow ingest and a cancellation. Keep a wide margin
+  // over the slowest acknowledgement actually observed.
+  const slowestObservedAcknowledgementMs = 72_000;
+  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBeGreaterThan(slowestObservedAcknowledgementMs * 2);
+
+  // It is the same budget the staged send already gets; the two bound the same oversized exchange.
+  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBe(browserStageTimeouts.multipartStageSend);
+});
