@@ -435,7 +435,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
   const models = [model];
   const efforts = config.solAvailable
     ? ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])]
-    : ["low"];
+    : ["low", "medium"];
   return {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",

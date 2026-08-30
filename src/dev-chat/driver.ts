@@ -359,6 +359,10 @@ export function defaultDevChatModel(config: AppConfig): DevChatModel {
   return config.solAvailable ? "chatgpt-web/light" : "chatgpt-web/luna";
 }
 
+function isLunaDevChatModel(model: DevChatModel): boolean {
+  return model === "chatgpt-web/luna" || model === "chatgpt-web/think";
+}
+
 export function prepareWorkingTreeBrowserHelper(): string | undefined {
   const root = resolve(import.meta.dir, "..", "..");
   const buildScript = join(root, "scripts", "build-browser-helper.ts");
@@ -562,11 +566,11 @@ export class DevChatDriver {
   }
 
   private shouldAutoCompact(state: DevChatState, context: DevContextStatus): boolean {
-    return state.model !== "chatgpt-web/luna" && context.inputTokens >= context.autoCompactTokenLimit;
+    return !isLunaDevChatModel(state.model) && context.inputTokens >= context.autoCompactTokenLimit;
   }
 
   private assertBiggerContextModel(model: DevChatModel): void {
-    if (this.features.biggerContext && model === "chatgpt-web/luna") {
+    if (this.features.biggerContext && isLunaDevChatModel(model)) {
       throw new Error(
         "Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget",
       );
@@ -610,7 +614,7 @@ export class DevChatDriver {
     reason: "automatic" | "manual",
     emit: (event: DevChatEvent) => void,
   ): Promise<unknown[]> {
-    if (state.model === "chatgpt-web/luna") {
+    if (isLunaDevChatModel(state.model)) {
       throw new Error("ChatGPT Web Luna uses its production rolling checkpoint and does not support a separate compact command");
     }
     const compactTurnId = id("dev_compact_turn");

@@ -17,6 +17,7 @@ import { defaultDevChatModel, DEV_CHAT_TOOLS, DevChatDriver } from "../src/dev-c
 import {
   createDevCoherentContextPayload,
   createDevContextFiller,
+  DEV_CHAT_MODELS,
   DevChatStore,
 } from "../src/dev-chat/session";
 import { startDevChatTransport } from "../src/dev-chat/transport";
@@ -114,6 +115,7 @@ test("coherent DEV MCP payloads are bounded, deterministic, and distinct", () =>
 test("new DEV chats default to the cheapest account-supported browser model", () => {
   expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: true })).toBe("chatgpt-web/light");
   expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: false })).toBe("chatgpt-web/luna");
+  expect(DEV_CHAT_MODELS).toContain("chatgpt-web/think");
 });
 
 test("Bigger Context triples the DEV compaction window and fails closed for Luna", async () => {
@@ -154,6 +156,7 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
     proAvailable: false,
   }, store, factory, root, { biggerContext: true });
   expect(() => luna.open("luna-window", "chatgpt-web/luna")).toThrow("unavailable for Luna");
+  expect(() => luna.open("think-window", "chatgpt-web/think")).toThrow("unavailable for Luna");
   await Promise.all([normal.close(), bigger.close(), luna.close()]);
 });
 

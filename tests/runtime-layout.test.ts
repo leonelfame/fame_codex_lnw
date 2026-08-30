@@ -177,6 +177,6 @@ test("Luna-only provider configuration exposes only the Luna backend", () => {
   const provider = providerConfig(config);
   expect(provider.models).toEqual(["gpt-5.6-luna"]);
   expect(provider.defaultModel).toBe("gpt-5.6-luna");
-  expect(provider.modelReasoningEfforts).toEqual({ "gpt-5.6-luna": ["low"] });
+  expect(provider.modelReasoningEfforts).toEqual({ "gpt-5.6-luna": ["low", "medium"] });
   expect(provider.chatgptWeb).toMatchObject({ solAvailable: false, proAvailable: false });
 });
