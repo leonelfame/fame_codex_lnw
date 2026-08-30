@@ -2186,3 +2186,57 @@ test("turn cancellation heuristics defer to proven MCP progress in both wait loo
   expect(guarded.length).toBe(2);
   expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(2);
 });
+
+test("proven MCP progress vetoes every terminal DOM conclusion, not just a missing response", () => {
+  // Reproduces trace 970896e96e84: the response DOM is present and the renderer never exposes a
+  // completed-turn action, yet tool calls keep completing. "Stopped generating" is false there.
+  const stalled = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const answeredWithoutCompletionAction = {
+    responsePresent: true,
+    running: false,
+    currentText: "partial answer",
+    completionActionVisible: false,
+  };
+
+  expect(stalled.update({ ...answeredWithoutCompletionAction, externalProgressLive: true }, 1_000)).toBeUndefined();
+  expect(stalled.update({ ...answeredWithoutCompletionAction, externalProgressLive: true }, 10_000)).toBeUndefined();
+
+  // Once the model genuinely stops, the window starts fresh rather than charging the live stretch.
+  expect(stalled.update(answeredWithoutCompletionAction, 10_100)).toBeUndefined();
+  expect(stalled.update(answeredWithoutCompletionAction, 10_849)).toBeUndefined();
+  expect(stalled.update(answeredWithoutCompletionAction, 10_850)).toContain("did not expose its completed-turn action");
+
+  const empty = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const completedEmpty = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    completionActionVisible: true,
+  };
+  expect(empty.update({ ...completedEmpty, externalProgressLive: true }, 1_000)).toBeUndefined();
+  expect(empty.update({ ...completedEmpty, externalProgressLive: true }, 9_000)).toBeUndefined();
+  expect(empty.update(completedEmpty, 9_100)).toBeUndefined();
+  expect(empty.update(completedEmpty, 9_600)).toContain("completed without a final answer");
+});
+
+test("live external progress still records that a response DOM was observed", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const absent = {
+    responsePresent: false,
+    running: true,
+    currentText: "",
+    completionActionVisible: false,
+  };
+
+  expect(tracker.update({
+    responsePresent: true,
+    running: true,
+    currentText: "",
+    completionActionVisible: false,
+    externalProgressLive: true,
+  }, 1_000)).toBeUndefined();
+
+  // The turn is reported as vanished rather than never created, so `sawResponse` survived.
+  expect(tracker.update(absent, 2_000)).toBeUndefined();
+  expect(tracker.update(absent, 3_000)).toContain("response DOM disappeared");
+});

@@ -874,9 +874,19 @@ export class ChatGptTurnDomHealthTracker {
     running: boolean;
     currentText: string;
     completionActionVisible: boolean;
+    externalProgressLive?: boolean;
   }, now = Date.now()): string | undefined {
+    if (state.responsePresent) this.sawResponse = true;
+    if (state.externalProgressLive) {
+      // Every conclusion below asserts that ChatGPT stopped producing this turn. A tool call that
+      // is still completing disproves all of them, whatever the renderer is currently exposing, so
+      // no window may accrue while the model is provably working.
+      this.missingResponseSince = undefined;
+      this.emptyCompletionSince = undefined;
+      this.missingCompletionAction = undefined;
+      return undefined;
+    }
     if (state.responsePresent) {
-      this.sawResponse = true;
       this.missingResponseSince = undefined;
     } else {
       this.missingResponseSince ??= now;
@@ -2386,6 +2396,7 @@ export class ChatGptBrowserWorker {
         running,
         currentText: snapshot.visibleText,
         completionActionVisible: snapshot.completionActionVisible,
+        externalProgressLive,
       });
       if (domError) throw new Error(domError);
       if (completionTracker.update({
@@ -3573,6 +3584,7 @@ export class ChatGptBrowserWorker {
             running,
             currentText: snapshot.visibleText,
             completionActionVisible: snapshot.completionActionVisible,
+            externalProgressLive,
           });
           if (domError) throw new Error(domError);
           if (completionTracker.update({
@@ -3623,6 +3635,7 @@ export class ChatGptBrowserWorker {
             running,
             currentText: "",
             completionActionVisible: false,
+            externalProgressLive,
           });
           if (domError) throw new Error(domError);
         }
