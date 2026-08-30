@@ -86,7 +86,10 @@ import {
 import {
   chatGptExternalProgressIsLive,
 } from "./turn-progress";
-import type { ChatGptTurnProgressReader } from "./turn-progress";
+import type {
+  ChatGptExternalTurnProgressSnapshot,
+  ChatGptTurnProgressReader,
+} from "./turn-progress";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -938,12 +941,25 @@ export const CHATGPT_STOPPED_THINKING_GRACE_MS = 5_000;
 export const MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS = 8;
 
 /**
- * Absolute ceiling on how long proven MCP progress may suppress DOM health checks.
+ * How stale recorded MCP progress may be and still suppress DOM health checks.
  *
- * Liveness is reported while a tool call is outstanding, so a tool that never returns would
- * otherwise hold a turn open forever whenever the caller supplied no turn deadline.
+ * An outstanding tool call reports liveness regardless of age, so a call that never returns would
+ * otherwise hold a turn open forever — turns carry no deadline unless a caller supplies one. This
+ * bounds the silence since the last recorded activity rather than the turn's total duration, so a
+ * long turn that keeps calling tools is never penalised for taking a long time.
  */
-export const CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS = 30 * 60_000;
+export const CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS = 10 * 60_000;
+
+/** Proven MCP activity, additionally required to be recent enough to still be evidence. */
+export function chatGptExternalProgressSuppressesDomHealth(
+  snapshot: ChatGptExternalTurnProgressSnapshot | undefined,
+  now: number,
+): boolean {
+  if (!chatGptExternalProgressIsLive(snapshot, now, CHATGPT_RESPONSE_DOM_GRACE_MS)) return false;
+  const lastProgressAt = snapshot?.lastProgressAt;
+  return lastProgressAt !== undefined
+    && now - lastProgressAt < CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS;
+}
 
 export class ChatGptStoppedThinkingTracker {
   private visibleSince?: number;
@@ -2393,10 +2409,9 @@ export class ChatGptBrowserWorker {
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         }
       }
-      const externalProgressLive = chatGptExternalProgressIsLive(
+      const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
         externalProgress?.snapshot(),
         Date.now(),
-        CHATGPT_RESPONSE_DOM_GRACE_MS,
       );
       if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible) && !externalProgressLive) {
         throw chatGptStoppedThinkingError();
@@ -3571,14 +3586,15 @@ export class ChatGptBrowserWorker {
           }
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
-        // Liveness may postpone a verdict, never waive it: past the ceiling the DOM alone decides,
-        // so a tool call that never returns cannot hold an undeadlined turn open indefinitely.
-        const externalProgressLive = Date.now() - sentAt < CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS
-          && chatGptExternalProgressIsLive(
-            turn.externalProgress?.snapshot(),
-            Date.now(),
-            CHATGPT_RESPONSE_DOM_GRACE_MS,
-          );
+        // The page was read successfully, so the fault budget is genuinely consecutive even when
+        // this iteration goes on to `continue` for a rebind, confirmation, or liveness pause.
+        internalObservationFaults = 0;
+        // Liveness may postpone a verdict, never waive it: once activity goes stale the DOM alone
+        // decides, so a tool call that never returns cannot hold an undeadlined turn open forever.
+        const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
+          turn.externalProgress?.snapshot(),
+          Date.now(),
+        );
         // A stale "Stopped thinking" label is not terminal while the model is still driving tool
         // calls, so the tracker keeps observing but may not cancel the turn.
         if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible) && !externalProgressLive) {
@@ -3672,7 +3688,6 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
-        internalObservationFaults = 0;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,

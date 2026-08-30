@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -2267,9 +2267,39 @@ test("an accepted turn survives internal observation faults instead of being tor
 
   // Liveness may postpone a verdict but never waive it, so a tool call that never returns cannot
   // hold an undeadlined turn open forever.
-  expect(worker).toMatch(/Date\.now\(\) - sentAt < CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS/);
-  expect(CHATGPT_EXTERNAL_PROGRESS_SUPPRESSION_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
+  expect(CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
 
   // Chain-of-thought containment is commentary regardless of document position.
   expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');
+});
+
+test("stale MCP progress stops suppressing DOM health without penalising long active turns", () => {
+  const outstanding = { revision: 2, lastToolBatchRevision: 2, activeToolCalls: 1, lastProgressAt: 1_000 };
+
+  // An outstanding call reports liveness regardless of age, so age is bounded separately: a tool
+  // that never returns must not hold a turn open forever, since turns carry no deadline by default.
+  expect(chatGptExternalProgressSuppressesDomHealth(outstanding, 1_000)).toBeTrue();
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    outstanding,
+    1_000 + CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS - 1,
+  )).toBeTrue();
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    outstanding,
+    1_000 + CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS,
+  )).toBeFalse();
+
+  // A turn that keeps calling tools stays suppressed no matter how long it has been running, so
+  // the bound is silence since the last activity rather than total turn duration.
+  const hoursIn = 4 * 60 * 60_000;
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    { ...outstanding, lastProgressAt: hoursIn },
+    hoursIn + 1_000,
+  )).toBeTrue();
+
+  // No recorded activity is never evidence.
+  expect(chatGptExternalProgressSuppressesDomHealth(undefined, 1_000)).toBeFalse();
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    { revision: 0, lastToolBatchRevision: 0, activeToolCalls: 0 },
+    1_000,
+  )).toBeFalse();
 });
