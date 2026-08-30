@@ -134,6 +134,15 @@ export type CodexToolChoice =
   | { name: string }
   | { allowedTools: string[]; mode: "auto" | "required" };
 
+export type CodexVerbosity = "low" | "medium" | "high";
+
+export interface CodexJsonSchemaOutputFormat {
+  type: "json_schema";
+  name: string;
+  strict: boolean;
+  schema: unknown;
+}
+
 export interface CodexRequestOptions {
   maxOutputTokens?: number;
   temperature?: number;
@@ -146,6 +155,10 @@ export interface CodexRequestOptions {
   serviceTier?: string;
   presencePenalty?: number;
   frequencyPenalty?: number;
+  /** Native Responses text verbosity requested by Codex. */
+  verbosity?: CodexVerbosity;
+  /** Native Responses JSON-schema output contract requested by Codex. */
+  outputFormat?: CodexJsonSchemaOutputFormat;
   /** Responses prompt-cache affinity key. Passthrough preserves it via _rawBody; routed adapters do not consume it unless their upstream wire supports it. */
   promptCacheKey?: string;
 }
