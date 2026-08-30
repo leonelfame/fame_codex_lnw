@@ -1898,7 +1898,8 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
   expect(workerSource).toContain("const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>");
-  expect(workerSource).toContain("candidate.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING");
+  expect(workerSource).toContain("const firstStreamingStatusContainer = streamingStatusContainers[0]");
+  expect(workerSource).toContain("candidate.compareDocumentPosition(firstStreamingStatusContainer)");
   expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain("!commentaryRoots.includes(candidate)");
   expect(workerSource).toContain('fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join("")');
@@ -2239,4 +2240,17 @@ test("live external progress still records that a response DOM was observed", ()
   // The turn is reported as vanished rather than never created, so `sawResponse` survived.
   expect(tracker.update(absent, 2_000)).toBeUndefined();
   expect(tracker.update(absent, 3_000)).toContain("response DOM disappeared");
+});
+
+test("answer Markdown is not reclassified as commentary when a later tool call opens a status container", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+
+  // Commentary is Markdown that precedes the FIRST streaming status container. Keying it on "some
+  // status follows me" made every answer chunk emitted before a second tool call look like prior
+  // commentary, which zeroed the visible text and silently dropped answer content.
+  expect(worker).toContain("const firstStreamingStatusContainer = streamingStatusContainers[0]");
+  expect(worker).toMatch(/candidate\.compareDocumentPosition\(firstStreamingStatusContainer\)/);
+  expect(worker).not.toMatch(
+    /streamingStatusContainers\.some\(status => \(\s*Boolean\(candidate\.compareDocumentPosition\(status\)/,
+  );
 });

@@ -2671,10 +2671,16 @@ export class ChatGptBrowserWorker {
         .filter(renderedInDom);
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]
         .filter(renderedInDom);
+      const firstStreamingStatusContainer = streamingStatusContainers[0];
       const commentaryRoots = allMarkdownRoots.filter(candidate => (
         candidate.closest("[data-streaming-response-status]") !== null
-        || streamingStatusContainers.some(status => (
-          Boolean(candidate.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING)
+        // Only Markdown that precedes the FIRST status container is prior commentary. Keying this
+        // on "some status follows me" silently reclassified answer text as commentary as soon as a
+        // second tool call opened another status container below it, which both zeroed the visible
+        // text and dropped every answer chunk emitted between tool calls.
+        || (firstStreamingStatusContainer !== undefined && Boolean(
+          candidate.compareDocumentPosition(firstStreamingStatusContainer)
+          & Node.DOCUMENT_POSITION_FOLLOWING,
         ))
       ));
       const renderedRoots = allMarkdownRoots.filter(candidate => (
