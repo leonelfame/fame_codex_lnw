@@ -51,6 +51,31 @@ test("setup validates the port before performing runtime work", async () => {
   }
 });
 
+test("launcher-controlled login fails before opening Chrome without live authorization", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-login-"));
+  const statePath = join(root, "storage-state.json");
+  try {
+    const result = await runCli([
+      "login",
+      "--launcher-control",
+      "--chrome",
+      process.execPath,
+      "--storage-state",
+      statePath,
+    ], {
+      ...process.env,
+      CODEX_CHATGPT_WEB_HOME: join(root, "app"),
+      CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: undefined,
+      CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: undefined,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Launcher-controlled login requires a live launcher authorization");
+    expect(existsSync(statePath)).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("DEV chat list works without starting launcher, broker, or Responses services", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-dev-list-"));
   try {

@@ -17,6 +17,7 @@ const {
   isTemporaryChatUrl,
   navigationErrorForLog,
   navigationOriginForLog,
+  validateChatGptStorageState,
 } = require("../electron/browser-host.cjs");
 
 test("authentication diagnostics retain only origin and non-sensitive error metadata", () => {
@@ -141,6 +142,162 @@ test("smoke preserves an already-hydrated Temporary Chat page", () => {
   assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=false"), false);
   assert.equal(isTemporaryChatUrl("https://chatgpt.com/c/abc?temporary-chat=true"), false);
   assert.equal(isTemporaryChatUrl("not a url"), false);
+});
+
+test("passkey storage transfer imports only allowlisted ChatGPT/OpenAI state", () => {
+  const validated = validateChatGptStorageState({
+    cookies: [
+      {
+        name: "session",
+        value: "secret-session",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      },
+      {
+        name: "provider",
+        value: "must-not-cross",
+        domain: ".google.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+      },
+      {
+        name: "__Host-session",
+        value: "host-only-session",
+        domain: "chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      },
+    ],
+    origins: [
+      { origin: "https://chatgpt.com", localStorage: [{ name: "theme", value: "dark" }] },
+      { origin: "https://accounts.google.com", localStorage: [{ name: "provider", value: "secret" }] },
+    ],
+  });
+
+  assert.equal(validated.cookies[0].domain, ".chatgpt.com");
+  assert.equal(Object.hasOwn(validated.cookies[1], "domain"), false);
+  assert.deepEqual(validated.localStorage, [{ name: "theme", value: "dark" }]);
+});
+
+test("passkey login proves the Electron composer and cleans transfer state", async () => {
+  const calls = [];
+  const retained = { id: "retained-before-login" };
+  const browserSession = {
+    clearStorageData: async () => calls.push("clear"),
+    flushStorageData: () => calls.push("flush-storage"),
+    cookies: {
+      set: async (cookie) => calls.push(["cookie", cookie]),
+      flushStore: async () => calls.push("flush-cookies"),
+    },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    authView: null,
+    turnTabs: new Map([[retained.id, retained]]),
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        session: browserSession,
+        loadURL: async (url) => calls.push(["load", url]),
+        executeJavaScript: async (script) => calls.push(["script", script]),
+      },
+    },
+    waitForAuthenticated: async () => ({ authenticated: true }),
+    persistSession: async () => calls.push("persist"),
+    activateHomeSurface: () => calls.push("activate"),
+    show: () => calls.push("show"),
+    logger: { info: (event) => calls.push(["log", event]) },
+    removeTurnTab(tab) {
+      calls.push(["retire", tab.id]);
+      this.turnTabs.delete(tab.id);
+    },
+  });
+  const transfer = {
+    storageState: {
+      cookies: [{
+        name: "session",
+        value: "secret-session",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      }],
+      origins: [{ origin: "https://chatgpt.com", localStorage: [{ name: "theme", value: "dark" }] }],
+    },
+    cleanup: async () => calls.push("cleanup"),
+  };
+
+  const result = await BrowserHost.prototype.installSystemBrowserLogin.call(fixture, transfer);
+
+  assert.equal(result.authenticated, true);
+  assert.equal(calls.filter((call) => call === "clear").length, 1);
+  assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "cookie"));
+  assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "script" && call[1].includes("theme")));
+  assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "retire" && call[1] === retained.id));
+  assert.equal(fixture.turnTabs.size, 0);
+  assert.equal(calls.at(-1), "cleanup");
+});
+
+test("failed passkey import clears partial Electron state and the private transfer", async () => {
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    authView: null,
+    state: { authenticated: false },
+    turnTabs: new Map(),
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        loadURL: async (url) => calls.push(["load", url]),
+        session: {
+          clearStorageData: async () => calls.push("clear"),
+          flushStorageData: () => calls.push("flush-storage"),
+          cookies: {
+            set: async () => { throw new Error("synthetic cookie failure"); },
+            flushStore: async () => calls.push("flush-cookies"),
+          },
+        },
+      },
+    },
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+  });
+  const transfer = {
+    storageState: {
+      cookies: [{
+        name: "session",
+        value: "secret-session",
+        domain: ".chatgpt.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      }],
+      origins: [],
+    },
+    cleanup: async () => calls.push("cleanup"),
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.installSystemBrowserLogin.call(fixture, transfer),
+    /synthetic cookie failure/,
+  );
+  assert.equal(calls.filter((call) => call === "clear").length, 2);
+  assert.ok(calls.some((call) => Array.isArray(call)
+    && call[0] === "load"
+    && call[1] === "about:blank#codex-web-gpt-browser-host"));
+  assert.equal(fixture.state.authenticated, false);
+  assert.equal(calls.at(-1), "cleanup");
 });
 
 test("session inspection delegates navigation and capability detection to the shared browser helper", async () => {
@@ -464,7 +621,7 @@ test("launcher authentication requires the Temporary Chat composer and complete 
   assert.equal(result.status, "ready");
 });
 
-test("authentication windows stay inside the launcher-owned browser partition", () => {
+test("embedded authentication stays the default while passkey login is an explicit fallback", () => {
   assert.equal(allowedAuthUrl("https://accounts.google.com/o/oauth2/v2/auth"), true);
   assert.equal(allowedAuthUrl("https://chatgpt.com/auth/login"), true);
   assert.equal(allowedAuthUrl("https://platform.openai.com/settings/organization/tunnels"), false);
@@ -472,7 +629,11 @@ test("authentication windows stay inside the launcher-owned browser partition", 
   const source = fs.readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
   assert.match(source, /createWindow:\s*\(options\)\s*=>\s*this\.createAuthView\(options,\s*url\)/);
   assert.match(source, /webContents:\s*options\.webContents/);
-  assert.doesNotMatch(source, /loginWithSystemBrowser|captureSystemBrowserLogin|system_login_started/);
+  const embedded = source.slice(source.indexOf("  openLogin()"), source.indexOf("  openSystemLogin()"));
+  const passkey = source.slice(source.indexOf("  openSystemLogin()"), source.indexOf("  async clearOwnedChatGptSession()"));
+  assert.doesNotMatch(embedded, /loginWithSystemBrowser|system_login_started/);
+  assert.match(passkey, /loginWithSystemBrowser/);
+  assert.match(passkey, /system_login_started/);
 });
 
 test("concurrent embedded login requests share one authentication operation", async () => {
@@ -562,9 +723,11 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   const authView = { webContents: { isDestroyed: () => false } };
   const fixture = {
     authView,
+    turnTabs: new Map(),
     state: { authenticated: true, status: "ready" },
     view: {
       webContents: {
+        isDestroyed: () => false,
         getURL: () => currentUrl,
         loadURL: async (url) => {
           calls.push(["loadURL", url]);
@@ -572,9 +735,12 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
         },
         session: {
           clearStorageData: async () => calls.push(["clearStorageData"]),
+          flushStorageData: () => calls.push(["flushStorageData"]),
+          cookies: { flushStore: async () => calls.push(["flushCookies"]) },
         },
       },
     },
+    clearOwnedChatGptSession: BrowserHost.prototype.clearOwnedChatGptSession,
     closeAuthView(view, closeContents, refreshMain) {
       calls.push(["closeAuthView", view, closeContents, refreshMain]);
       this.authView = null;
@@ -604,8 +770,10 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.equal(result.status, "signed-out");
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
   assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
-  assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  assert.ok(calls.some(([name]) => name === "clearStorageData"));
+  assert.ok(calls.some(([name]) => name === "flushStorageData"));
+  assert.ok(calls.some(([name]) => name === "flushCookies"));
+  assert.ok(calls.some(([name, url]) => name === "loadURL" && url === "https://chatgpt.com/?temporary-chat=true"));
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });

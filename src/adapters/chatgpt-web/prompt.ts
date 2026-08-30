@@ -221,7 +221,7 @@ function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
 }
 
 function plainMessageText(message: CodexMessage): string | undefined {
-  if (message.role === "assistant" || message.role === "toolResult") return undefined;
+  if (message.role === "assistant" || message.role === "agentMessage" || message.role === "toolResult") return undefined;
   if (typeof message.content === "string") return message.content;
   if (message.content.some(part => part.type !== "text")) return undefined;
   return message.content.map(part => part.type === "text" ? part.text : "").join("\n");
@@ -274,6 +274,14 @@ function messageEnvelope(
       tool_name: message.toolName,
       ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
       is_error: message.isError,
+      content: inputContent(message.content, images, budget),
+    };
+  }
+  if (message.role === "agentMessage") {
+    return {
+      role: "agent_message",
+      ...(message.author !== undefined ? { author: message.author } : {}),
+      ...(message.recipient !== undefined ? { recipient: message.recipient } : {}),
       content: inputContent(message.content, images, budget),
     };
   }

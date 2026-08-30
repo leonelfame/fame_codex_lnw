@@ -188,15 +188,58 @@ function trayImage() {
   return image;
 }
 
-function createTray(logger) {
+const NATIVE_COPY = Object.freeze({
+  en: Object.freeze({
+    openLauncher: "Open Codex Web GPT",
+    quit: "Quit",
+    exportDiagnostics: "Export privacy-safe diagnostics",
+    cancel: "Cancel",
+    remove: "Remove",
+    removeTitle: "Remove Codex Web GPT",
+    removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
+    removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+  }),
+  "zh-CN": Object.freeze({
+    openLauncher: "打开 Codex Web GPT",
+    quit: "退出",
+    exportDiagnostics: "导出隐私安全诊断",
+    cancel: "取消",
+    remove: "移除",
+    removeTitle: "移除 Codex Web GPT",
+    removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
+    removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+  }),
+  ja: Object.freeze({
+    openLauncher: "Codex Web GPT を開く",
+    quit: "終了",
+    exportDiagnostics: "プライバシー保護済みの診断情報をエクスポート",
+    cancel: "キャンセル",
+    remove: "削除",
+    removeTitle: "Codex Web GPT を削除",
+    removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
+    removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
+  }),
+});
+
+function nativeCopyFor(language) {
+  return NATIVE_COPY[language] || NATIVE_COPY.en;
+}
+
+function updateTrayMenu(language) {
+  if (!tray) return;
+  const copy = nativeCopyFor(language);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: copy.openLauncher, click: () => showMainWindow() },
+    { type: "separator" },
+    { label: copy.quit, click: () => { void requestQuit(); } },
+  ]));
+}
+
+function createTray(logger, language) {
   try {
     tray = new Tray(trayImage());
     tray.setToolTip(LAUNCHER_PROFILE.displayName);
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: `Open ${LAUNCHER_PROFILE.displayName}`, click: () => showMainWindow() },
-      { type: "separator" },
-      { label: "Quit", click: () => { void requestQuit(); } },
-    ]));
+    updateTrayMenu(language);
     tray.on("click", () => showMainWindow());
     return true;
   } catch (error) {
@@ -339,7 +382,9 @@ async function loadRenderer(window) {
 }
 
 function validateLanguage(value) {
-  if (value !== "en" && value !== "zh-CN") throw new Error("Language must be en or zh-CN");
+  if (value !== "en" && value !== "zh-CN" && value !== "ja") {
+    throw new Error("Language must be en, zh-CN, or ja");
+  }
   return value;
 }
 
@@ -378,7 +423,11 @@ function registerIpc({ logger, stateStore }) {
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
-  handle("launcher:set-language", (_event, language) => stateStore.update({ language: validateLanguage(language) }));
+  handle("launcher:set-language", (_event, language) => {
+    const state = stateStore.update({ language: validateLanguage(language) });
+    updateTrayMenu(state.language);
+    return state;
+  });
   handle("launcher:open-social", async (_event, target) => {
     const url = target === "github" ? GITHUB_URL : target === "x" ? X_URL : null;
     if (!url) throw new Error("Unknown social target");
@@ -391,6 +440,7 @@ function registerIpc({ logger, stateStore }) {
     if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({ language: validateLanguage(language), onboardingComplete: true });
+    updateTrayMenu(next.language);
     logger.info("launcher.onboarding_completed", { language: next.language });
     return next;
   });
@@ -414,6 +464,14 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
   handle("launcher:browser-login", async () => {
     const browser = await browserHost.openLogin();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+    }
+    return browser;
+  });
+  handle("launcher:browser-passkey-login", async () => {
+    const browser = await browserHost.openSystemLogin();
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
@@ -515,20 +573,15 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:uninstall-integration", async () => {
     if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex integration to remove");
-    const language = stateStore.read().language;
-    const chinese = language === "zh-CN";
+    const copy = nativeCopyFor(stateStore.read().language);
     const confirmation = await dialog.showMessageBox(mainWindow, {
       type: "warning",
-      buttons: chinese ? ["取消", "移除"] : ["Cancel", "Remove"],
+      buttons: [copy.cancel, copy.remove],
       defaultId: 0,
       cancelId: 0,
-      title: chinese ? "移除 Codex Web GPT" : "Remove Codex Web GPT",
-      message: chinese
-        ? "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？"
-        : "Remove the ChatGPT Web models from Codex and restore the previous model route?",
-      detail: chinese
-        ? "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。"
-        : "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+      title: copy.removeTitle,
+      message: copy.removeMessage,
+      detail: copy.removeDetail,
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
@@ -642,8 +695,9 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:export-logs", async () => {
     const date = new Date().toISOString().slice(0, 10);
+    const copy = nativeCopyFor(stateStore.read().language);
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: "Export privacy-safe diagnostics",
+      title: copy.exportDiagnostics,
       defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
       filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
     });
@@ -815,6 +869,7 @@ async function start() {
     getConnectorName: () => runtimeHost.browserConnectorName(),
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
+    loginWithSystemBrowser: () => runtimeHost.captureSystemBrowserLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
     publishState: (state) => send("launcher:browser-state", state),
@@ -835,7 +890,7 @@ async function start() {
     logger,
   });
   registerIpc({ logger, stateStore });
-  const trayAvailable = createTray(logger);
+  const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
   let startupAuthenticationRefresh = Promise.resolve();

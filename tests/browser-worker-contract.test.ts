@@ -236,6 +236,15 @@ test("launcher page acquisition proves a nonzero operational viewport before DOM
   expect(workerSource).toContain("innerWidth >= width && innerHeight >= height");
 });
 
+test("Luna turns without a retained conversation never send connector identity alone", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const runExclusive = workerSource.slice(workerSource.indexOf("  private async runExclusive("));
+  const connectorIdentity = runExclusive.indexOf("connectorIdentity: this.config.appName");
+  expect(connectorIdentity).toBeGreaterThan(-1);
+  expect(runExclusive.slice(connectorIdentity - 260, connectorIdentity)).toContain("turn.conversationKey");
+  expect(runExclusive.slice(connectorIdentity - 260, connectorIdentity)).toContain("turn.nativeConnector");
+});
+
 test("a stalled post-submit DOM probe is bounded before same-page launcher recovery", async () => {
   expect(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS).toBe(5_000);
   expect(MAX_CHATGPT_BROWSER_PAGE_REBINDS).toBe(2);
