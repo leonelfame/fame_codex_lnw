@@ -118,6 +118,7 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
+export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
@@ -2298,12 +2299,21 @@ export class ChatGptBrowserWorker {
       .locator("xpath=ancestor::form[1]")
       .getByTestId("send-button");
     await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
-    if (!await sendButton.isEnabled()) {
-      throw new Error("ChatGPT send button is disabled after the complete prompt was attached");
-    }
     await settleChatGptUi();
+    const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
+    for (;;) {
+      if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (page.isClosed()) throw chatGptBrowserTabClosedError();
+      await throwIfChatGptSessionFailureAlert(page);
+      await throwIfChatGptRateLimitDialog(page);
+      if (await sendButton.isEnabled()) break;
+      if (Date.now() >= sendEnableDeadline) {
+        await captureDiagnostic?.("send-disabled");
+        throw new Error("ChatGPT send button remained disabled after the complete prompt was attached");
+      }
+      await settleChatGptUi();
+    }
     await captureDiagnostic?.("send-ready");
-    await throwIfChatGptSessionFailureAlert(page);
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
     await sendButton.press("Enter");

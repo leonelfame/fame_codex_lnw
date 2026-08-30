@@ -34,10 +34,25 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
     workerSource.indexOf("  private async sendAttachedPrompt("),
     workerSource.indexOf("  private async waitForMultipartAcknowledgement("),
   );
+  const sendSettled = sendAttachedPrompt.indexOf("await settleChatGptUi()");
+  const sendDeadline = sendAttachedPrompt.indexOf("CHATGPT_SEND_ENABLE_GRACE_MS", sendSettled);
+  const sessionChecked = sendAttachedPrompt.indexOf("await throwIfChatGptSessionFailureAlert(page)", sendDeadline);
+  const rateLimitChecked = sendAttachedPrompt.indexOf("await throwIfChatGptRateLimitDialog(page)", sessionChecked);
+  const enabledChecked = sendAttachedPrompt.indexOf("if (await sendButton.isEnabled()) break;", rateLimitChecked);
+  const sendReady = sendAttachedPrompt.indexOf('await captureDiagnostic?.("send-ready")');
   const sendActivated = sendAttachedPrompt.indexOf("submissionLifecycle?.onSendActivated?.()");
   const sendPressed = sendAttachedPrompt.indexOf('await sendButton.press("Enter")');
   const submissionWait = sendAttachedPrompt.indexOf("await this.waitForSubmissionAccepted(");
   const submitted = sendAttachedPrompt.indexOf("submissionLifecycle?.onSubmitted?.()");
+  expect(sendSettled).toBeGreaterThan(-1);
+  expect(sendDeadline).toBeGreaterThan(sendSettled);
+  expect(sessionChecked).toBeGreaterThan(sendDeadline);
+  expect(rateLimitChecked).toBeGreaterThan(sessionChecked);
+  expect(enabledChecked).toBeGreaterThan(rateLimitChecked);
+  expect(sendReady).toBeGreaterThan(enabledChecked);
+  expect(sendActivated).toBeGreaterThan(sendReady);
+  expect(sendAttachedPrompt).toContain("send button remained disabled after the complete prompt was attached");
+  expect(sendAttachedPrompt).not.toContain("send button is disabled after the complete prompt was attached");
   expect(sendActivated).toBeGreaterThan(-1);
   expect(sendActivated).toBeLessThan(sendPressed);
   expect(sendAttachedPrompt).toContain("await submissionLifecycle?.onSendActivated?.()");
