@@ -2124,3 +2124,65 @@ test("visible reasoning keeps the browser turn healthy before final assistant ma
   expect(health.update(reasoning, 1_000)).toBeUndefined();
   expect(health.update(reasoning, 10_000)).toBeUndefined();
 });
+
+test("suspending DOM health for proven MCP progress restarts the missing-response window", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const absent = {
+    responsePresent: false,
+    running: true,
+    currentText: "",
+    completionActionVisible: false,
+  };
+
+  // The response DOM is unavailable from the first observation, so the window opens here.
+  expect(tracker.update(absent, 1_000)).toBeUndefined();
+
+  // Proven tool-call activity suspends the check. Charging that suspended stretch against the
+  // grace period is what let a live turn be cancelled the moment liveness lapsed.
+  tracker.clearMissingResponse();
+
+  expect(tracker.update(absent, 10_000)).toBeUndefined();
+  expect(tracker.update(absent, 10_999)).toBeUndefined();
+  expect(tracker.update(absent, 11_000)).toContain("did not create a response DOM");
+});
+
+test("clearing the missing-response window preserves whether a response was ever observed", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const present = {
+    responsePresent: true,
+    running: true,
+    currentText: "partial",
+    completionActionVisible: false,
+  };
+  const absent = { ...present, responsePresent: false, currentText: "" };
+
+  expect(tracker.update(present, 1_000)).toBeUndefined();
+  expect(tracker.update(absent, 1_500)).toBeUndefined();
+  tracker.clearMissingResponse();
+  expect(tracker.update(absent, 5_000)).toBeUndefined();
+  expect(tracker.update(absent, 6_000)).toContain("response DOM disappeared");
+});
+
+test("the launcher helper transport carries MCP progress into the out-of-process browser worker", () => {
+  const client = readFileSync("src/adapters/chatgpt-web/launcher-helper-client.ts", "utf8");
+  const helper = readFileSync("src/adapters/chatgpt-web/browser-helper-main.ts", "utf8");
+
+  // The browser worker runs in the helper process while the Codex MCP broker runs in the daemon.
+  // If progress stops crossing that boundary the worker silently observes "never live" and cancels
+  // turns whose tool calls are still completing, so both ends of the transport are asserted here.
+  expect(client).toContain("forwardProgress");
+  expect(client).toMatch(/type: "progress", id: turn\.traceId, snapshot/);
+  expect(helper).toMatch(/message\.type === "progress"/);
+  expect(helper).toContain("ChatGptMirroredTurnProgress");
+  expect(helper).toMatch(/externalProgress: progress/);
+});
+
+test("turn cancellation heuristics defer to proven MCP progress in both wait loops", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const guarded = worker.match(/stoppedThinkingTracker\.update\([^)]*\)\s*&&\s*!externalProgressLive/g) ?? [];
+
+  // A stale "Stopped thinking" label must not cancel a turn that is still driving tool calls, and
+  // the multipart staging loop must not be the one place that skips the liveness guard.
+  expect(guarded.length).toBe(2);
+  expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(2);
+});

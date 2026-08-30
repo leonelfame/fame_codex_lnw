@@ -84,9 +84,9 @@ import {
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 import {
-  ChatGptExternalTurnProgress,
   chatGptExternalProgressIsLive,
 } from "./turn-progress";
+import type { ChatGptTurnProgressReader } from "./turn-progress";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -707,7 +707,7 @@ export interface BrowserTurn {
   /** Append-only, structurally stable Markdown chunks. */
   onTextDelta: (delta: string) => void;
   /** Proven current-turn MCP activity; liveness only, never response content or completion. */
-  externalProgress?: ChatGptExternalTurnProgress;
+  externalProgress?: ChatGptTurnProgressReader;
   /** Allow one clean pre-submit composer retry for isolated history compaction only. */
   compaction?: boolean;
   /** Require and remove the private Luna checkpoint tail from the visible Markdown stream. */
@@ -857,6 +857,17 @@ export class ChatGptTurnDomHealthTracker {
     private readonly emptyCompletionMs = CHATGPT_EMPTY_RESPONSE_GRACE_MS,
     private readonly missingCompletionActionMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
   ) {}
+
+  /**
+   * Clears only the missing-response window, leaving `sawResponse` history intact.
+   *
+   * Callers use this when proven external progress suspends DOM health checks: the suspended
+   * stretch must not be charged against the grace period, or the first observation after it
+   * resumes would fail instantly against a timestamp recorded long before.
+   */
+  clearMissingResponse(): void {
+    this.missingResponseSince = undefined;
+  }
 
   update(state: {
     responsePresent: boolean;
@@ -1779,7 +1790,7 @@ export class ChatGptBrowserWorker {
   private async waitForTurnDomOrExternalProgress(
     page: Page,
     afterProgressRevision: number,
-    externalProgress?: ChatGptExternalTurnProgress,
+    externalProgress?: ChatGptTurnProgressReader,
     signal?: AbortSignal,
   ): Promise<void> {
     const domMutation = this.waitForTurnDomMutation(page);
@@ -1805,7 +1816,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     signal?: AbortSignal,
-    externalProgress?: ChatGptExternalTurnProgress,
+    externalProgress?: ChatGptTurnProgressReader,
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
   ): Promise<ChatGptSubmissionEvidence> {
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -1961,7 +1972,7 @@ export class ChatGptBrowserWorker {
     baseline: ChatGptSubmissionBaseline,
     deadline: number | undefined,
     signal?: AbortSignal,
-    externalProgress?: ChatGptExternalTurnProgress,
+    externalProgress?: ChatGptTurnProgressReader,
   ): Promise<ChatGptAssistantTurnBinding> {
     let responseDeadline = Math.min(
       deadline ?? Number.POSITIVE_INFINITY,
@@ -2290,7 +2301,7 @@ export class ChatGptBrowserWorker {
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
-    externalProgress?: ChatGptExternalTurnProgress,
+    externalProgress?: ChatGptTurnProgressReader,
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
@@ -2325,6 +2336,7 @@ export class ChatGptBrowserWorker {
     stage: ChatGptWebMultipartStage,
     deadline: number | undefined,
     abortSignal?: AbortSignal,
+    externalProgress?: ChatGptTurnProgressReader,
   ): Promise<void> {
     const completionTracker = new ChatGptCompletionTracker();
     const domHealthTracker = new ChatGptTurnDomHealthTracker();
@@ -2353,8 +2365,20 @@ export class ChatGptBrowserWorker {
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         }
       }
-      if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
+      const externalProgressLive = chatGptExternalProgressIsLive(
+        externalProgress?.snapshot(),
+        Date.now(),
+        CHATGPT_RESPONSE_DOM_GRACE_MS,
+      );
+      if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible) && !externalProgressLive) {
         throw chatGptStoppedThinkingError();
+      }
+      if (!snapshot.responsePresent && externalProgressLive) {
+        // Proven MCP activity outranks a momentarily unavailable staging DOM, exactly as it does
+        // in the main turn loop.
+        domHealthTracker.clearMissingResponse();
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        continue;
       }
       const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
       const domError = domHealthTracker.update({
@@ -3306,6 +3330,7 @@ export class ChatGptBrowserWorker {
             stage,
             deadline,
             turn.abortSignal,
+            turn.externalProgress,
           );
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
         }
@@ -3505,17 +3530,21 @@ export class ChatGptBrowserWorker {
           }
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
-        if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
-          throw chatGptStoppedThinkingError();
-        }
-        if (!snapshot.responsePresent && chatGptExternalProgressIsLive(
+        const externalProgressLive = chatGptExternalProgressIsLive(
           turn.externalProgress?.snapshot(),
           Date.now(),
           CHATGPT_RESPONSE_DOM_GRACE_MS,
-        )) {
+        );
+        // A stale "Stopped thinking" label is not terminal while the model is still driving tool
+        // calls, so the tracker keeps observing but may not cancel the turn.
+        if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible) && !externalProgressLive) {
+          throw chatGptStoppedThinkingError();
+        }
+        if (!snapshot.responsePresent && externalProgressLive) {
           // Current-turn MCP activity proves that ChatGPT is still executing even if its renderer
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
           // completion; this only prevents a live turn from being misclassified as vanished.
+          domHealthTracker.clearMissingResponse();
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }

@@ -17,6 +17,7 @@ interface PendingTurn {
   sent?: boolean;
   prepared?: CompiledChatGptWebPrompt & { release: () => void };
   localFailure?: Error;
+  progressForwarding?: AbortController;
 }
 
 type HelperMessage =
@@ -179,6 +180,9 @@ export class LauncherBrowserHelperClient {
         // Setting this before the synchronous write call makes an abort either prevent dispatch or
         // queue an `abort` after the `run` frame; it can never overtake the run frame in the pipe.
         pending.sent = true;
+        const progressForwarding = new AbortController();
+        pending.progressForwarding = progressForwarding;
+        this.forwardProgress(turn, progressForwarding.signal);
         void this.send({
           type: "run",
           id: turn.traceId,
@@ -406,12 +410,37 @@ export class LauncherBrowserHelperClient {
     });
   }
 
+  /**
+   * Mirrors daemon-recorded MCP progress into the helper process for the life of the turn.
+   *
+   * The browser worker runs out of process, so without this the worker sees no external progress
+   * and cancels turns whose tool calls are still completing.
+   */
+  private forwardProgress(turn: BrowserTurn, stop: AbortSignal): void {
+    const progress = turn.externalProgress;
+    if (!progress) return;
+    void (async () => {
+      let revision = 0;
+      while (!stop.aborted) {
+        const snapshot = await progress.waitForChange(revision, stop);
+        revision = snapshot.revision;
+        if (stop.aborted) return;
+        await this.send({ type: "progress", id: turn.traceId, snapshot });
+      }
+    })().catch(() => {
+      // A turn that ends, aborts, or loses its helper stops the mirror; the worker then falls back
+      // to DOM-only health, which is the pre-existing behaviour rather than a new failure mode.
+    });
+  }
+
   private finish(id: string): void {
     const pending = this.pending.get(id);
     if (!pending) return;
     if (pending.abortListener && pending.turn.abortSignal) {
       pending.turn.abortSignal.removeEventListener("abort", pending.abortListener);
     }
+    pending.progressForwarding?.abort();
+    pending.progressForwarding = undefined;
     pending.prepared?.release();
     pending.prepared = undefined;
     this.pending.delete(id);

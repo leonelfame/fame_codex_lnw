@@ -7,6 +7,8 @@ import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
 import type { CompiledChatGptWebPrompt } from "./prompt";
+import { ChatGptMirroredTurnProgress } from "./turn-progress";
+import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
 interface RunMessage {
   type: "run";
@@ -60,6 +62,7 @@ type InputMessage = RunMessage
   | MaintenanceMessage
   | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
   | { type: "send_activation_ack"; id: string }
+  | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
   | { type: "abort"; id: string }
   | { type: "shutdown" };
 
@@ -82,6 +85,7 @@ console.warn = diagnostic;
 console.error = diagnostic;
 
 const abortControllers = new Map<string, AbortController>();
+const turnProgress = new Map<string, ChatGptMirroredTurnProgress>();
 const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();
 const sendActivationWaiters = new Map<string, {
   resolve: () => void;
@@ -162,6 +166,10 @@ async function run(message: RunMessage): Promise<void> {
   };
   const abortController = new AbortController();
   abortControllers.set(message.id, abortController);
+  // The Codex MCP broker runs in the daemon process, so this mirror is the only way the worker can
+  // observe that a turn is still executing while its ChatGPT DOM is unavailable.
+  const progress = turnProgress.get(message.id) ?? new ChatGptMirroredTurnProgress();
+  turnProgress.set(message.id, progress);
   const promptSelection = createBrowserHelperPromptSelection();
   preparedSelections.set(message.id, promptSelection);
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
@@ -178,6 +186,7 @@ async function run(message: RunMessage): Promise<void> {
     ...(message.turn.conversationKey ? { conversationKey: message.turn.conversationKey } : {}),
     abortSignal: abortController.signal,
     ...(message.turn.compaction ? { compaction: true } : {}),
+    externalProgress: progress,
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
     onPreparedSelected: reused => {
       if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
@@ -243,6 +252,7 @@ async function run(message: RunMessage): Promise<void> {
     sendActivationWaiters.delete(message.id);
     sendWaiter?.reject(new DOMException("Browser helper turn ended before Send acknowledgement", "AbortError"));
     abortControllers.delete(message.id);
+    turnProgress.delete(message.id);
   }
 }
 
@@ -340,6 +350,20 @@ input.on("line", line => {
     }
     sendActivationWaiters.delete(message.id);
     waiter.resolve();
+  } else if (message.type === "progress") {
+    // Progress can arrive before the run frame is processed, so the mirror is created on demand
+    // rather than requiring an established turn.
+    const progress = turnProgress.get(message.id) ?? new ChatGptMirroredTurnProgress();
+    turnProgress.set(message.id, progress);
+    try {
+      progress.apply(message.snapshot);
+    } catch (error) {
+      writeProtocol({
+        type: "error",
+        id: message.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   } else if (message.type === "abort") {
     abortControllers.get(message.id)?.abort();
     preparedSelections.get(message.id)?.cancel();
