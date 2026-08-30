@@ -104,6 +104,30 @@ function allowedToolName(tool: unknown): string | undefined {
   return undefined;
 }
 
+function parseTextControls(value: unknown): Pick<CodexRequestOptions, "verbosity" | "outputFormat"> {
+  if (!isObj(value)) return {};
+  const out: Pick<CodexRequestOptions, "verbosity" | "outputFormat"> = {};
+  if (value.verbosity === "low" || value.verbosity === "medium" || value.verbosity === "high") {
+    out.verbosity = value.verbosity;
+  }
+  const format = value.format;
+  if (
+    isObj(format)
+    && format.type === "json_schema"
+    && typeof format.name === "string"
+    && format.name.length > 0
+    && format.schema !== undefined
+  ) {
+    out.outputFormat = {
+      type: "json_schema",
+      name: format.name,
+      strict: format.strict === true,
+      schema: structuredClone(format.schema),
+    };
+  }
+  return out;
+}
+
 const DEFAULT_FUNCTION_NAMESPACE = "functions";
 
 function normalizedToolNamespace(value: unknown): string | undefined {
@@ -595,6 +619,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
   if (data.frequency_penalty !== undefined) options.frequencyPenalty = data.frequency_penalty;
   if (data.service_tier !== undefined) options.serviceTier = data.service_tier;
+  Object.assign(options, parseTextControls(data.text));
   if (data.prompt_cache_key !== undefined) options.promptCacheKey = data.prompt_cache_key;
 
   return {
