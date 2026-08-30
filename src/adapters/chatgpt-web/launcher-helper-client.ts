@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
@@ -17,10 +19,11 @@ interface PendingTurn {
   sent?: boolean;
   prepared?: CompiledChatGptWebPrompt & { release: () => void };
   localFailure?: Error;
+  progressForwarding?: AbortController;
 }
 
 type HelperMessage =
-  | { type: "ready" }
+  | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
@@ -42,7 +45,14 @@ function parseHelperMessage(line: string): HelperMessage {
     throw new Error("Launcher browser helper message is not an object");
   }
   const message = value as Record<string, unknown>;
-  if (message.type === "ready") return { type: "ready" };
+  if (message.type === "ready") {
+    const features = message.features;
+    if (features !== undefined
+      && (!Array.isArray(features) || features.some(feature => typeof feature !== "string"))) {
+      throw new Error("Launcher browser helper advertised invalid features");
+    }
+    return { type: "ready", ...(features ? { features: features as string[] } : {}) };
+  }
   if (typeof message.id !== "string" || !message.id) {
     throw new Error("Launcher browser helper message has no turn identity");
   }
@@ -139,8 +149,28 @@ export class LauncherBrowserHelperClient {
   private readyResolve?: () => void;
   private readyReject?: (error: Error) => void;
   private readonly pending = new Map<string, PendingTurn>();
+  private helperFeatures = new Set<string>();
 
   constructor(private readonly config: ResolvedBrowserConfig) {}
+
+  /**
+   * The helper that shipped with this daemon, when one sits beside its own entrypoint.
+   *
+   * The launcher advertises the helper inside its application bundle while the daemon runs from a
+   * versioned runtime directory, so the two sides update independently and can disagree about the
+   * protocol. Preferring the sibling keeps daemon and helper on the same build by construction;
+   * anything else — a source checkout, an unbundled entrypoint — falls back to the advertised path.
+   */
+  private bundledHelperScript(): string | undefined {
+    const entrypoint = process.argv[1];
+    // Only the packaged runtime layout is claimed: the bundle builder emits cli.js and
+    // browser-helper.cjs into one directory. Matching on that entrypoint name keeps a source
+    // checkout, or any other launch shape, on the launcher-advertised helper rather than adopting
+    // an unrelated sibling that merely shares a filename.
+    if (typeof entrypoint !== "string" || basename(entrypoint) !== "cli.js") return undefined;
+    const sibling = join(dirname(entrypoint), "browser-helper.cjs");
+    return existsSync(sibling) ? sibling : undefined;
+  }
 
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -179,6 +209,8 @@ export class LauncherBrowserHelperClient {
         // Setting this before the synchronous write call makes an abort either prevent dispatch or
         // queue an `abort` after the `run` frame; it can never overtake the run frame in the pipe.
         pending.sent = true;
+        const progressForwarding = new AbortController();
+        pending.progressForwarding = progressForwarding;
         void this.send({
           type: "run",
           id: turn.traceId,
@@ -202,7 +234,13 @@ export class LauncherBrowserHelperClient {
             ...(turn.compaction ? { compaction: true } : {}),
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
           },
-        }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
+        })
+          // Only mirror once the run frame is on the wire, so the helper never sees progress for a
+          // turn it has not been told about and cannot accumulate state for unknown ids.
+          .then(() => {
+            if (!progressForwarding.signal.aborted) this.forwardProgress(turn, progressForwarding.signal);
+          })
+          .catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
       });
   }
 
@@ -231,7 +269,7 @@ export class LauncherBrowserHelperClient {
     const descriptor = readLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!);
     const child = spawn(
       descriptor.helper.executable,
-      [this.config.browserHelperScriptPath ?? descriptor.helper.script],
+      [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
       {
         env: {
           ...process.env,
@@ -307,6 +345,9 @@ export class LauncherBrowserHelperClient {
       return;
     }
     if (message.type === "ready") {
+      // An older helper advertises nothing and must never be sent optional frames: it would route
+      // them to its run handler and destroy the turn with an opaque TypeError.
+      this.helperFeatures = new Set(message.features ?? []);
       this.readyResolve?.();
       this.readyResolve = undefined;
       this.readyReject = undefined;
@@ -406,12 +447,50 @@ export class LauncherBrowserHelperClient {
     });
   }
 
+  /**
+   * Mirrors daemon-recorded MCP progress into the helper process for the life of the turn.
+   *
+   * The browser worker runs out of process, so without this the worker sees no external progress
+   * and cancels turns whose tool calls are still completing.
+   */
+  private forwardProgress(turn: BrowserTurn, stop: AbortSignal): void {
+    const progress = turn.externalProgress;
+    if (!progress) return;
+    if (!this.helperFeatures.has("progress")) {
+      console.warn(
+        `[chatgpt-web] browser turn ${turn.traceId} runs without an MCP progress mirror:`
+        + " the launcher browser helper predates the progress frame",
+      );
+      return;
+    }
+    void (async () => {
+      let revision = 0;
+      while (!stop.aborted) {
+        const snapshot = await progress.waitForChange(revision, stop);
+        revision = snapshot.revision;
+        if (stop.aborted) return;
+        await this.send({ type: "progress", id: turn.traceId, snapshot });
+      }
+    })().catch(error => {
+      // Ending, aborting, or losing the helper stops the mirror by design and is not a fault.
+      // Anything else leaves the worker on DOM-only health without saying so, which is exactly the
+      // silent degradation this transport exists to remove, so it is surfaced rather than dropped.
+      if (stop.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      console.warn(
+        `[chatgpt-web] browser turn ${turn.traceId} lost its MCP progress mirror:`
+        + ` ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
   private finish(id: string): void {
     const pending = this.pending.get(id);
     if (!pending) return;
     if (pending.abortListener && pending.turn.abortSignal) {
       pending.turn.abortSignal.removeEventListener("abort", pending.abortListener);
     }
+    pending.progressForwarding?.abort();
+    pending.progressForwarding = undefined;
     pending.prepared?.release();
     pending.prepared = undefined;
     this.pending.delete(id);
