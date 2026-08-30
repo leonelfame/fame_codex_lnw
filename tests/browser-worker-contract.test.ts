@@ -2303,3 +2303,24 @@ test("stale MCP progress stops suppressing DOM health without penalising long ac
     1_000,
   )).toBeFalse();
 });
+
+test("the daemon prefers the browser helper that shipped beside its own entrypoint", () => {
+  const client = readFileSync("src/adapters/chatgpt-web/launcher-helper-client.ts", "utf8");
+  const helper = readFileSync("src/adapters/chatgpt-web/browser-helper-main.ts", "utf8");
+
+  // The launcher advertises the helper inside its signed application bundle while the daemon runs
+  // from a versioned runtime directory, so the two update independently. A daemon that spoke a
+  // newer protocol to an older helper had its frame routed to the run handler, which dereferenced
+  // a turn the frame never carried and destroyed the turn with an opaque TypeError.
+  expect(client).toContain("bundledHelperScript()");
+  expect(client).toMatch(/browserHelperScriptPath \?\? this\.bundledHelperScript\(\) \?\? descriptor\.helper\.script/);
+
+  // Belt and braces: negotiate the frame, and never treat an unrecognised frame as a run.
+  expect(client).toContain('this.helperFeatures.has("progress")');
+  expect(helper).toContain('features: ["progress"]');
+  expect(helper).toMatch(/message\.type === "run"/);
+  expect(helper).toContain("Browser helper received an unsupported message type");
+
+  // A malformed liveness hint must not destroy an accepted turn that can never be resent.
+  expect(helper).toContain("discarded an invalid MCP progress frame");
+});

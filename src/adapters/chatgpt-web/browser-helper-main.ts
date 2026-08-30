@@ -372,11 +372,14 @@ input.on("line", line => {
     try {
       progress.apply(message.snapshot);
     } catch (error) {
-      writeProtocol({
-        type: "error",
-        id: message.id,
-        message: error instanceof Error ? error.message : String(error),
-      });
+      // Progress is a liveness hint, never response content or completion. Failing the turn over a
+      // malformed frame would destroy an accepted ChatGPT turn that cannot be resent, so the frame
+      // is dropped and the turn falls back to DOM-only health, which is the behaviour it had
+      // before this transport existed.
+      diagnostic(
+        `[chatgpt-web] discarded an invalid MCP progress frame for ${message.id}:`,
+        error instanceof Error ? error.message : String(error),
+      );
     }
   } else if (message.type === "abort") {
     abortControllers.get(message.id)?.abort();

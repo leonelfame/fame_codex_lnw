@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
@@ -151,6 +153,21 @@ export class LauncherBrowserHelperClient {
 
   constructor(private readonly config: ResolvedBrowserConfig) {}
 
+  /**
+   * The helper that shipped with this daemon, when one sits beside its own entrypoint.
+   *
+   * The launcher advertises the helper inside its application bundle while the daemon runs from a
+   * versioned runtime directory, so the two sides update independently and can disagree about the
+   * protocol. Preferring the sibling keeps daemon and helper on the same build by construction;
+   * anything else — a source checkout, an unbundled entrypoint — falls back to the advertised path.
+   */
+  private bundledHelperScript(): string | undefined {
+    const entrypoint = process.argv[1];
+    if (typeof entrypoint !== "string" || !entrypoint) return undefined;
+    const sibling = join(dirname(entrypoint), "browser-helper.cjs");
+    return existsSync(sibling) ? sibling : undefined;
+  }
+
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await this.ensureChild();
@@ -243,7 +260,7 @@ export class LauncherBrowserHelperClient {
     const descriptor = readLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!);
     const child = spawn(
       descriptor.helper.executable,
-      [this.config.browserHelperScriptPath ?? descriptor.helper.script],
+      [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
       {
         env: {
           ...process.env,
