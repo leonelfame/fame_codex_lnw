@@ -53,6 +53,12 @@ test("native launcher dialogs and tray actions follow the persisted Japanese lan
   assert.match(electronMain, /buttons: \[copy\.cancel, copy\.remove\]/);
 });
 
+test("catalog refresh guidance distinguishes a full Codex restart from account login", () => {
+  assert.match(i18nSource, /Signing out and back in or only closing the window is not a restart/);
+  assert.match(i18nSource, /仅退出并重新登录账号或只关闭窗口不算重启/);
+  assert.match(i18nSource, /サインアウト後の再ログインやウィンドウを閉じるだけでは再起動になりません/);
+});
+
 test("all README languages expose the Japanese navigation entry", () => {
   for (const source of [englishReadme, chineseReadme, japaneseReadme]) {
     assert.match(source, /<a href="README\.ja\.md">日本語<\/a>/);

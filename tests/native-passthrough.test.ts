@@ -145,7 +145,10 @@ test("removes ChatGPT Web item identities before native Codex compaction", async
   }, body);
 
   expect(upstreamRequest!.headers.get("content-encoding")).toBeNull();
-  const forwarded = await upstreamRequest!.json() as typeof body;
+  const forwarded = await upstreamRequest!.json() as {
+    previous_response_id?: string;
+    input: Array<Record<string, unknown>>;
+  };
   expect(forwarded).not.toHaveProperty("previous_response_id");
   expect(forwarded.input.every(item => !("id" in item))).toBe(true);
   expect(forwarded.input.some(item => "encrypted_content" in item
@@ -164,6 +167,65 @@ test("removes ChatGPT Web item identities before native Codex compaction", async
     call_id: "call_keep_linkage",
   });
   expect(forwarded.input.at(-1)).toEqual({ type: "compaction_trigger" });
+});
+
+test("converts ChatGPT Web compaction checkpoints before switching back to native Codex", async () => {
+  const summary = "Keep the verified repository state and continue from the failing test.";
+  const body = {
+    model: "gpt-5.6-sol",
+    previous_response_id: "resp_local_web_compaction",
+    input: [
+      {
+        type: "compaction",
+        id: "cmp_11111111111111111111111111111111",
+        encrypted_content: `ocx1:${Buffer.from(summary, "utf8").toString("base64")}`,
+      },
+      {
+        type: "compaction",
+        id: "cmp_22222222222222222222222222222222",
+        encrypted_content: "gAAAAABnative-opaque-compaction",
+      },
+      {
+        type: "message",
+        id: "msg_33333333333333333333333333333333",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue with native Sol." }],
+      },
+    ],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer codex-oauth-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return new Response("data: native\n\n", { headers: { "content-type": "text/event-stream" } });
+  }, body);
+
+  const forwarded = await upstreamRequest!.json() as {
+    previous_response_id?: string;
+    input: Array<Record<string, unknown>>;
+  };
+  expect(forwarded).not.toHaveProperty("previous_response_id");
+  expect(forwarded.input.every(item => !("id" in item))).toBe(true);
+  expect(forwarded.input[0]).toMatchObject({
+    type: "message",
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: expect.stringContaining(summary),
+    }],
+  });
+  expect(forwarded.input[1]).toEqual({
+    type: "compaction",
+    encrypted_content: "gAAAAABnative-opaque-compaction",
+  });
+  expect(JSON.stringify(forwarded)).not.toContain("ocx1:");
 });
 
 test("keeps native encrypted reasoning requests byte-for-byte intact", async () => {

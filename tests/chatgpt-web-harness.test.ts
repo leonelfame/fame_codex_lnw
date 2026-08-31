@@ -2822,6 +2822,62 @@ describe("ChatGPT outer-native harness v4", () => {
       await broker.close();
     }
   }, 10_000);
+
+  test("a native tool deadline returns an explicit MCP timeout instead of a transport failure", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-mcp-timeout-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    environment.tools = [
+      { name: "exec_command", description: "Run a Codex command", parameters: { type: "object" } },
+    ];
+    const timedOutToken = await broker.register(environment, 1_500, "timeout-turn");
+    const replacementToken = await broker.register(environment, undefined, "replacement-turn");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "codex-chatgpt-web-mcp-timeout-test", version: "1.0.0" });
+
+    try {
+      await client.connect(transport);
+      const timedOut = client.callTool({
+        name: "codex_exec",
+        arguments: { turn_token: timedOutToken, cmd: "slow external MCP call" },
+      });
+      const [request] = await broker.nextToolBatch(timedOutToken);
+      expect(request).toMatchObject({ wireName: "exec_command" });
+
+      const timeoutResult = await timedOut;
+      expect(timeoutResult.isError).toBe(true);
+      expect(timeoutResult.structuredContent).toMatchObject({
+        code: "codex_tool_timeout",
+        tool: "exec_command",
+        retryable: false,
+      });
+      expect(JSON.stringify(timeoutResult.content)).toContain("did not complete before the MCP transport deadline");
+
+      await expect(callTurnBroker(socketPath, { method: "claim", token: timedOutToken }))
+        .rejects.toThrow("already finished");
+      expect(() => broker.completeTool(timedOutToken, request!.callId, toolResult({ output: "late" })))
+        .toThrow("turn token is invalid or expired");
+
+      const inventory = await client.callTool({
+        name: "codex_tool_inventory",
+        arguments: { turn_token: replacementToken, query: "exec_command", include_schema: false },
+      });
+      expect(inventory.structuredContent).toMatchObject({
+        total: 1,
+        tools: [{ wire_name: "exec_command" }],
+      });
+    } finally {
+      await client.close().catch(() => {});
+      broker.revoke(timedOutToken);
+      broker.revoke(replacementToken);
+      await broker.close();
+    }
+  }, 10_000);
 });
 
 test("mirrored turn progress carries daemon MCP activity into the browser helper process", async () => {

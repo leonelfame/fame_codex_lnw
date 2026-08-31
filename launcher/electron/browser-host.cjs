@@ -25,7 +25,8 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const IDLE_BROWSER_URL = "about:blank#codex-web-gpt-browser-host";
+const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
@@ -39,6 +40,7 @@ const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
+const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const ZOOM_FACTORS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const SHELL_ZOOM_LEVEL_STEP = 0.5;
@@ -189,6 +191,71 @@ class BrowserTurnCancelledError extends Error {
   }
 }
 
+function loadCommittedBrowserSurface(
+  contents,
+  url,
+  timeoutMs = PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS,
+) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Browser idle document timeout must be positive");
+  }
+  if (!contents || contents.isDestroyed()) {
+    return Promise.reject(new Error("Browser closed before idle document bootstrap"));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      contents.off("did-stop-loading", onReady);
+      contents.off("did-finish-load", onReady);
+      contents.off("did-fail-load", onFailed);
+      contents.off("render-process-gone", onRendererGone);
+      contents.off("destroyed", onDestroyed);
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onReady = () => {
+      if (contents.isDestroyed()) {
+        finish(new Error("Browser closed during idle document bootstrap"));
+        return;
+      }
+      if (contents.getURL() === url) finish();
+    };
+    const onFailed = (_event, errorCode, errorDescription, failedUrl, mainFrame) => {
+      if (!mainFrame) return;
+      finish(new Error(
+        `Browser idle document failed: ${errorDescription} (${errorCode}) at ${failedUrl}`,
+      ));
+    };
+    const onRendererGone = (_event, details) => {
+      finish(new Error(`Browser renderer stopped during idle document bootstrap: ${details.reason}`));
+    };
+    const onDestroyed = () => finish(new Error("Browser closed during idle document bootstrap"));
+    const timeout = setTimeout(() => {
+      finish(new Error(`Browser idle document did not commit within ${timeoutMs}ms`));
+      if (!contents.isDestroyed()) contents.stop();
+    }, timeoutMs);
+    timeout.unref?.();
+    contents.on("did-stop-loading", onReady);
+    contents.on("did-finish-load", onReady);
+    contents.on("did-fail-load", onFailed);
+    contents.on("render-process-gone", onRendererGone);
+    contents.on("destroyed", onDestroyed);
+    try {
+      Promise.resolve(contents.loadURL(url)).then(onReady, error => {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      });
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
 class BrowserHost {
   constructor({
     window,
@@ -281,18 +348,16 @@ class BrowserHost {
       },
     });
     window.contentView.addChildView(this.view);
-    this.view.setBounds(this.bounds);
-    this.view.setVisible(false);
+    this.windowVisibilityListener = () => this.syncViewVisibility();
+    for (const event of WINDOW_VISIBILITY_EVENTS) {
+      this.window.on(event, this.windowVisibilityListener);
+    }
     this.view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(this.window.webContents);
     this.bindShellZoomShortcuts(this.view.webContents);
     this.bindChatGptBackendRecovery();
     this.bindWebContents();
-    this.initializationReady = this.view.webContents.loadURL(IDLE_BROWSER_URL).then(async () => {
-      await this.markOwnedSurface();
-      this.writeDescriptor();
-      this.logger.info("browser.initialized", { url: this.view.webContents.getURL() });
-    }).catch((error) => {
+    this.initializationReady = this.initializePrimaryView().catch((error) => {
       this.logger.error("browser.initialization_failed", {
         message: error instanceof Error ? error.message : String(error),
       });
@@ -303,6 +368,19 @@ class BrowserHost {
 
   async ready() {
     await this.initializationReady;
+  }
+
+  async initializePrimaryView() {
+    this.view.setBounds(this.hiddenTurnBounds());
+    this.view.setVisible(true);
+    try {
+      await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
+      await this.markOwnedSurface();
+    } finally {
+      this.syncViewVisibility();
+    }
+    this.writeDescriptor();
+    this.logger.info("browser.initialized", { url: this.view.webContents.getURL() });
   }
 
   currentOperation() {
@@ -994,7 +1072,9 @@ class BrowserHost {
   }
 
   syncViewVisibility() {
-    const visible = browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
+    const windowVisible = this.window.isVisible() && !this.window.isMinimized();
+    const visible = windowVisible
+      && browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
     const selected = this.selectedTurnTab();
     this.view.setVisible(visible && !this.authView && !selected);
     for (const tab of this.turnTabs.values()) {
@@ -1828,6 +1908,9 @@ class BrowserHost {
       if (!contents.isDestroyed()) contents.off("before-input-event", handler);
     }
     this.shellZoomShortcutBindings.clear();
+    for (const event of WINDOW_VISIBILITY_EVENTS) {
+      this.window.off(event, this.windowVisibilityListener);
+    }
     this.closeAuthView(this.authView, true);
     this.clearHomeNavigationTimeout();
     if (this.turnLeaseSweep) clearInterval(this.turnLeaseSweep);
@@ -1856,6 +1939,7 @@ module.exports = {
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  loadCommittedBrowserSurface,
   navigationErrorForLog,
   navigationOriginForLog,
   TEMPORARY_CHAT_URL,

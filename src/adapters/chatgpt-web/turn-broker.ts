@@ -751,6 +751,13 @@ export class TurnBroker implements TurnBrokerOwner {
  * a caller that cannot compute a deadline must not silently inherit an unbounded wait. An
  * unbounded call still ends when the turn is revoked or the broker drops the connection.
  */
+export class TurnBrokerTimeoutError extends Error {
+  constructor() {
+    super("ChatGPT web turn broker timed out");
+    this.name = "TurnBrokerTimeoutError";
+  }
+}
+
 export async function callTurnBroker<T>(
   socketPath: string,
   request: Omit<BrokerRequest, "id">,
@@ -787,7 +794,7 @@ export async function callTurnBroker<T>(
     };
     const timer = timeoutMs === null
       ? undefined
-      : setTimeout(() => finishError(new Error("ChatGPT web turn broker timed out")), timeoutMs);
+      : setTimeout(() => finishError(new TurnBrokerTimeoutError()), timeoutMs);
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) {
       finishError(new DOMException("ChatGPT web turn broker call aborted", "AbortError"));
