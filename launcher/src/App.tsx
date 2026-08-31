@@ -595,6 +595,8 @@ function LauncherShell({
                 browser={browser}
                 browserSlotRef={browserSlotRef}
                 copy={copy}
+                operation={operation}
+                platform={snapshot.platform}
                 setError={setError}
               />
             ) : null}
@@ -737,15 +739,26 @@ function BrowserSurface({
   browser,
   browserSlotRef,
   copy,
+  operation,
+  platform,
   setError,
 }: {
   browser: BrowserState | null;
   browserSlotRef: (node: HTMLDivElement | null) => void;
   copy: Copy;
+  operation: OperationState | null;
+  platform: string;
   setError: (error: string | null) => void;
 }) {
+  const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const visible = browser?.visible === true;
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const passkeyWaiting = operation?.name === "passkey-login"
+    && operation.status === "running"
+    && browser?.authenticated !== true;
+  useEffect(() => {
+    if (!passkeyWaiting) setPasskeyContinuationRequested(false);
+  }, [passkeyWaiting]);
   const navigate = async (action: "back" | "forward" | "reload") => {
     try {
       await api!.navigateBrowser(action);
@@ -779,6 +792,22 @@ function BrowserSurface({
     try {
       await api!.closeBrowserTab(tabId);
     } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const openPasskeyLogin = () => {
+    if (operation?.status === "running") return;
+    setError(null);
+    void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
+  };
+  const continuePasskeyLogin = async () => {
+    if (!passkeyWaiting || passkeyContinuationRequested) return;
+    setPasskeyContinuationRequested(true);
+    setError(null);
+    try {
+      await api!.continuePasskeyLogin();
+    } catch (cause) {
+      setPasskeyContinuationRequested(false);
       setError(messageOf(cause));
     }
   };
@@ -849,6 +878,18 @@ function BrowserSurface({
           </button>
           <IconButton icon="plus" label={copy.zoomIn} onClick={() => void zoom("in")} />
         </div>
+        {platform === "darwin" && browser?.authenticated !== true ? (
+          <button
+            className="toolbar-text-button"
+            disabled={passkeyWaiting && passkeyContinuationRequested}
+            onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
+            type="button"
+          >
+            {passkeyWaiting
+              ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
+              : copy.passkeySignIn}
+          </button>
+        ) : null}
         <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
@@ -859,10 +900,24 @@ function BrowserSurface({
           <div className="browser-empty">
             <BrandMark />
             <h1>{browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
-            <p>{browser?.authenticated ? copy.noActiveTaskBody : copy.stepAccountBody}</p>
-            <PrimaryButton onClick={() => void toggle()}>
-              {browser?.authenticated ? copy.openChatgpt : copy.signIn}
-            </PrimaryButton>
+            <p>{browser?.authenticated
+              ? copy.noActiveTaskBody
+              : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
+            <div className="browser-empty-actions">
+              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+                {browser?.authenticated ? copy.openChatgpt : copy.signIn}
+              </PrimaryButton>
+              {platform === "darwin" && browser?.authenticated !== true ? (
+                <SecondaryButton
+                  disabled={passkeyWaiting && passkeyContinuationRequested}
+                  onClick={passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin}
+                >
+                  {passkeyWaiting
+                    ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
+                    : copy.passkeySignIn}
+                </SecondaryButton>
+              ) : null}
+            </div>
           </div>
         ) : (
           <div className="browser-underlay" aria-hidden="true">
@@ -896,11 +951,18 @@ function SetupSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
+  const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const passkeyWaiting = operation?.name === "passkey-login"
+    && operation.status === "running"
+    && browser?.authenticated !== true;
   const busy = localBusy
     || operation?.status === "running"
     || browser?.status === "loading"
     || browser?.status === "testing"
     || browser?.status === "running";
+  useEffect(() => {
+    if (!passkeyWaiting) setPasskeyContinuationRequested(false);
+  }, [passkeyWaiting]);
   const run = async (action: () => Promise<void>) => {
     if (busy) return;
     setLocalBusy(true);
@@ -918,6 +980,26 @@ function SetupSurface({
     await activateBrowser();
     await api!.openLogin();
   });
+  const openPasskeyLogin = () => {
+    if (busy) return;
+    setLocalBusy(true);
+    setError(null);
+    void api!.openPasskeyLogin()
+      .then(() => activateBrowser())
+      .catch(cause => setError(messageOf(cause)))
+      .finally(() => setLocalBusy(false));
+  };
+  const continuePasskeyLogin = async () => {
+    if (!passkeyWaiting || passkeyContinuationRequested) return;
+    setPasskeyContinuationRequested(true);
+    setError(null);
+    try {
+      await api!.continuePasskeyLogin();
+    } catch (cause) {
+      setPasskeyContinuationRequested(false);
+      setError(messageOf(cause));
+    }
+  };
   const smoke = () => run(async () => {
     await activateBrowser();
     await api!.smokeTest();
@@ -941,10 +1023,19 @@ function SetupSurface({
             ? copy.signedIn
             : browser?.status === "loading" ? copy.checkingSignIn : copy.signIn}
           complete={browser?.authenticated === true}
-          description={copy.stepAccountBody}
+          description={passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}
           disabled={busy}
           index={1}
           onAction={openLogin}
+          onSecondaryAction={snapshot.platform === "darwin" && browser?.authenticated !== true
+            ? passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin
+            : undefined}
+          secondaryAction={snapshot.platform === "darwin" && browser?.authenticated !== true
+            ? passkeyWaiting
+              ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
+              : copy.passkeySignIn
+            : undefined}
+          secondaryDisabled={passkeyWaiting ? passkeyContinuationRequested : busy}
           title={copy.stepAccount}
         />
         <SetupRow
@@ -1508,7 +1599,10 @@ function SetupRow({
   disabled,
   index,
   onAction,
+  onSecondaryAction,
   repeatable = false,
+  secondaryAction,
+  secondaryDisabled = false,
   title,
 }: {
   action: string;
@@ -1517,7 +1611,10 @@ function SetupRow({
   disabled: boolean;
   index: number;
   onAction: () => void;
+  onSecondaryAction?: () => void;
   repeatable?: boolean;
+  secondaryAction?: string;
+  secondaryDisabled?: boolean;
   title: string;
 }) {
   return (
@@ -1527,9 +1624,16 @@ function SetupRow({
         <strong>{title}</strong>
         <p>{description}</p>
       </div>
-      <SecondaryButton disabled={disabled || (complete && !repeatable)} onClick={onAction}>
-        {action}
-      </SecondaryButton>
+      <div className="setup-actions">
+        {secondaryAction && onSecondaryAction ? (
+          <SecondaryButton disabled={secondaryDisabled || complete} onClick={onSecondaryAction}>
+            {secondaryAction}
+          </SecondaryButton>
+        ) : null}
+        <SecondaryButton disabled={disabled || (complete && !repeatable)} onClick={onAction}>
+          {action}
+        </SecondaryButton>
+      </div>
     </div>
   );
 }
