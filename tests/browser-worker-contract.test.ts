@@ -274,9 +274,43 @@ test("a stalled post-submit DOM probe is bounded before same-page launcher recov
   const submissionAccepted = runBrowserTurn.indexOf("submission accepted evidence=");
   const recovery = runBrowserTurn.indexOf("await rebindLauncherPage(", submissionAccepted);
   const duplicateSend = runBrowserTurn.indexOf("sendAttachedPrompt(", recovery);
+
+  const rebindDefinition = runBrowserTurn.indexOf("const rebindLauncherPage");
+  const previousConnection = runBrowserTurn.indexOf(
+    "const previousConnection = turnConnection;",
+    rebindDefinition,
+  );
+  const detachOldConnection = runBrowserTurn.indexOf(
+    "turnConnection = undefined;",
+    previousConnection,
+  );
+  const disconnectOldConnection = runBrowserTurn.indexOf(
+    "await previousConnection.close()",
+    detachOldConnection,
+  );
+  const reconnectStage = runBrowserTurn.indexOf(
+    "const connection = await this.runStage(",
+    disconnectOldConnection,
+  );
+  const reconnectTransport = runBrowserTurn.indexOf(
+    "const rebound = await connectLauncherBrowserHost(",
+    reconnectStage,
+  );
+
   expect(recovery).toBeGreaterThan(submissionAccepted);
   expect(duplicateSend).toBe(-1);
-  expect(runBrowserTurn).toContain("if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause");
+  expect(rebindDefinition).toBeGreaterThan(-1);
+  expect(previousConnection).toBeGreaterThan(rebindDefinition);
+  expect(detachOldConnection).toBeGreaterThan(previousConnection);
+  expect(disconnectOldConnection).toBeGreaterThan(detachOldConnection);
+  expect(reconnectStage).toBeGreaterThan(disconnectOldConnection);
+  expect(reconnectTransport).toBeGreaterThan(reconnectStage);
+  expect(runBrowserTurn).not.toContain(
+    "previous browser observation connection did not close after rebind",
+  );
+  expect(runBrowserTurn).toContain(
+    "if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause",
+  );
   expect(runBrowserTurn.slice(recovery)).toContain("responseTurn.identity");
 });
 
