@@ -263,7 +263,10 @@ function nativeRequest(): Request {
   });
 }
 
-function resettingEventStream(prefix: string[]): Response {
+function resettingEventStream(
+  prefix: string[],
+  contentType = "text/event-stream",
+): Response {
   const encoder = new TextEncoder();
   let sent = 0;
   const body = new ReadableStream<Uint8Array>({
@@ -278,7 +281,7 @@ function resettingEventStream(prefix: string[]): Response {
       controller.error(reset);
     },
   });
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+  return new Response(body, { status: 200, headers: { "content-type": contentType } });
 }
 
 test("an upstream reset after the turn completed closes the client stream normally", async () => {
@@ -294,6 +297,19 @@ test("an upstream reset after the turn completed closes the client stream normal
   const body = await response.text();
   expect(body).toContain("response.completed");
   expect(body).toEndWith("data: [DONE]\n\n");
+});
+
+test("event-stream media type matching is case-insensitive", async () => {
+  const response = await forwardNativeCodexRequest(
+    nativeRequest(),
+    "responses",
+    async () => resettingEventStream(
+      ["data: [DONE]\n\n"],
+      "Text/Event-Stream; Charset=UTF-8",
+    ),
+  );
+
+  expect(await response.text()).toBe("data: [DONE]\n\n");
 });
 
 test("an upstream reset is not hidden by a [DONE] string inside JSON content", async () => {

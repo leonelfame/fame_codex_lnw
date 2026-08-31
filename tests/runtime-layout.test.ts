@@ -164,10 +164,12 @@ test("launcher browser ownership is explicit in provider configuration", () => {
   const config = defaultConfig("browser-only");
   config.browserHost = "launcher";
   config.browserHostDescriptorPath = "/Users/example/.codex-chatgpt-web/runtime/launcher-browser.json";
+  config.stallTimeoutSec = 900;
   expect(providerConfig(config).chatgptWeb).toMatchObject({
     browserHost: "launcher",
     browserHostDescriptorPath: config.browserHostDescriptorPath,
     solAvailable: true,
+    stallTimeoutSec: 900,
   });
 });
 

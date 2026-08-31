@@ -214,7 +214,9 @@ export async function forwardNativeCodexRequest(
   });
   const upstream = await fetchUpstream(upstreamRequest);
   const responseHeaders = endToEndHeaders(upstream.headers);
-  const isEventStream = (upstream.headers.get("content-type") ?? "").includes("text/event-stream");
+  const isEventStream = (upstream.headers.get("content-type") ?? "")
+    .toLowerCase()
+    .includes("text/event-stream");
   return new Response(
     upstream.body
       ? withUncleanCloseTolerance(upstream.body, isEventStream, bytes => {

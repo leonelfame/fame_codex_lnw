@@ -741,6 +741,7 @@ export function bridgeToResponsesSSE(
         beat = setInterval(() => {
           if (closed || gated) return;
           if (activity) { activity = false; stallTicks = 0; return; }
+          stallTicks += 1;
           if (stallTicks === Math.ceil(maxStallTicks / 2) && !stallWarned) {
             // Halfway to cancelling the turn. A healthy adapter heartbeats far more often than
             // this, so reaching here at all means a keep-alive gap that should be found before it
@@ -752,7 +753,7 @@ export function bridgeToResponsesSSE(
               + ` lastEvent=${lastAdapterEventType} sinceLastEventMs=${Date.now() - lastAdapterEventAt}`,
             );
           }
-          if (++stallTicks >= maxStallTicks) {
+          if (stallTicks >= maxStallTicks) {
             console.error(
               `[bridge] upstream_stall_timeout model=${modelId} response=${responseId}`
               + ` stallSec=${stallSec} adapterEvents=${adapterEventCount}`

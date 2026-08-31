@@ -80,6 +80,8 @@ export interface AppConfig {
   solAvailable: boolean;
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
+  /** Optional adapter-silence budget for the Responses watchdog. */
+  stallTimeoutSec?: number;
   autoApproveToolCalls: boolean;
   controlToken: string;
   runtimeCommand: string[];
@@ -409,6 +411,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     && typeof parsed.experimentalBiggerContext !== "boolean") {
     throw new Error(`Invalid experimentalBiggerContext in ${path}`);
   }
+  if (parsed.stallTimeoutSec !== undefined
+    && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
+    throw new Error(`Invalid stallTimeoutSec in ${path}`);
+  }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
@@ -461,6 +467,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       solAvailable: config.solAvailable,
       proAvailable: config.proAvailable,
       experimentalBiggerContext: config.experimentalBiggerContext,
+      ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: config.autoApproveToolCalls,
     },
   };
