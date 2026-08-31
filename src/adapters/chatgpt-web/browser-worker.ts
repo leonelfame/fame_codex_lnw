@@ -720,6 +720,14 @@ export async function withChatGptBrowserObservationTimeout<T>(
   }
 }
 
+export async function connectAfterClosingBrowserConnection<T>(
+  previousConnection: Pick<Browser, "close"> | undefined,
+  connect: () => Promise<T>,
+): Promise<T> {
+  if (previousConnection) await previousConnection.close();
+  return connect();
+}
+
 export const CHATGPT_MIN_OPERATIONAL_VIEWPORT = Object.freeze({ width: 320, height: 240 });
 
 async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSignal): Promise<void> {
@@ -3479,34 +3487,32 @@ export class ChatGptBrowserWorker {
           + ` ${redactChatGptUiDiagnostic(cause.message)}`,
         );
         const previousConnection = turnConnection;
-        if (previousConnection) {
-          // The observation timeout races the Playwright operation but cannot cancel the
-          // underlying page.evaluate by itself. Disconnect the stale CDP transport before
-          // opening its replacement so the hung probe cannot contend with its own recovery.
-          turnConnection = undefined;
-          await previousConnection.close().catch(error => {
-            console.warn(
-              `[chatgpt-web] previous browser observation connection did not close before rebind:`
-              + ` ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-        }
-        const connection = await this.runStage(
-          turn.traceId,
-          `response_page_rebind_${attempt}`,
-          browserStageTimeouts.browserPage,
-          async (stageSignal) => {
-            const signal = turn.abortSignal
-              ? AbortSignal.any([stageSignal, turn.abortSignal])
-              : stageSignal;
-            const rebound = await connectLauncherBrowserHost(
-              this.config.browserHostDescriptorPath!,
+        // The observation timeout races the Playwright operation but cannot cancel the underlying
+        // page.evaluate by itself. A failed disconnect is terminal: opening a replacement while
+        // the stale probe still owns its transport would recreate the contention this rebind is
+        // meant to remove.
+        const connection = await connectAfterClosingBrowserConnection(
+          previousConnection,
+          () => {
+            turnConnection = undefined;
+            return this.runStage(
+              turn.traceId,
+              `response_page_rebind_${attempt}`,
               browserStageTimeouts.browserPage,
-              launcherSurfaceId,
-              signal,
+              async (stageSignal) => {
+                const signal = turn.abortSignal
+                  ? AbortSignal.any([stageSignal, turn.abortSignal])
+                  : stageSignal;
+                const rebound = await connectLauncherBrowserHost(
+                  this.config.browserHostDescriptorPath!,
+                  browserStageTimeouts.browserPage,
+                  launcherSurfaceId,
+                  signal,
+                );
+                await waitForOperationalChatGptViewport(rebound.page, signal);
+                return rebound;
+              },
             );
-            await waitForOperationalChatGptViewport(rebound.page, signal);
-            return rebound;
           },
         );
         turnConnection = connection.browser;
