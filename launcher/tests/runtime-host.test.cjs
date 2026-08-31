@@ -972,6 +972,9 @@ test("macOS passkey capture uses an isolated launcher-controlled transfer", asyn
       readSetupConfig: () => ({ chromeExecutablePath: chrome }),
     },
   });
+  if (process.platform === "win32") {
+    host.passkeyChromeExecutable = () => chrome;
+  }
   host.launcherControlEnvironment = () => ({ CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: "token" });
   let invocation;
   host.run = async (name, args, options) => {
