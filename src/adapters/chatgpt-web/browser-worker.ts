@@ -108,6 +108,15 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 }
 
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
+/**
+ * How long a staged Bigger Context part may take to produce its assistant turn. A staged part is two
+ * orders of magnitude larger than an ordinary prompt and ChatGPT reads all of it before answering,
+ * so the ordinary grace is not a budget it can be held to: acknowledgements have been observed at
+ * 19s and 30s on the same payload that once took over 72s and lost the turn. There is no MCP
+ * activity to vouch for liveness yet at this point, so this window is the only thing standing
+ * between a slow ingest and a cancelled turn. It matches the staged send budget.
+ */
+export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
@@ -617,14 +626,72 @@ export function resolveChatGptWebMultipartStagingMode(
   );
 }
 
-const browserStageTimeouts = {
+export const browserStageTimeouts = {
   browserPage: 60_000,
   temporaryChatPreparation: 150_000,
   effortSelection: 120_000,
   promptAttachment: 60_000,
   fileAttachment: 120_000,
   send: 20_000,
+  // A Bigger Context stage posts a payload orders of magnitude larger than an ordinary prompt onto
+  // a conversation that already holds the earlier parts, and this budget covers ChatGPT accepting
+  // the submission, not just the click. The ordinary 20s send budget expired mid-acceptance and
+  // destroyed the whole turn while the browser was still working.
+  multipartStageSend: 180_000,
 } as const;
+
+/**
+ * Detects that this process was suspended (system sleep) by watching for gaps in a steady tick.
+ * On Apple Silicon the monotonic clock keeps advancing through sleep, so elapsed time alone cannot
+ * distinguish "the stage really took 15 minutes" from "the machine slept for 14 of them" — and a
+ * stage budget charged for slept time cancels turns that never got their budget awake.
+ */
+export class ChatGptSuspensionClock {
+  private suspendedTotalMs = 0;
+  private lastTickAt: number;
+  private timer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(
+    private readonly tickIntervalMs = 1_000,
+    private readonly gapThresholdMs = 5_000,
+  ) {
+    this.lastTickAt = Date.now();
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.lastTickAt = Date.now();
+    this.timer = setInterval(() => this.tick(Date.now()), this.tickIntervalMs);
+    this.timer.unref?.();
+  }
+
+  /** Exposed for tests; production ticks come from the interval above. */
+  tick(now: number): void {
+    const gap = now - this.lastTickAt;
+    this.lastTickAt = now;
+    if (gap >= this.gapThresholdMs) this.suspendedTotalMs += gap - this.tickIntervalMs;
+  }
+
+  suspendedMs(): number {
+    return this.suspendedTotalMs;
+  }
+}
+
+export const chatGptSuspensionClock = new ChatGptSuspensionClock();
+
+/**
+ * How much of a stage budget remains once slept time is refunded. Zero means the stage really
+ * consumed its budget while awake and the timeout stands.
+ */
+export function remainingStageBudgetMs(
+  timeoutMs: number,
+  elapsedMs: number,
+  suspendedMs: number,
+): number {
+  const awakeMs = elapsedMs - suspendedMs;
+  if (awakeMs >= timeoutMs) return 0;
+  return Math.max(250, timeoutMs - awakeMs);
+}
 
 export const CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS = 5_000;
 export const MAX_CHATGPT_BROWSER_PAGE_REBINDS = 2;
@@ -1421,6 +1488,43 @@ export function chatGptPromptFilePayloads(
   return chatGptImageFilePayloads(prompt.images);
 }
 
+/**
+ * Insert `value` at the caret of an already-resolved ChatGPT composer, returning whether the edit
+ * was applied. Runs inside the page, so it may reference only globals and its two arguments.
+ *
+ * Effort selection closes a menu immediately before a staged part is attached, and focus is still
+ * settling when this runs: the composer can be the active element while the caret has not yet been
+ * placed inside it, or focus can still be on the menu that just closed. Reading that as a rejected
+ * edit failed whole turns roughly a tenth of a second after the effort menu closed, so the caret is
+ * placed explicitly instead of assumed. An existing collapsed caret inside the composer is left
+ * exactly where the user put it; only a missing or foreign one is replaced, and always with a
+ * position inside this composer, so an insert can never land in another element.
+ */
+export function insertPlainTextIntoComposer(element: HTMLElement, value: string): boolean {
+  if (document.activeElement !== element) element.focus();
+  if (document.activeElement !== element) return false;
+  const selection = window.getSelection();
+  if (!selection) return false;
+  const alreadyPlaced = selection.isCollapsed
+    && selection.anchorNode !== null
+    && element.contains(selection.anchorNode);
+  if (!alreadyPlaced) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  if (
+    !selection.isCollapsed
+    || !selection.anchorNode
+    || !element.contains(selection.anchorNode)
+  ) {
+    return false;
+  }
+  return document.execCommand("insertText", false, value);
+}
+
 export class ChatGptBrowserWorker {
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
@@ -1569,17 +1673,31 @@ export class ChatGptBrowserWorker {
     stage: string,
     timeoutMs: number,
     action: (abortSignal: AbortSignal) => Promise<T>,
+    suspensionClock: Pick<ChatGptSuspensionClock, "suspendedMs"> = chatGptSuspensionClock,
   ): Promise<T> {
+    chatGptSuspensionClock.start();
     const startedAt = performance.now();
+    const suspendedAtStart = suspensionClock.suspendedMs();
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const timeout = new Promise<never>((_, rejectTimeout) => {
-        timer = setTimeout(() => {
+        const fireOrRearm = () => {
+          // A stage that spans a system sleep has not consumed its budget: the browser was as
+          // frozen as this process, so slept time is refunded and the timer re-armed for what the
+          // stage is still owed. Observed live as effort_selection "timing out" at 901s of a 120s
+          // budget, to the second of a DarkWake.
+          const suspendedMs = suspensionClock.suspendedMs() - suspendedAtStart;
+          const remaining = remainingStageBudgetMs(timeoutMs, performance.now() - startedAt, suspendedMs);
+          if (remaining > 0) {
+            timer = setTimeout(fireOrRearm, remaining);
+            return;
+          }
           rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
           controller.abort();
-        }, timeoutMs);
+        };
+        timer = setTimeout(fireOrRearm, timeoutMs);
       });
       const value = await Promise.race([action(controller.signal), timeout]);
       console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
@@ -2090,10 +2208,11 @@ export class ChatGptBrowserWorker {
     deadline: number | undefined,
     signal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
+    graceMs: number = CHATGPT_RESPONSE_DOM_GRACE_MS,
   ): Promise<ChatGptAssistantTurnBinding> {
     let responseDeadline = Math.min(
       deadline ?? Number.POSITIVE_INFINITY,
-      Date.now() + CHATGPT_RESPONSE_DOM_GRACE_MS,
+      Date.now() + graceMs,
     );
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -2102,7 +2221,7 @@ export class ChatGptBrowserWorker {
       if (progress?.lastProgressAt !== undefined) {
         responseDeadline = Math.min(
           deadline ?? Number.POSITIVE_INFINITY,
-          Math.max(responseDeadline, progress.lastProgressAt + CHATGPT_RESPONSE_DOM_GRACE_MS),
+          Math.max(responseDeadline, progress.lastProgressAt + graceMs),
         );
       }
       if (deadline !== undefined && Date.now() >= deadline) {
@@ -2118,7 +2237,7 @@ export class ChatGptBrowserWorker {
       try {
         state = await this.submissionDomState(page, baseline.domCache);
       } catch (error) {
-        if (!chatGptExternalProgressIsLive(progress, Date.now(), CHATGPT_RESPONSE_DOM_GRACE_MS)) throw error;
+        if (!chatGptExternalProgressIsLive(progress, Date.now(), graceMs)) throw error;
         await this.waitForTurnDomOrExternalProgress(
           page,
           progress?.revision ?? 0,
@@ -2625,19 +2744,7 @@ export class ChatGptBrowserWorker {
     // delimiters from textContent, and leave the next insertion outside the intended block. The
     // browser's plain-text editing command updates the same focused contenteditable atomically
     // without running those Markdown shortcuts. Exact readback below remains the authority.
-    const inserted = await composer.evaluate((element, value) => {
-      const selection = window.getSelection();
-      if (
-        document.activeElement !== element
-        || !selection
-        || !selection.isCollapsed
-        || !selection.anchorNode
-        || !element.contains(selection.anchorNode)
-      ) {
-        return false;
-      }
-      return document.execCommand("insertText", false, value);
-    }, text, { timeout: 20_000 });
+    const inserted = await composer.evaluate(insertPlainTextIntoComposer, text, { timeout: 20_000 });
     throwIfPromptAttachmentAborted(abortSignal);
     if (!inserted) {
       throw new ChatGptPromptAttachmentIntegrityError(
@@ -3459,7 +3566,7 @@ export class ChatGptBrowserWorker {
           const evidence = await this.runStage(
             turn.traceId,
             `multipart_stage_${index + 1}_send`,
-            browserStageTimeouts.send,
+            browserStageTimeouts.multipartStageSend,
             (stageSignal) => this.sendAttachedPrompt(
               page,
               stageBaseline,
@@ -3472,7 +3579,10 @@ export class ChatGptBrowserWorker {
             stageBaseline,
             deadline,
             turn.abortSignal,
-            turn.externalProgress,
+            // A part still being ingested has produced no MCP activity, so there is no progress to
+            // consult here; only the wider window applies.
+            undefined,
+            CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
           );
           console.info(
             `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
@@ -3564,7 +3674,9 @@ export class ChatGptBrowserWorker {
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
         "send",
-        browserStageTimeouts.send,
+        // A multipart commit lands on a conversation already carrying every staged part, so it
+        // needs the same acceptance headroom the stages themselves get.
+        prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
         (stageSignal) => this.sendAttachedPrompt(
           page,
           submissionBaseline,

@@ -97,6 +97,10 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
     || text === OPAQUE_COMPACTION_NOTE;
 }
 
+function isTurnAbortedNotice(value: Record<string, unknown>): boolean {
+  return /^<turn_aborted>[\s\S]*<\/turn_aborted>$/.test(rawMessageText(value).trim());
+}
+
 /**
  * Return the latest real user instruction owned by the current native Codex turn.
  *
@@ -108,7 +112,7 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
-  const revision = latestChatGptTurnUserRevision(parsed);
+  const revision = latestChatGptTurnUserRevision(parsed, turnId);
   if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
   if (revision.turnId !== undefined && revision.turnId !== turnId) {
     throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
@@ -116,14 +120,21 @@ export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unkn
   return revision.content;
 }
 
-function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision | undefined {
+function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnId?: string): ChatGptTurnUserRevision | undefined {
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const item = record(input[index]);
     if (item?.type !== "message" || item.role !== "user") continue;
-    if (contextualUserMessage(item)) continue;
     const messageTurnId = itemTurnId(item);
+    // Codex appends an abort report as a user-shaped item carrying the interrupted turn's id. Only
+    // suppress that synthetic notice when its metadata proves it belongs to a different turn; a
+    // human is still allowed to submit the same XML-looking text as their current instruction.
+    if (isTurnAbortedNotice(item)
+      && expectedTurnId !== undefined
+      && messageTurnId !== undefined
+      && messageTurnId !== expectedTurnId) continue;
+    if (contextualUserMessage(item)) continue;
     const serverOwnedId = typeof item.id === "string" && item.id.length > 0;
     if (messageTurnId === undefined && !serverOwnedId) continue;
     return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
@@ -134,7 +145,7 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnU
 /** The human instruction summarized by a remote compaction request belongs to an earlier turn. */
 export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
   if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
-  const revision = latestChatGptTurnUserRevision(parsed);
+  const revision = latestChatGptTurnUserRevision(parsed, extractChatGptTurnIdentity(parsed).turnId);
   if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
   return revision;
 }

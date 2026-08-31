@@ -105,6 +105,74 @@ function endToEndHeaders(source: Headers): Headers {
   return headers;
 }
 
+/** Terminator every Responses SSE stream ends with; nothing after it carries meaning. */
+const SSE_TERMINATOR = "data: [DONE]";
+
+/**
+ * ChatGPT's backend routinely resets the native Codex connection instead of closing it cleanly,
+ * which Bun surfaces as ECONNRESET while reading the body. Passed through untouched that reaches
+ * Codex as a truncated HTTP body and the opaque "error decoding response body".
+ *
+ * A reset that arrives after the stream already delivered `data: [DONE]` is an unclean TCP close on
+ * a turn that finished: every byte the protocol defines has been forwarded, so the stream is closed
+ * normally rather than failed. A reset before that genuinely truncated the turn and is still raised,
+ * because inventing a terminal event there would tell Codex a turn ended when it did not.
+ */
+function withUncleanCloseTolerance(
+  body: ReadableStream<Uint8Array>,
+  isEventStream: boolean,
+  onUncleanClose?: (bytes: number) => void,
+): ReadableStream<Uint8Array> {
+  if (!isEventStream) return body;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let lineBuffer = "";
+  let completed = false;
+  let bytes = 0;
+  const inspectLines = (text: string): void => {
+    lineBuffer += text;
+    let newline = lineBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = lineBuffer.slice(0, newline).replace(/\r$/, "");
+      lineBuffer = lineBuffer.slice(newline + 1);
+      if (line === SSE_TERMINATOR) completed = true;
+      newline = lineBuffer.indexOf("\n");
+    }
+  };
+  const inspectTrailingLine = (): void => {
+    // A reset can arrive before the final line separator. Treat only an exact unterminated
+    // terminator line as complete; text embedded in a JSON data payload must not qualify.
+    if (lineBuffer.replace(/\r$/, "") === SSE_TERMINATOR) completed = true;
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          inspectLines(decoder.decode());
+          inspectTrailingLine();
+          controller.close();
+          return;
+        }
+        bytes += chunk.value.byteLength;
+        inspectLines(decoder.decode(chunk.value, { stream: true }));
+        controller.enqueue(chunk.value);
+      } catch (error) {
+        inspectTrailingLine();
+        if (!completed) {
+          controller.error(error);
+          return;
+        }
+        onUncleanClose?.(bytes);
+        controller.close();
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 export async function forwardNativeCodexRequest(
   request: Request,
   endpoint: NativeCodexEndpoint,
@@ -145,9 +213,21 @@ export async function forwardNativeCodexRequest(
     signal: request.signal,
   });
   const upstream = await fetchUpstream(upstreamRequest);
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: endToEndHeaders(upstream.headers),
-  });
+  const responseHeaders = endToEndHeaders(upstream.headers);
+  const isEventStream = (upstream.headers.get("content-type") ?? "").includes("text/event-stream");
+  return new Response(
+    upstream.body
+      ? withUncleanCloseTolerance(upstream.body, isEventStream, bytes => {
+        console.warn(
+          `[codex-chatgpt-web] native_upstream_unclean_close endpoint=${endpoint} bytes=${bytes}`
+          + " (turn had already completed; closing the client stream normally)",
+        );
+      })
+      : upstream.body,
+    {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: responseHeaders,
+    },
+  );
 }

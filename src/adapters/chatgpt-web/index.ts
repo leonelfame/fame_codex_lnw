@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import { releaseLauncherRetainedConversation } from "../../launcher-browser-host";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
-import type { ProviderAdapter } from "../base";
+import type { IncomingMeta, ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
@@ -236,6 +236,9 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
   }
 }
 
+/** Keep the Responses bridge alive during every awaited phase of a browser turn. */
+export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
+
 export function createChatGptWebAdapter(
   provider: CodexProviderConfig,
   dependencies: { broker?: TurnBrokerOwner } = {},
@@ -466,6 +469,13 @@ export function createChatGptWebAdapter(
   return {
     name: "chatgpt-web",
     async runTurn(parsed, incoming, emit) {
+      // Arm this before any awaited work, including environment lookup and owner retirement.
+      const heartbeat = setInterval(
+        () => emit({ type: "heartbeat" }),
+        CHATGPT_WEB_ADAPTER_HEARTBEAT_MS,
+      );
+      emit({ type: "heartbeat" });
+      try {
       const turnCapabilities = parsed._compactionRequest
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
@@ -636,7 +646,7 @@ export function createChatGptWebAdapter(
           return;
         }
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
-        await chatGptTurnSessions.retireAndWait(responseExecutionKey);
+        await chatGptTurnSessions.retireAndWait(responseExecutionKey, incoming.abortSignal);
       }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
@@ -646,6 +656,7 @@ export function createChatGptWebAdapter(
         ownerKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
         traceId,
+        incoming.abortSignal,
       );
       const roundKey = chatGptTurnRoundKey(parsed);
       const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
@@ -663,7 +674,7 @@ export function createChatGptWebAdapter(
         emitRoundEvents(events);
       };
       const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
-      const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
+      const sessionHeartbeat = setInterval(() => emit({ type: "heartbeat" }), CHATGPT_WEB_ADAPTER_HEARTBEAT_MS);
       try {
         emit({ type: "heartbeat" });
         await session.runExclusive(async () => {
@@ -877,6 +888,9 @@ export function createChatGptWebAdapter(
         session.failRound(roundKey, turnError);
         chatGptWebTurnRetryPolicy.clear(retryKey);
         throw turnError;
+      } finally {
+        clearInterval(sessionHeartbeat);
+      }
       } finally {
         clearInterval(heartbeat);
       }

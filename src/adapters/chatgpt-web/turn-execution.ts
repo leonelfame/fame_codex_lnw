@@ -10,6 +10,31 @@ import {
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
+function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    // Keep the underlying retirement promise observed even when the caller arrived after abort;
+    // another owner may still depend on its eventual settlement and rejection must not become an
+    // unhandled process-level error.
+    void promise.catch(() => {});
+    return Promise.reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      value => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      error => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
   | { type: "error"; error: Error };
@@ -481,8 +506,10 @@ export class ChatGptTurnSessions {
     ownerKey: string,
     start: () => ChatGptTurnRuntime,
     traceId?: string,
+    signal?: AbortSignal,
   ): Promise<ChatGptTurnSession> {
     for (;;) {
+      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const existing = this.entries.get(key);
       if (existing) {
         existing.touch();
@@ -490,7 +517,7 @@ export class ChatGptTurnSessions {
       }
       const pending = this.retirements.get(key) ?? this.ownerRetirements.get(ownerKey);
       if (pending) {
-        await pending;
+        await awaitWithAbort(pending, signal);
         continue;
       }
       const activeOwner = [...this.entries].find(([ownedKey, session]) => (
@@ -502,9 +529,10 @@ export class ChatGptTurnSessions {
         // kill the response already using that retained conversation. Wait for its complete
         // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
         // only paths that preempt an active owner.
-        await ownedSession.physicalSettlement;
+        await awaitWithAbort(ownedSession.physicalSettlement, signal);
         continue;
       }
+      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       return this.getOrCreate(key, start, traceId, ownerKey);
     }
   }
@@ -556,10 +584,10 @@ export class ChatGptTurnSessions {
     await this.retirements.get(key);
   }
 
-  async retireAndWait(key: string): Promise<boolean> {
+  async retireAndWait(key: string, signal?: AbortSignal): Promise<boolean> {
     const pending = this.retirements.get(key);
     if (pending) {
-      await pending;
+      await awaitWithAbort(pending, signal);
       return true;
     }
     const session = this.entries.get(key);
@@ -567,7 +595,7 @@ export class ChatGptTurnSessions {
 
     this.entries.delete(key);
     this.forgetConversationHead(session);
-    await this.beginRetirement(key, session);
+    await awaitWithAbort(this.beginRetirement(key, session), signal);
     return true;
   }
 
