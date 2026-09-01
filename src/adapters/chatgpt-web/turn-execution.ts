@@ -262,6 +262,7 @@ export class ChatGptTurnSession {
   private finalPrelude: AdapterEvent[] = [];
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
   private settledPhysical = false;
+  private attachedConversationKey: string | undefined;
   private tail: Promise<void> = Promise.resolve();
   private capabilityRetirementScheduled = false;
   private readonly rounds = new Map<string, {
@@ -276,6 +277,7 @@ export class ChatGptTurnSession {
     readonly traceId?: string,
     readonly ownerKey?: string,
   ) {
+    this.attachedConversationKey = runtime.conversationKey;
     this.physicalSettlement = runtime.physicalSettlement.then(
       () => { this.settledPhysical = true; },
       error => {
@@ -317,7 +319,13 @@ export class ChatGptTurnSession {
   }
 
   conversationKey(): string | undefined {
-    return this.runtime.conversationKey;
+    return this.attachedConversationKey;
+  }
+
+  detachConversation(conversationKey: string): boolean {
+    if (this.attachedConversationKey !== conversationKey) return false;
+    this.attachedConversationKey = undefined;
+    return true;
   }
 
   isActive(): boolean {
@@ -550,6 +558,35 @@ export class ChatGptTurnSessions {
   }
 
   async retireConversationAndWait(conversationKey: string): Promise<number> {
+    return this.closeConversationAndWait(conversationKey);
+  }
+
+  /**
+   * Close the physical retained-chat epoch without discarding a terminal response that won the
+   * compaction race before any compaction instruction reached that response. The detached logical
+   * session remains addressable by its exact Responses execution key, so the post-compaction
+   * native round can consume the already-committed answer instead of opening another browser turn.
+   */
+  async retireConversationPreservingFinalResponse(
+    conversationKey: string,
+    preserved: ChatGptTurnSession,
+    preservedExecutionKey: string,
+  ): Promise<number> {
+    if (!preservedExecutionKey) throw new Error("Preserved ChatGPT response execution key is required");
+    const outcome = preserved.settledOutcome();
+    if (!outcome || outcome.type !== "final") {
+      throw new Error("Only a settled final ChatGPT response can survive retained-conversation retirement");
+    }
+    return this.closeConversationAndWait(conversationKey, {
+      session: preserved,
+      executionKey: preservedExecutionKey,
+    });
+  }
+
+  private async closeConversationAndWait(
+    conversationKey: string,
+    preserved?: { session: ChatGptTurnSession; executionKey: string },
+  ): Promise<number> {
     const pending = this.conversationRetirements.get(conversationKey);
     if (pending) {
       await pending;
@@ -559,11 +596,25 @@ export class ChatGptTurnSessions {
       session.conversationKey() === conversationKey
     ));
     if (matches.length === 0) return 0;
+    if (preserved && !matches.some(([, session]) => session === preserved.session)) {
+      throw new Error("The final ChatGPT response does not own the retained conversation being retired");
+    }
+    const target = preserved ? this.entries.get(preserved.executionKey) : undefined;
+    if (target && target !== preserved?.session) {
+      throw new Error("The compacted ChatGPT response execution key is already owned by another session");
+    }
     this.conversationHeads.delete(conversationKey);
     for (const [key, session] of matches) {
-      if (this.entries.get(key) === session) this.entries.delete(key);
+      if (this.entries.get(key) === session
+        && (session !== preserved?.session || key !== preserved.executionKey)) {
+        this.entries.delete(key);
+      }
       if (session.isActive()) session.cancel();
+      if (!session.detachConversation(conversationKey)) {
+        throw new Error("ChatGPT retained-conversation ownership changed during retirement");
+      }
     }
+    if (preserved) this.entries.set(preserved.executionKey, preserved.session);
     const release = matches.findLast(([, session]) => (
       session.runtime.releaseRetainedConversation !== undefined
     ))?.[1].runtime.releaseRetainedConversation;

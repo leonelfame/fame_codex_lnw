@@ -27,6 +27,7 @@ import {
 import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
+  MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   requestRetainedCompactionHandoff,
   runStructuredCompactionOnce,
   settleActiveCompactionSource,
@@ -526,28 +527,11 @@ export function createChatGptWebAdapter(
           }
           if (structuredCompactionRequired) {
             const compactionExecutionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+            const compactedSourceExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
             const handoffTraceId = createHash("sha256")
               .update(`${compactionExecutionKey}:handoff`)
               .digest("hex")
               .slice(0, 12);
-            const runFreshCompactionFallback = async (reason: string): Promise<string> => {
-              console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
-              const fallbackRuntime = startRuntime(
-                parsed,
-                undefined,
-                `${handoffTraceId}_fallback`,
-                turnCapabilities,
-              );
-              try {
-                const rawSummary = await fallbackRuntime.browser;
-                await fallbackRuntime.physicalSettlement;
-                return canonicalizeCompactionHandoff(parsed, rawSummary);
-              } catch (error) {
-                fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
-                await fallbackRuntime.physicalSettlement.catch(() => {});
-                throw error;
-              }
-            };
             let sharedSummary = existingStructuredCompactionRun(compactionExecutionKey);
             if (!sharedSummary) {
               const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
@@ -557,29 +541,78 @@ export function createChatGptWebAdapter(
               sharedSummary = runStructuredCompactionOnce(
                 compactionExecutionKey,
                 async () => {
-                  const retainedKey = source?.conversationKey();
-                  if (!source || !retainedKey) {
-                    return runFreshCompactionFallback("source_unavailable_before_handoff");
-                  }
+                  const handoffTimeoutMs = Math.min(
+                    timeoutMs ?? MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+                    MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+                  );
+                  const handoffDeadline = new AbortController();
+                  const handoffTimeoutError = new ChatGptWebAdapterError(
+                    `ChatGPT compaction did not fully settle within ${handoffTimeoutMs}ms`,
+                    {
+                      status: 409,
+                      errorType: "invalid_request_error",
+                      code: "compaction_handoff_timeout",
+                      retryable: false,
+                    },
+                  );
+                  const handoffTimer = setTimeout(
+                    () => handoffDeadline.abort(handoffTimeoutError),
+                    handoffTimeoutMs,
+                  );
+                  handoffTimer.unref?.();
+                  const runFreshCompactionFallback = async (reason: string): Promise<string> => {
+                    console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
+                    const fallbackRuntime = startRuntime(
+                      parsed,
+                      undefined,
+                      `${handoffTraceId}_fallback`,
+                      turnCapabilities,
+                    );
+                    try {
+                      const rawSummary = await withAbort(fallbackRuntime.browser, handoffDeadline.signal);
+                      await withAbort(fallbackRuntime.physicalSettlement, handoffDeadline.signal);
+                      return canonicalizeCompactionHandoff(parsed, rawSummary);
+                    } catch (error) {
+                      fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
+                      await withAbort(
+                        fallbackRuntime.physicalSettlement,
+                        handoffDeadline.signal,
+                      ).catch(() => {});
+                      throw error;
+                    }
+                  };
+                  let preserveFinalResponse = !source?.isActive()
+                    && source?.settledOutcome()?.type === "final";
                   try {
+                    const retainedKey = source?.conversationKey();
+                    if (!source || !retainedKey) {
+                      return await runFreshCompactionFallback("source_unavailable_before_handoff");
+                    }
                     let rawSummary: string;
                     if (source.isActive() && source.runtime.mode === "tools") {
-                      rawSummary = await settleActiveCompactionSource(parsed, source, structuredBroker!)
-                        ?? await requestRetainedCompactionHandoff(
-                          worker,
-                          parsed,
-                          source,
-                          structuredBroker!,
-                          configuredCapabilities,
-                          handoffTraceId,
-                          undefined,
-                          timeoutMs,
-                        );
+                      const settlement = await settleActiveCompactionSource(
+                        parsed,
+                        source,
+                        structuredBroker!,
+                        handoffDeadline.signal,
+                      );
+                      preserveFinalResponse = !settlement.compactionInstructionDelivered;
+                      rawSummary = await requestRetainedCompactionHandoff(
+                        worker,
+                        parsed,
+                        source,
+                        structuredBroker!,
+                        configuredCapabilities,
+                        handoffTraceId,
+                        handoffDeadline.signal,
+                        handoffTimeoutMs,
+                      );
                     } else {
                       if (source.isActive()) {
-                        const outcome = await source.browserOutcome;
+                        const outcome = await withAbort(source.browserOutcome, handoffDeadline.signal);
                         if (outcome.type === "error") throw outcome.error;
-                        await source.physicalSettlement;
+                        await withAbort(source.physicalSettlement, handoffDeadline.signal);
+                        preserveFinalResponse = true;
                       }
                       rawSummary = await requestRetainedCompactionHandoff(
                         worker,
@@ -588,28 +621,53 @@ export function createChatGptWebAdapter(
                         structuredBroker!,
                         configuredCapabilities,
                         handoffTraceId,
-                        undefined,
-                        timeoutMs,
+                        handoffDeadline.signal,
+                        handoffTimeoutMs,
                       );
                     }
                     const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
-                    await chatGptTurnSessions.retireConversationAndWait(retainedKey);
+                    await withAbort(
+                      preserveFinalResponse
+                        ? chatGptTurnSessions.retireConversationPreservingFinalResponse(
+                          retainedKey,
+                          source,
+                          compactedSourceExecutionKey,
+                        )
+                        : chatGptTurnSessions.retireConversationAndWait(retainedKey),
+                      handoffDeadline.signal,
+                    );
                     return summary;
                   } catch (error) {
+                    const retainedKey = source?.conversationKey();
+                    if (!retainedKey) throw error;
                     let handoffError = error instanceof Error ? error : new Error(String(error));
                     try {
-                      await chatGptTurnSessions.retireConversationAndWait(retainedKey);
-                    } catch (retirementError) {
-                      handoffError = new AggregateError(
-                        [handoffError, retirementError instanceof Error ? retirementError : new Error(String(retirementError))],
-                        "Structured compaction failed and its retained conversation could not be retired",
+                      await withAbort(
+                        preserveFinalResponse
+                          ? chatGptTurnSessions.retireConversationPreservingFinalResponse(
+                            retainedKey,
+                            source!,
+                            compactedSourceExecutionKey,
+                          )
+                          : chatGptTurnSessions.retireConversationAndWait(retainedKey),
+                        handoffDeadline.signal,
                       );
+                    } catch (retirementError) {
+                      if (!handoffDeadline.signal.aborted
+                        || retirementError !== handoffDeadline.signal.reason) {
+                        handoffError = new AggregateError(
+                          [handoffError, retirementError instanceof Error ? retirementError : new Error(String(retirementError))],
+                          "Structured compaction failed and its retained conversation could not be retired",
+                        );
+                      }
                     }
                     if (handoffError instanceof ChatGptWebAdapterError
                       && handoffError.code === "compaction_source_unavailable") {
-                      return runFreshCompactionFallback("source_disappeared_before_handoff");
+                      return await runFreshCompactionFallback("source_disappeared_before_handoff");
                     }
                     throw handoffError;
+                  } finally {
+                    clearTimeout(handoffTimer);
                   }
                 },
               );
@@ -692,14 +750,24 @@ export function createChatGptWebAdapter(
             if (settled) {
               if (settled.type === "error") throw settled.error;
               const trace = session.runtime.trace.drain();
-              session.appendRoundReasoning(roundKey, trace.map(event => event.text));
-              if (replay.length === 0 && !parsed._compactionRequest) {
-                emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
-              }
-              emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
               const completedTextDeltas = session.runtime.text.drain();
-              if (!bufferStructuredOutput) {
-                emitRoundBatch(buffer => emitTextDeltas(completedTextDeltas, buffer));
+              const finalReplay = replay.length === 0
+                && trace.length === 0
+                && completedTextDeltas.length === 0
+                ? session.eventsForFinalReplay()
+                : [];
+              if (finalReplay.length > 0) {
+                session.appendRoundReasoning(roundKey, session.reasoningForFinalReplay());
+                emitRoundEvents(finalReplay);
+              } else {
+                session.appendRoundReasoning(roundKey, trace.map(event => event.text));
+                if (replay.length === 0 && !parsed._compactionRequest) {
+                  emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
+                }
+                emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
+                if (!bufferStructuredOutput) {
+                  emitRoundBatch(buffer => emitTextDeltas(completedTextDeltas, buffer));
+                }
               }
               if (session.runtime.text.value() !== settled.answer) {
                 throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");

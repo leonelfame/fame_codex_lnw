@@ -2062,7 +2062,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("replaces the active browser response after Codex compacts mid-tool-loop", async () => {
+  test("replays an ordinary post-tool final after one retained structured compaction handoff", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -2140,13 +2140,12 @@ describe("ChatGPT outer-native harness v4", () => {
         }, 30_000));
         originalBrowserReceivedToolResult = true;
         if (JSON.stringify(nativeResult.content).includes(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER)) {
-          const responseMarker = JSON.stringify(nativeResult.content)
-            .match(/CODEX_ACTIVE_COMPACTION_CHECKPOINT_[a-f0-9]{32}/)?.[0];
-          if (!responseMarker) throw new Error("active compaction response marker missing");
           originalBrowserStopped = true;
-          return `${responseMarker}\nThe project was inspected and the pending command completed.`;
+          return "Stopped for the pending retained compaction handoff";
         }
-        return `stale browser continued with ${(nativeResult.structuredContent as { output: string }).output}`;
+        const answer = `ordinary browser final with ${(nativeResult.structuredContent as { output: string }).output}`;
+        turn.onTextDelta(answer);
+        return answer;
       } finally {
         prepared.release();
       }
@@ -2218,8 +2217,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(compactEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
       expect(originalBrowserStopped).toBe(true);
       expect(originalBrowserReceivedToolResult).toBe(true);
-      expect(retainedCompactionMessages).toBe(0);
-      expect(browserStarts).toBe(1);
+      expect(retainedCompactionMessages).toBe(1);
+      expect(browserStarts).toBe(2);
 
       const compactReplayEvents: AdapterEvent[] = [];
       await adapter.runTurn!(
@@ -2228,8 +2227,8 @@ describe("ChatGPT outer-native harness v4", () => {
         event => compactReplayEvents.push(event),
       );
       expect(compactReplayEvents).toEqual(compactEvents);
-      expect(retainedCompactionMessages).toBe(0);
-      expect(browserStarts).toBe(1);
+      expect(retainedCompactionMessages).toBe(1);
+      expect(browserStarts).toBe(2);
 
       const secondRequest = rawWireRequest(environmentXml);
       secondRequest.context.messages.push({
@@ -2244,61 +2243,13 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
       expect(browserStarts).toBe(2);
-      expect(continuationTurnToken).not.toBe(originalTurnToken);
-      expect(secondEvents.find(event => event.type === "thinking_delta")).toEqual({
-        type: "thinking_delta",
-        thinking: "Resumed from the compacted Codex history",
-      });
-      const continuedCall = secondEvents.find(
-        (event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start",
-      );
-      expect(continuedCall?.name).toBe("exec_command");
-      expect(secondEvents.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
-
-      const finalRequest = structuredClone(secondRequest);
-      const continuedToolCall = {
-        role: "assistant" as const,
-        content: [{
-          type: "toolCall" as const,
-          id: continuedCall!.id,
-          name: "exec_command",
-          arguments: { cmd: "git status --short", workdir: tempRoot },
-        }],
-        timestamp: 6,
-      };
-      const continuedResult = {
-        role: "toolResult" as const,
-        toolCallId: continuedCall!.id,
-        toolName: "exec_command",
-        content: JSON.stringify({ output: "clean", exit_code: 0 }),
-        isError: false,
-        timestamp: 7,
-      };
-      finalRequest.context.messages.push(continuedToolCall, continuedResult);
-      ((finalRequest._rawBody as { input: unknown[] }).input).push(
-        {
-          type: "function_call",
-          call_id: continuedCall!.id,
-          name: "exec_command",
-          arguments: JSON.stringify({ cmd: "git status --short", workdir: tempRoot }),
-        },
-        {
-          type: "function_call_output",
-          call_id: continuedCall!.id,
-          output: continuedResult.content,
-        },
-      );
-      const finalEvents: AdapterEvent[] = [];
-      await adapter.runTurn!(finalRequest, { headers: new Headers() }, event => finalEvents.push(event));
-      expect(browserStarts).toBe(2);
-      expect(finalEvents.find(event => event.type === "thinking_delta")).toEqual({
-        type: "thinking_delta",
-        thinking: "Verified the continued task",
-      });
-      expect(finalEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
+      expect(continuationTurnToken).toBe("");
+      expect(originalTurnToken).not.toBe("");
+      expect(secondEvents.find(event => event.type === "tool_call_start")).toBeUndefined();
+      expect(secondEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
         .map(event => event.text).join(""))
-        .toBe("## Browser final\n\nStatus: clean");
-      const finalDone = finalEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+        .toBe(`ordinary browser final with ${tempRoot}`);
+      const finalDone = secondEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
       expect(finalDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
       expect(finalDone.usage?.estimated).toBe(true);
       expect(Number.isFinite(finalDone.usage?.inputTokens)).toBe(true);
@@ -2306,9 +2257,9 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(finalDone.usage!.inputTokens).toBeGreaterThan(firstDone.usage!.inputTokens);
 
       const replayEvents: AdapterEvent[] = [];
-      await adapter.runTurn!(finalRequest, { headers: new Headers() }, event => replayEvents.push(event));
+      await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => replayEvents.push(event));
       expect(browserStarts).toBe(2);
-      expect(replayEvents).toEqual(finalEvents);
+      expect(replayEvents).toEqual(secondEvents);
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();

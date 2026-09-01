@@ -101,13 +101,18 @@ must return an exact transaction-bound SHA-256 acknowledgement before the next p
 Images, the MCP connector, and the private `turn_token` are attached only to the final part.
 In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If
 the source Web response is still waiting on a tool boundary, its canonical tool results finish that
-response first. The exact retained chat then receives one strict checkpoint message with only the
-one-shot MCP control capability and no ordinary work capability. The checkpoint never rides in the
-tail of a potentially huge tool result, and its wait is capped at five minutes independently of the
-normal turn timeout.
-The old surface closes only after both the structured handoff and that Web response complete; the
-next epoch then starts a fresh Temporary Chat. If the retained private chat was already closed, the
-bridge starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
+response first without a compaction suffix. If those results are enough for an ordinary final
+answer, that committed answer remains owned by the logical Responses turn across the physical chat
+retirement. If the Web model instead requests another tool, the broker blocks that new execution
+and tells the response to stop; the compacted continuation then resumes the unfinished work. The
+exact retained chat receives one strict checkpoint message with only the one-shot MCP control
+capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially
+huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
+After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
+and waits for its physical launcher settlement before closing the old surface; the next epoch then
+starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
+action after the control-only response. If the retained private chat was already closed, the bridge
+starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
 has no retained MCP boundary and keeps the three-message compaction path so its summarizer receives
 the complete expanded history.
 

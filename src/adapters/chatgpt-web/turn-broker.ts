@@ -395,7 +395,7 @@ export class TurnBroker implements TurnBrokerOwner {
 
   compactionDeliveryCount(token: string): number {
     const channel = this.channels.get(token);
-    if (!channel) return 0;
+    if (!channel) throw new Error("Cannot read compaction delivery after the turn capability retired");
     return channel.compactionDeliveryCount;
   }
 

@@ -820,6 +820,72 @@ test("tunnel recovery replaces a false-green managed runtime and proves the fres
   }
 });
 
+test("fresh tunnel recovery discovers its official loopback diagnostics before probing MCP", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-health-discovery-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const config = {
+    tunnel: {
+      alias: "codex-chatgpt-web",
+      binaryPath: path.join(root, "tunnel-client"),
+      profileDir: root,
+    },
+  };
+  const commands = [];
+  supervisor.runTunnelCommand = async (_config, args) => {
+    commands.push(args);
+    return {
+      code: 0,
+      output: JSON.stringify({
+        local: { health: { base_url: "http://127.0.0.1:43127" } },
+      }),
+    };
+  };
+  supervisor.probeTunnelMcpTransport = async () => ({
+    observed: true,
+    ok: true,
+    fatal: false,
+    detail: "MCP transport has no recent internal failures",
+  });
+  try {
+    await supervisor.waitForTunnelMcpTransport(config, 25);
+    assert.equal(supervisor.tunnelHealthBaseUrl, "http://127.0.0.1:43127");
+    assert.deepEqual(commands, [["runtimes", "status", "codex-chatgpt-web", "--json"]]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tunnel diagnostics discovery rejects a non-loopback endpoint", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-health-nonlocal-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  supervisor.runTunnelCommand = async () => ({
+    code: 0,
+    output: JSON.stringify({ health_url: "https://example.com/healthz" }),
+  });
+  try {
+    await assert.rejects(
+      supervisor.discoverTunnelHealthBaseUrl({
+        tunnel: { alias: "codex-chatgpt-web", binaryPath: path.join(root, "tunnel-client"), profileDir: root },
+      }),
+      /no verified loopback endpoint/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher stops an unhealthy managed runtime before reconnecting the alias", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-managed-tunnel-reconnect-"));
   const binaryPath = path.join(root, "tunnel-client");
