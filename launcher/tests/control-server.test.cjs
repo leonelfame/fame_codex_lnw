@@ -62,9 +62,26 @@ test("browser control server authenticates and owns turn visibility", async () =
     const heartbeat = await fetch(`${descriptor.endpoint}/v1/turn/heartbeat`, {
       method: "POST",
       headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ phase: "heartbeat", traceId: "abcdef123456", helperPid: process.pid }),
+      body: JSON.stringify({
+        phase: "heartbeat",
+        traceId: "abcdef123456",
+        helperPid: process.pid,
+        refreshViewport: true,
+      }),
     });
     assert.equal(heartbeat.status, 200);
+
+    const invalidRefresh = await fetch(`${descriptor.endpoint}/v1/turn/heartbeat`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        phase: "heartbeat",
+        traceId: "abcdef123456",
+        helperPid: process.pid,
+        refreshViewport: "yes",
+      }),
+    });
+    assert.equal(invalidRefresh.status, 400);
 
     const ownerlessEnd = await fetch(`${descriptor.endpoint}/v1/turn/end`, {
       method: "POST",
@@ -96,7 +113,7 @@ test("browser control server authenticates and owns turn visibility", async () =
         "Codex Native2",
         true,
       ],
-      ["heartbeat", "abcdef123456", process.pid],
+      ["heartbeat", "abcdef123456", process.pid, true],
       ["end", "abcdef123456", process.pid, "completed", true, undefined, true, true],
     ]);
     assert.equal(logs.some(([, event]) => event === "browser.turn_started"), true);

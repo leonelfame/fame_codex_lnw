@@ -149,6 +149,12 @@ class BrowserControlServer {
       if (body.connectorBound !== undefined && typeof body.connectorBound !== "boolean") {
         throw new Error("connectorBound is invalid");
       }
+      if (body.refreshViewport !== undefined && typeof body.refreshViewport !== "boolean") {
+        throw new Error("refreshViewport is invalid");
+      }
+      if (body.refreshViewport !== undefined && request.url !== "/v1/turn/heartbeat") {
+        throw new Error("refreshViewport is only valid for a turn heartbeat");
+      }
       const preferences = this.getPreferences();
       if (request.url === "/v1/turn/start") {
         const lease = host.beginTurn(
@@ -163,7 +169,7 @@ class BrowserControlServer {
         writeJson(response, 200, { ok: true, ...lease });
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
-        host.heartbeatTurn(body.traceId, body.helperPid);
+        host.heartbeatTurn(body.traceId, body.helperPid, body.refreshViewport === true);
         this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
         writeJson(response, 200, { ok: true });
         return;

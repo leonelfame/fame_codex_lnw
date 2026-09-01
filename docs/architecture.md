@@ -34,6 +34,10 @@ launcher-owned codex-chatgpt-web daemon
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call presents one outer Codex turn capability; the MCP server keeps the derived
   binding private and dispatches the requested action immediately.
+- When Codex exposes tools behind its code-mode `exec` gateway, the connector discovers their
+  runtime registry and can invoke an exact listed name through bridge-owned code. Full mode also
+  preserves Codex's native freeform `exec`; its tool registry enforces the same bounded
+  `wait_agent` contract as direct and structured calls.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
 
 ### Repository DEV driver
@@ -127,10 +131,12 @@ sign-in and model turns both remain in Electron. Full mode separately downloads 
 `openai/tunnel-client` build for the current OS/architecture and verifies it against the release
 SHA-256 manifest.
 
-On first launch, the embedded runtime is identity-checked and copied atomically into a private
-versioned directory under the application home. Daemon and MCP commands use that durable copy,
-which is required because Linux AppImage mount paths are temporary and must never be persisted in
-Codex or tunnel configuration.
+On first launch, the embedded runtime is checked against a deterministic manifest covering every
+file path, size, and SHA-256 before any launcher port or window opens. The source, transactional
+temporary copy, and final destination are all validated before the private versioned directory is
+accepted under the application home. Daemon and MCP commands use that durable copy, which is
+required because Linux AppImage mount paths are temporary and must never be persisted in Codex or
+tunnel configuration.
 
 The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the optional
 tunnel first, waits for healthy/ready evidence, starts the Responses daemon, and then waits for its

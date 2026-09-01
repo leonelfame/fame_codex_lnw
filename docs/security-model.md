@@ -14,10 +14,22 @@ created. Repository contents, tool output, websites, and prompt text are untrust
    accepted as authority.
 3. It creates a random, turn-scoped token and embeds it in that one ChatGPT browser prompt.
 4. Every Codex Native action presents that same turn token. The MCP handler idempotently claims an
-   internal binding and immediately dispatches the requested action; the binding is never exposed
-   to the model. Both handles are revoked when the turn completes, aborts, or expires.
-5. MCP can request only a tool advertised by the active outer Codex turn. Codex remains responsible
-   for its sandbox, approval, UI, command sessions, and tool result.
+   internal binding plus a request-scoped activity lease and immediately dispatches the requested
+   action; neither internal handle is exposed to the model. The lease is settled only after the MCP
+   handler finishes, including inventory calls that need no outer Codex tool.
+5. MCP can request only a callable tool advertised by the active outer Codex turn. The unrestricted
+   raw orchestration `exec` gateway remains available in Full mode. Before caller-authored
+   JavaScript runs, the bridge wraps its tool registry with a transparent proxy that enforces the
+   exact 10-second `wait_agent` polling contract and prevents recursive raw `exec`. The generic
+   inventory/call pair also provides a structured exact-name path. Codex remains responsible for
+   its sandbox, approval, UI, command sessions, and tool result.
+6. Before a Codex tool batch is dispatched, the browser records and acknowledges the current answer
+   projection. Completion stays blocked while the tool is unresolved and then requires a new stable
+   final-answer projection after that causal boundary. A two-phase broker fence then rereads the DOM
+   and commits completion only if the activity revision stayed unchanged with no active invocation;
+   a concurrent claim makes the candidate lose, while a claim after commit receives an explicit
+   terminal rejection. Recent MCP activity may suppress a false DOM-health failure but never adds
+   an idle delay to a successful completion.
 
 The bridge transports decisions; it does not add a second planner, semantic router, or fallback
 model. Every available effort uses the same MCP contract. An unavailable account route, missing
@@ -66,9 +78,9 @@ or unauthenticated lifecycle control through ordinary requests.
 
 ### Browser/UI drift
 
-ChatGPT DOM and labels are not a stable API. Selectors are narrow and completion requires stable
-completed-turn evidence. UI drift fails the turn; it never chooses another model, starts another
-transport, or returns a fabricated success.
+ChatGPT DOM and labels are not a stable API. Selectors are narrow; Full-mode completion requires
+stable completed-turn evidence and, after tools, a new final-answer projection. UI drift fails the
+turn; it never chooses another model, starts another transport, or returns a fabricated success.
 
 ### Login-state isolation
 

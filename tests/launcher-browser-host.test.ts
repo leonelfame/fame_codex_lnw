@@ -117,8 +117,14 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       phase: "heartbeat",
       traceId: "abc123def456",
       helperPid: process.pid,
+      refreshViewport: true,
     });
-    expect(received.body).toEqual({ phase: "heartbeat", traceId: "abc123def456", helperPid: process.pid });
+    expect(received.body).toEqual({
+      phase: "heartbeat",
+      traceId: "abc123def456",
+      helperPid: process.pid,
+      refreshViewport: true,
+    });
     await expect(notifyLauncherTurn(path, {
       phase: "end",
       traceId: "abc123def456",

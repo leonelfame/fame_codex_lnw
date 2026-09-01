@@ -312,7 +312,13 @@ export type LauncherTurnActivity =
       connectorIdentity?: string;
       requireRetainedConversation?: boolean;
     }
-  | { phase: "heartbeat"; traceId: string; helperPid: number }
+  | {
+      phase: "heartbeat";
+      traceId: string;
+      helperPid: number;
+      /** Re-establish the launcher's hidden viewport after the caller closes its CDP session. */
+      refreshViewport?: boolean;
+    }
   | {
       phase: "end";
       traceId: string;

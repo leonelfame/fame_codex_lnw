@@ -375,20 +375,26 @@ test("completed retained compaction never treats ordinary assistant text as a ha
 test("active compaction turns the final canonical tool result into the same-response checkpoint request", async () => {
   const completed: Array<{ callId: string; result: BrokerToolResult }> = [];
   const compactionTokens: string[] = [];
+  let finishBrowser!: (answer: string) => void;
+  const browser = new Promise<string>(resolve => { finishBrowser = resolve; });
   const broker = {
     requestCompaction: (token: string) => { compactionTokens.push(token); return 0; },
     compactionDeliveryCount: () => 0,
     completeTool: async (_token: string, callId: string, result: BrokerToolResult) => {
       completed.push({ callId, result });
+      const marker = JSON.stringify(result).match(/CODEX_ACTIVE_COMPACTION_CHECKPOINT_[a-f0-9]{32}/)?.[0];
+      if (marker) finishBrowser(`${marker}\nActive-turn checkpoint`);
     },
     revoke() {},
   } as unknown as TurnBroker;
   const source = new ChatGptTurnSession({
     mode: "tools",
     token: Promise.resolve("turn_active"),
-    externalProgress: { recordToolResult() {} } as never,
-    browser: Promise.resolve("  Active-turn checkpoint  "),
-    physicalSettlement: Promise.resolve(),
+    externalProgress: {
+      recordToolResult() {},
+    } as never,
+    browser,
+    physicalSettlement: browser.then(() => undefined),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel() {},
@@ -412,8 +418,44 @@ test("active compaction turns the final canonical tool result into the same-resp
   expect(completed.map(entry => entry.callId)).toEqual(["call_one", "call_two"]);
   expect(JSON.stringify(completed[0])).not.toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
   expect(JSON.stringify(completed[1])).toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
+  expect(JSON.stringify(completed[1])).toMatch(/CODEX_ACTIVE_COMPACTION_CHECKPOINT_[a-f0-9]{32}/);
   expect(JSON.stringify(completed[1])).toContain("You are performing a CONTEXT CHECKPOINT COMPACTION");
-  expect(JSON.stringify(completed[1])).toContain("final response is the compaction result");
+  expect(JSON.stringify(completed[1])).toContain("exact private marker");
+});
+
+test("active compaction never consumes an unmarked ordinary terminal answer", async () => {
+  const completed: BrokerToolResult[] = [];
+  const broker = {
+    requestCompaction: () => 0,
+    compactionDeliveryCount: () => 0,
+    completeTool: async (_token: string, _callId: string, result: BrokerToolResult) => {
+      completed.push(result);
+    },
+    revoke() {},
+  } as unknown as TurnBroker;
+  const source = new ChatGptTurnSession({
+    mode: "tools",
+    token: Promise.resolve("turn_active_ordinary_answer"),
+    externalProgress: { recordToolResult() {} } as never,
+    browser: Promise.resolve("The ordinary task answer completed first."),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel() {},
+  });
+  source.setOutstanding([{ callId: "call_one", wireName: "exec_command", freeform: false }]);
+  const parsed = request(true);
+  parsed.context.messages.push({
+    role: "toolResult",
+    toolCallId: "call_one",
+    toolName: "exec_command",
+    content: "one",
+    isError: false,
+    timestamp: 4,
+  });
+
+  await expect(settleActiveCompactionSource(parsed, source, broker)).resolves.toBeUndefined();
+  expect(JSON.stringify(completed)).toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
 });
 
 test("active compaction interrupts a queued MCP call that Codex never started waiting for", async () => {
@@ -445,12 +487,16 @@ test("active compaction interrupts a queued MCP call that Codex never started wa
       expect(result.isError).toBeTrue();
       expect(JSON.stringify(result.content)).toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
       expect(JSON.stringify(result.content)).toContain("The tool was not executed");
-      return "Queued-call checkpoint";
+      const marker = JSON.stringify(result.content).match(/CODEX_ACTIVE_COMPACTION_CHECKPOINT_[a-f0-9]{32}/)?.[0];
+      expect(marker).toBeDefined();
+      return `${marker!}\nQueued-call checkpoint`;
     });
     const source = new ChatGptTurnSession({
       mode: "tools",
       token: Promise.resolve(token),
-      externalProgress: { recordToolResult() {} } as never,
+      externalProgress: {
+        recordToolResult() {},
+      } as never,
       browser,
       physicalSettlement: browser.then(() => undefined),
       trace: new ChatGptTraceFeed(),

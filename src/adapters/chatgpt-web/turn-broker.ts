@@ -53,6 +53,14 @@ interface TurnChannel {
   compactionRequested: boolean;
   compactionResult?: BrokerToolResult;
   compactionDeliveryCount: number;
+  /** Every MCP request owns a lease from token claim until its handler has settled. */
+  activities: Set<string>;
+  /** Prevents a lost/retried or delayed claim from resurrecting activity after cleanup. */
+  completedActivities: Set<string>;
+  /** Monotonic across activity start/end so a completed request cannot disappear across a fence. */
+  activityRevision: number;
+  completionCommitted: boolean;
+  completionRevision?: number;
   batchTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -68,7 +76,10 @@ interface BrokerRequest {
     | "owner_update"
     | "owner_next"
     | "owner_complete"
+    | "owner_completion_fence_begin"
+    | "owner_completion_fence_commit"
     | "owner_revoke"
+    | "activity_complete"
     | "submit_compaction_handoff";
   token?: string;
   bindingId?: string;
@@ -80,6 +91,8 @@ interface BrokerRequest {
   ttlMs?: number;
   traceId?: string;
   callId?: string;
+  activityId?: string;
+  revision?: number;
   toolResult?: BrokerToolResult;
   handoffId?: string;
   summary?: string;
@@ -158,6 +171,8 @@ export interface TurnBrokerOwner {
   updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void | Promise<void>;
   nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]>;
   completeTool(token: string, callId: string, result: BrokerToolResult): void | Promise<void>;
+  beginCompletionFence(token: string): number | undefined | Promise<number | undefined>;
+  commitCompletionFence(token: string, revision: number): boolean | Promise<boolean>;
   revoke(token: string, reason?: Error): void | Promise<void>;
 }
 
@@ -231,6 +246,10 @@ export class TurnBroker implements TurnBrokerOwner {
       waiters: new Set(),
       compactionRequested: false,
       compactionDeliveryCount: 0,
+      activities: new Set(),
+      completedActivities: new Set(),
+      activityRevision: 0,
+      completionCommitted: false,
     };
     this.channels.set(token, channel);
     this.pending.set(token, channel);
@@ -315,6 +334,34 @@ export class TurnBroker implements TurnBrokerOwner {
     channel.invocations.delete(callId);
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
+  }
+
+  beginCompletionFence(token: string): number | undefined {
+    this.prune();
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("turn token is invalid or expired");
+    if (channel.completionCommitted) return channel.completionRevision;
+    if (channel.activities.size > 0 || channel.invocations.size > 0) return undefined;
+    return channel.activityRevision;
+  }
+
+  commitCompletionFence(token: string, revision: number): boolean {
+    this.prune();
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      throw new Error("turn completion fence revision is invalid");
+    }
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("turn token is invalid or expired");
+    if (channel.completionCommitted) return channel.completionRevision === revision;
+    if (channel.activityRevision !== revision
+      || channel.activities.size > 0
+      || channel.invocations.size > 0) return false;
+    channel.completionCommitted = true;
+    channel.completionRevision = revision;
+    console.info(
+      `[chatgpt-web] broker trace=${channel.traceId} committed browser completion revision=${revision}`,
+    );
+    return true;
   }
 
   requestCompaction(token: string, queuedResult: BrokerToolResult): number {
@@ -537,7 +584,9 @@ export class TurnBroker implements TurnBrokerOwner {
         this.writeSocketResponse(socket, { id: request?.id ?? "unknown", error: errorOf(error).message });
         return;
       }
-      void Promise.resolve().then(() => this.dispatch(request!)).then(
+      const requestAbort = new AbortController();
+      socket.once("close", () => requestAbort.abort());
+      void Promise.resolve().then(() => this.dispatch(request!, requestAbort.signal)).then(
         result => this.writeSocketResponse(socket, { id: request!.id, result }),
         error => this.writeSocketResponse(socket, { id: request!.id, error: errorOf(error).message }),
       );
@@ -557,12 +606,12 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_update", "owner_next", "owner_complete", "owner_revoke", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_update", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_revoke", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
 
-  private dispatch(request: BrokerRequest): unknown | Promise<unknown> {
+  private dispatch(request: BrokerRequest, signal?: AbortSignal): unknown | Promise<unknown> {
     this.prune();
     if (request.method === "submit_compaction_handoff") {
       if (typeof request.token !== "string" || request.token.length === 0) {
@@ -578,7 +627,7 @@ export class TurnBroker implements TurnBrokerOwner {
       return { submitted: true };
     }
     if (request.method === "owner_status") {
-      return { protocolVersion: 1, acceptingExternalOwners: this.acceptingExternalOwners };
+      return { protocolVersion: 2, acceptingExternalOwners: this.acceptingExternalOwners };
     }
     if (request.method === "owner_register") {
       const environment = ownerEnvironment(request.environment);
@@ -594,7 +643,7 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     if (request.method === "owner_next") {
       if (!request.token) throw new Error("turn owner token is required");
-      return this.nextToolBatch(request.token).then(requests => ({ requests }));
+      return this.nextToolBatch(request.token, signal).then(requests => ({ requests }));
     }
     if (request.method === "owner_complete") {
       if (!request.token) throw new Error("turn owner token is required");
@@ -605,6 +654,17 @@ export class TurnBroker implements TurnBrokerOwner {
       this.completeTool(request.token, request.callId, request.toolResult);
       return { completed: true };
     }
+    if (request.method === "owner_completion_fence_begin") {
+      if (!request.token) throw new Error("turn owner token is required");
+      return { revision: this.beginCompletionFence(request.token) ?? null };
+    }
+    if (request.method === "owner_completion_fence_commit") {
+      if (!request.token) throw new Error("turn owner token is required");
+      if (!Number.isSafeInteger(request.revision) || request.revision! < 0) {
+        throw new Error("turn completion fence revision is invalid");
+      }
+      return { committed: this.commitCompletionFence(request.token, request.revision!) };
+    }
     if (request.method === "owner_revoke") {
       if (!request.token) throw new Error("turn owner token is required");
       this.revoke(request.token);
@@ -614,32 +674,65 @@ export class TurnBroker implements TurnBrokerOwner {
       const token = request.token;
       if (typeof token !== "string" || token.length === 0) throw new Error("turn token is required");
       const channel = this.channels.get(token);
-      const retiredTurn = channel ? undefined : this.retiredTokens.get(token);
+      const activeChannel = channel && !channel.completionCommitted ? channel : undefined;
+      const retiredTurn = channel?.completionCommitted ? channel.traceId : this.retiredTokens.get(token);
       console.error(
-        `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(channel)}`
-        + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
+        `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(activeChannel)}`
+        + `${activeChannel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
       );
-      if (!channel) {
+      if (!activeChannel) {
         throw new Error(retiredTurn !== undefined
           ? `This turn_token was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
           + " This Codex Native action can no longer run."
           : "turn token is invalid, expired, or revoked");
       }
-      if (channel.bindingId) {
-        const existing = this.bindings.get(channel.bindingId);
-        if (!existing || existing.token !== token || existing.channel !== channel) {
+      if (typeof request.activityId !== "string" || !/^activity_[A-Za-z0-9_-]{16,128}$/.test(request.activityId)) {
+        throw new Error("turn activity id is invalid");
+      }
+      const activityId = request.activityId;
+      if (activeChannel.completedActivities.has(activityId)) {
+        throw new Error("turn activity was already completed before this claim settled");
+      }
+      if (!activeChannel.activities.has(activityId)) {
+        activeChannel.activities.add(activityId);
+        activeChannel.activityRevision += 1;
+      }
+      if (activeChannel.bindingId) {
+        const existing = this.bindings.get(activeChannel.bindingId);
+        if (!existing || existing.token !== token || existing.channel !== activeChannel) {
           throw new Error("turn token binding state is inconsistent");
         }
-        return { bindingId: channel.bindingId, environment: channel.environment };
+        return { bindingId: activeChannel.bindingId, activityId, environment: activeChannel.environment };
       }
       this.pending.delete(token);
       const bindingId = opaqueId("binding");
-      channel.bindingId = bindingId;
-      this.bindings.set(bindingId, { token, channel });
-      return { bindingId, environment: channel.environment };
+      activeChannel.bindingId = bindingId;
+      this.bindings.set(bindingId, { token, channel: activeChannel });
+      return { bindingId, activityId, environment: activeChannel.environment };
     }
 
     const bindingId = request.bindingId;
+    if (request.method === "activity_complete") {
+      const token = request.token;
+      if (typeof token !== "string" || token.length === 0) throw new Error("turn token is required");
+      if (typeof request.activityId !== "string" || !/^activity_[A-Za-z0-9_-]{16,128}$/.test(request.activityId)) {
+        throw new Error("turn activity id is invalid");
+      }
+      const channel = this.channels.get(token);
+      if (!channel) {
+        return { completed: false, retired: this.retiredTokens.has(token) };
+      }
+      if (channel.completedActivities.has(request.activityId)) {
+        return { completed: false, duplicate: true };
+      }
+      const wasActive = channel.activities.delete(request.activityId);
+      channel.completedActivities.add(request.activityId);
+      // A cleanup that overtakes an ambiguously delivered claim is still a causal event. Its
+      // tombstone makes the delayed claim fail instead of resurrecting activity after a fence.
+      channel.activityRevision += 1;
+      return { completed: wasActive };
+    }
+
     if (typeof bindingId !== "string" || bindingId.length === 0) throw new Error("binding id is required");
     const binding = this.bindings.get(bindingId);
     if (!binding) {
@@ -765,6 +858,12 @@ export async function callTurnBroker<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const id = opaqueId("request");
+  // The wire protocol requires a client-owned activity identity. Most callers never need to see
+  // it; the MCP server supplies its own so it can retire an ambiguously delivered claim, while
+  // lower-level diagnostics receive an equally client-generated identity here.
+  const wireRequest = request.method === "claim" && request.activityId === undefined
+    ? { ...request, activityId: opaqueId("activity") }
+    : request;
   return new Promise<T>((resolveCall, rejectCall) => {
     const socket = createConnection(socketPath);
     let buffered = "";
@@ -805,7 +904,7 @@ export async function callTurnBroker<T>(
     // The server owns response termination. Waiting for the pipe/socket to close before resolving
     // prevents callers from retiring the broker while Bun still has a named-pipe write in flight.
     socket.once("close", finishResponse);
-    socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...request })}\n`));
+    socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`));
     socket.on("data", chunk => {
       if (settled || response) return;
       buffered += chunk;
@@ -849,7 +948,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
         + ` (${error instanceof Error ? error.message : String(error)})`,
       );
     }
-    if (status.protocolVersion !== 1) {
+    if (status.protocolVersion !== 2) {
       throw new Error(`Unsupported DEV turn-owner protocol version: ${String(status.protocolVersion)}`);
     }
     if (status.acceptingExternalOwners !== true) {
@@ -900,6 +999,30 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
       callId,
       toolResult: result,
     }, null);
+  }
+
+  async beginCompletionFence(token: string): Promise<number | undefined> {
+    const response = await callTurnBroker<{ revision?: unknown }>(this.socketPath, {
+      method: "owner_completion_fence_begin",
+      token,
+    });
+    if (response.revision === null) return undefined;
+    if (!Number.isSafeInteger(response.revision) || (response.revision as number) < 0) {
+      throw new Error("DEV turn owner received an invalid completion fence revision");
+    }
+    return response.revision as number;
+  }
+
+  async commitCompletionFence(token: string, revision: number): Promise<boolean> {
+    const response = await callTurnBroker<{ committed?: unknown }>(this.socketPath, {
+      method: "owner_completion_fence_commit",
+      token,
+      revision,
+    });
+    if (typeof response.committed !== "boolean") {
+      throw new Error("DEV turn owner received an invalid completion fence result");
+    }
+    return response.committed;
   }
 
   async revoke(token: string, _reason?: Error): Promise<void> {

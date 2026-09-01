@@ -750,10 +750,10 @@ class BrowserHost {
     });
     await new Promise((resolve, reject) => {
       let settled = false;
-      let reloadStarted = false;
+      let mainNavigationStarted = false;
       const cleanup = () => {
         clearTimeout(timeout);
-        contents.off("did-start-loading", onStarted);
+        contents.off("did-start-navigation", onStarted);
         contents.off("did-stop-loading", onStopped);
         contents.off("did-finish-load", onFinished);
         contents.off("did-fail-load", onFailed);
@@ -767,9 +767,11 @@ class BrowserHost {
         if (error) reject(error);
         else resolve();
       };
-      const onStarted = () => { reloadStarted = true; };
-      const onStopped = () => { if (reloadStarted) finish(); };
-      const onFinished = () => { if (reloadStarted) finish(); };
+      const onStarted = (details) => {
+        if (details.isMainFrame && !details.isSameDocument) mainNavigationStarted = true;
+      };
+      const onStopped = () => { if (mainNavigationStarted) finish(); };
+      const onFinished = () => { if (mainNavigationStarted) finish(); };
       const onFailed = (_event, errorCode, errorDescription, url, mainFrame) => {
         if (!mainFrame || errorCode === -3) return;
         finish(new Error(`ChatGPT hard refresh failed: ${errorDescription} (${url})`));
@@ -783,7 +785,7 @@ class BrowserHost {
         if (!contents.isDestroyed()) contents.stop();
       }, timeoutMs);
       timeout.unref?.();
-      contents.on("did-start-loading", onStarted);
+      contents.on("did-start-navigation", onStarted);
       contents.on("did-stop-loading", onStopped);
       contents.on("did-finish-load", onFinished);
       contents.on("did-fail-load", onFailed);
@@ -931,7 +933,8 @@ class BrowserHost {
     this.publishState?.(this.snapshot());
   }
 
-  heartbeatTurn(traceId, helperPid) {
+  heartbeatTurn(traceId, helperPid, refreshViewport = false) {
+    if (typeof refreshViewport !== "boolean") throw new Error("refreshViewport is invalid");
     const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
     if (!tab) {
       const closedOwner = this.closedTurnOwners.get(traceId);
@@ -943,6 +946,13 @@ class BrowserHost {
     }
     if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
     tab.lastHeartbeatAt = Date.now();
+    if (refreshViewport) {
+      // Closing an external Playwright CDP session can clear Chromium's effective emulation while
+      // Electron still remembers the old dimensions. Mark the exact owned tab dirty and reapply
+      // the existing hidden-surface contract before a replacement CDP session is allowed to open.
+      tab.deviceEmulationDirty = true;
+      this.syncViewVisibility();
+    }
     return this.snapshot();
   }
 
@@ -1013,7 +1023,6 @@ class BrowserHost {
       { width, height },
     );
     this.boundsReady = true;
-    this.view.setBounds(this.bounds);
     this.authView?.setBounds(this.bounds);
     this.syncViewVisibility();
     void this.view.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
@@ -1079,6 +1088,15 @@ class BrowserHost {
     tab.view.setVisible(visible || tab.status === "running");
   }
 
+  presentPrimaryView(visible) {
+    // The descriptor advertises this exact WebContents for the lifetime of the launcher. Hiding
+    // the native View can make Windows drop it from the remote-debugging target set, leaving a
+    // live descriptor whose ownership id cannot be leased. Keep the View attached and drawable
+    // offscreen; only its placement, never its ownership lifetime, follows the launcher UI.
+    this.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
+    this.view.setVisible(true);
+  }
+
   activateHomeSurface() {
     this.selectedTabId = "home";
     this.syncViewVisibility();
@@ -1092,7 +1110,7 @@ class BrowserHost {
     const visible = windowVisible
       && browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
     const selected = this.selectedTurnTab();
-    this.view.setVisible(visible && !this.authView && !selected);
+    this.presentPrimaryView(visible && !this.authView && !selected);
     for (const tab of this.turnTabs.values()) {
       const tabVisible = visible && !this.authView && selected?.id === tab.id;
       this.presentTurnView(tab, tabVisible);

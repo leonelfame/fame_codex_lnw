@@ -253,6 +253,36 @@ test("browser surface visibility requires both requested and active state", () =
   assert.equal(browserViewVisible(true, true, true), true);
 });
 
+test("descriptor-owned home surface stays attached offscreen while another launcher surface is active", () => {
+  const calls = [];
+  const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    window: {
+      isVisible: () => true,
+      isMinimized: () => false,
+    },
+    visible: false,
+    surfaceActive: false,
+    boundsReady: true,
+    bounds: { x: 200, y: 100, width: 900, height: 650 },
+    hiddenTurnBounds: () => hiddenBounds,
+    view: {
+      setBounds: bounds => calls.push(["bounds", bounds]),
+      setVisible: visible => calls.push(["visible", visible]),
+    },
+    authView: null,
+    turnTabs: new Map(),
+    selectedTurnTab: () => null,
+  });
+
+  BrowserHost.prototype.syncViewVisibility.call(fixture);
+
+  assert.deepEqual(calls, [
+    ["bounds", hiddenBounds],
+    ["visible", true],
+  ]);
+});
+
 test("smoke preserves an already-hydrated Temporary Chat page", () => {
   assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=true"), true);
   assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=false"), false);
@@ -373,13 +403,17 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
       isMinimized: () => false,
       isVisible: () => true,
     },
-    view: { setVisible: visible => events.push(["home", visible]) },
+    view: {
+      setBounds: bounds => events.push(["home-bounds", bounds]),
+      setVisible: visible => events.push(["home-visible", visible]),
+    },
   });
 
   BrowserHost.prototype.syncViewVisibility.call(fixture);
 
   assert.deepEqual(events, [
-    ["home", false],
+    ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
+    ["home-visible", true],
     ["emulate", {
       screenPosition: "desktop",
       screenSize: { width: 1120, height: 720 },
@@ -425,13 +459,17 @@ test("turn tabs use the hidden viewport when the launcher window is hidden", () 
       isMinimized: () => false,
       isVisible: () => false,
     },
-    view: { setVisible: visible => events.push(["home", visible]) },
+    view: {
+      setBounds: bounds => events.push(["home-bounds", bounds]),
+      setVisible: visible => events.push(["home-visible", visible]),
+    },
   });
 
   BrowserHost.prototype.syncViewVisibility.call(fixture);
 
   assert.deepEqual(events, [
-    ["home", false],
+    ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
+    ["home-visible", true],
     ["emulate", {
       screenPosition: "desktop",
       screenSize: { width: 1120, height: 720 },
@@ -511,13 +549,17 @@ test("visible turn tabs establish native bounds before clearing background emula
       isMinimized: () => false,
       isVisible: () => true,
     },
-    view: { setVisible: visible => events.push(["home", visible]) },
+    view: {
+      setBounds: bounds => events.push(["home-bounds", bounds]),
+      setVisible: visible => events.push(["home-visible", visible]),
+    },
   });
 
   BrowserHost.prototype.syncViewVisibility.call(fixture);
 
   assert.deepEqual(events, [
-    ["home", false],
+    ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
+    ["home-visible", true],
     ["bounds", { x: 280, y: 64, width: 840, height: 656 }],
     ["disable-emulation"],
     ["visible", true],
@@ -1326,22 +1368,79 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
     helperPid: 444,
     status: "running",
     lastHeartbeatAt: 1,
+    deviceEmulationDirty: false,
   };
+  let visibilitySyncs = 0;
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]),
     closedTurnOwners: new Map(),
+    syncViewVisibility: () => { visibilitySyncs += 1; },
     snapshot: () => ({ activeTabId: tab.id }),
   });
 
   const before = Date.now();
-  const snapshot = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid);
+  const snapshot = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
 
   assert.deepEqual(snapshot, { activeTabId: tab.id });
   assert.ok(tab.lastHeartbeatAt >= before);
+  assert.equal(tab.deviceEmulationDirty, true);
+  assert.equal(visibilitySyncs, 1);
   assert.throws(
     () => BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, 445),
     /ownership mismatch: expected 444, received 445/,
   );
+  assert.throws(
+    () => BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, "yes"),
+    /refreshViewport is invalid/,
+  );
+});
+
+test("a viewport-refresh heartbeat reapplies hidden emulation before CDP reconnect", () => {
+  const events = [];
+  const tab = {
+    id: "tab-refresh-viewport",
+    traceId: "trace_refresh_viewport",
+    helperPid: 446,
+    status: "running",
+    lastHeartbeatAt: 1,
+    rendererReady: true,
+    deviceEmulationViewport: { width: 1120, height: 720 },
+    deviceEmulationDirty: false,
+    view: {
+      setBounds: bounds => events.push(["bounds", bounds]),
+      setVisible: visible => events.push(["visible", visible]),
+      webContents: {
+        enableDeviceEmulation: options => events.push(["emulate", options]),
+        disableDeviceEmulation: () => events.push(["disable-emulation"]),
+      },
+    },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    visible: false,
+    surfaceActive: true,
+    boundsReady: true,
+    bounds: { x: 280, y: 64, width: 840, height: 656 },
+    selectedTabId: tab.id,
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    authView: null,
+    window: {
+      getContentSize: () => [1120, 720],
+      isMinimized: () => false,
+      isVisible: () => false,
+    },
+    view: {
+      setBounds: bounds => events.push(["home-bounds", bounds]),
+      setVisible: visible => events.push(["home-visible", visible]),
+    },
+    snapshot: () => ({ activeTabId: tab.id }),
+  });
+
+  BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
+
+  assert.equal(events.filter(([kind]) => kind === "emulate").length, 1);
+  assert.deepEqual(tab.deviceEmulationViewport, { width: 1120, height: 720 });
+  assert.equal(tab.deviceEmulationDirty, false);
 });
 
 test("an uninitialized browser surface is reaped instead of remaining as a gray orphan tab", () => {
@@ -1389,8 +1488,9 @@ test("an uninitialized browser surface is reaped instead of remaining as a gray 
   }]]);
 });
 
-test("removing the final turn tab hides an uninitialized idle host instead of exposing gray content", () => {
+test("removing the final turn tab keeps the descriptor-owned idle host attached offscreen", () => {
   const calls = [];
+  const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
   const tab = {
     id: "tab-gray-host",
     traceId: "trace_gray_host",
@@ -1407,10 +1507,24 @@ test("removing the final turn tab hides an uninitialized idle host instead of ex
     turnTabs: new Map([[tab.id, tab]]),
     closedTurnOwners: new Map(),
     selectedTabId: tab.id,
-    window: { contentView: { removeChildView: () => calls.push("view-remove") } },
-    view: { webContents: { getURL: () => IDLE_BROWSER_URL } },
-    syncViewVisibility() {},
-    hide: () => calls.push("hide"),
+    visible: true,
+    surfaceActive: true,
+    boundsReady: true,
+    bounds: { x: 200, y: 100, width: 900, height: 650 },
+    window: {
+      contentView: { removeChildView: () => calls.push("view-remove") },
+      isVisible: () => true,
+      isMinimized: () => false,
+    },
+    view: {
+      setBounds: bounds => calls.push(["home-bounds", bounds]),
+      setVisible: visible => calls.push(["home-visible", visible]),
+      webContents: { getURL: () => IDLE_BROWSER_URL },
+    },
+    hiddenTurnBounds: () => hiddenBounds,
+    authView: null,
+    syncPowerSaveBlocker() {},
+    setState() {},
     snapshot: () => ({ tabs: [] }),
     publishState() {},
     writeDescriptor() {},
@@ -1418,7 +1532,16 @@ test("removing the final turn tab hides an uninitialized idle host instead of ex
 
   BrowserHost.prototype.removeTurnTab.call(fixture, tab, false);
 
-  assert.deepEqual(calls, ["view-remove", "contents-close", "hide"]);
+  assert.equal(fixture.selectedTabId, "home");
+  assert.equal(fixture.visible, false);
+  assert.deepEqual(calls, [
+    "view-remove",
+    "contents-close",
+    ["home-bounds", hiddenBounds],
+    ["home-visible", true],
+    ["home-bounds", hiddenBounds],
+    ["home-visible", true],
+  ]);
 });
 
 test("hard refresh accepts Chromium's completed loading cycle even without did-finish-load", async () => {
@@ -1428,7 +1551,11 @@ test("hard refresh accepts Chromium's completed loading cycle even without did-f
   contents.reloadIgnoringCache = () => {
     calls.push("reload");
     queueMicrotask(() => {
-      contents.emit("did-start-loading");
+      contents.emit("did-start-navigation", {
+        url: "https://chatgpt.com/?temporary-chat=true",
+        isMainFrame: true,
+        isSameDocument: false,
+      });
       contents.emit("did-stop-loading");
     });
   };
@@ -1441,7 +1568,43 @@ test("hard refresh accepts Chromium's completed loading cycle even without did-f
   await fixture.hardRefreshHome(100);
 
   assert.deepEqual(calls.filter(call => call === "reload" || call === "stop"), ["reload"]);
-  assert.equal(contents.listenerCount("did-start-loading"), 0);
+  assert.equal(contents.listenerCount("did-start-navigation"), 0);
+  assert.equal(contents.listenerCount("did-stop-loading"), 0);
+  assert.equal(contents.listenerCount("did-finish-load"), 0);
+});
+
+test("hard refresh ignores an old loading stop before its own main-frame navigation", async () => {
+  const calls = [];
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.reloadIgnoringCache = () => {
+    calls.push("reload");
+    queueMicrotask(() => {
+      contents.emit("did-stop-loading");
+      contents.emit("did-start-navigation", {
+        url: "https://chatgpt.com/?temporary-chat=true",
+        isMainFrame: false,
+        isSameDocument: false,
+      });
+      contents.emit("did-finish-load");
+      contents.emit("did-start-navigation", {
+        url: "https://chatgpt.com/?temporary-chat=true",
+        isMainFrame: true,
+        isSameDocument: false,
+      });
+      contents.emit("did-stop-loading");
+    });
+  };
+  contents.stop = () => calls.push("stop");
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: contents },
+    setState: patch => calls.push(["state", patch]),
+  });
+
+  await fixture.hardRefreshHome(100);
+
+  assert.deepEqual(calls.filter(call => call === "reload" || call === "stop"), ["reload"]);
+  assert.equal(contents.listenerCount("did-start-navigation"), 0);
   assert.equal(contents.listenerCount("did-stop-loading"), 0);
   assert.equal(contents.listenerCount("did-finish-load"), 0);
 });
@@ -1449,7 +1612,7 @@ test("hard refresh accepts Chromium's completed loading cycle even without did-f
 test("hard refresh timeout cannot become success when stopping emits did-stop-loading", async () => {
   const contents = new EventEmitter();
   contents.isDestroyed = () => false;
-  contents.reloadIgnoringCache = () => queueMicrotask(() => contents.emit("did-start-loading"));
+  contents.reloadIgnoringCache = () => {};
   contents.stop = () => contents.emit("did-stop-loading");
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     view: { webContents: contents },
@@ -1640,7 +1803,7 @@ test("selecting a task tab shows and focuses its owned Playwright surface", () =
 
   assert.equal(fixture.selectedTabId, second.id);
   assert.deepEqual(visibility, [
-    ["home", false],
+    ["home", true],
     ["first", true],
     ["second", true],
   ]);

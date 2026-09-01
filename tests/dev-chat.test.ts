@@ -76,6 +76,49 @@ test("remote outer harness owns a turn through the live broker protocol", async 
   }
 });
 
+test("disconnecting a remote owner_next removes its broker waiter", async () => {
+  const root = scratch("cgw-dev-owner-waiter");
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  const remote = new RemoteTurnBroker(socketPath);
+  await broker.listen();
+  const environment = {
+    cwd: root,
+    roots: [root],
+    writableRoots: [root],
+    sandboxPolicy: { type: "dangerFullAccess" as const },
+    tools: [{ name: "exec_command", description: "Command", parameters: { type: "object" } }],
+  };
+  const token = await remote.register(environment, 60_000, "remote-waiter-test");
+  try {
+    const abandoned = new AbortController();
+    const firstWait = remote.nextToolBatch(token, abandoned.signal);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    abandoned.abort();
+    await expect(firstWait).rejects.toMatchObject({ name: "AbortError" });
+
+    const secondWait = remote.nextToolBatch(token);
+    const activityId = "activity_remote_waiter_000001";
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, {
+      method: "claim",
+      token,
+      activityId,
+    });
+    const invocation = callTurnBroker<BrokerToolResult>(socketPath, {
+      method: "invoke",
+      bindingId: claimed.bindingId,
+      wireName: "exec_command",
+      arguments: { cmd: "pwd" },
+    }, 10_000);
+    const [request] = await secondWait;
+    broker.completeTool(token, request!.callId, { content: [{ type: "text", text: "ok" }] });
+    await invocation;
+    await callTurnBroker(socketPath, { method: "activity_complete", token, activityId });
+  } finally {
+    await broker.close();
+  }
+});
+
 test("named DEV state and deterministic context filler persist independently", () => {
   const root = scratch("cgw-dev-store");
   const store = new DevChatStore(join(root, "chats"));
@@ -221,7 +264,7 @@ test("DEV chat attaches its broker to the launcher-owned tunnel without a Respon
     });
     expect(transport.config).toBe(config);
     expect(await callTurnBroker(transport.config.brokerSocketPath, { method: "owner_status" }))
-      .toMatchObject({ protocolVersion: 1 });
+      .toMatchObject({ protocolVersion: 2 });
     expect(await (await fetch(`http://127.0.0.1:${occupied.port}`)).text()).toBe("normal Codex route");
   } finally {
     await transport?.close();
@@ -289,12 +332,21 @@ test("DEV driver uses shared browser methods and its own broker while an unrelat
       if (!token) throw new Error("missing DEV broker token");
       const claimed = await callTurnBroker<{ bindingId: string }>(config.brokerSocketPath, { method: "claim", token });
       turn.onReasoningSummary?.("Exercising the real broker round");
-      const result = await callTurnBroker<BrokerToolResult>(config.brokerSocketPath, {
+      const progress = turn.externalProgress;
+      if (!progress) throw new Error("DEV tool-capable browser has no progress transport");
+      const previousBatchRevision = progress.snapshot().lastToolBatchRevision;
+      const invocation = callTurnBroker<BrokerToolResult>(config.brokerSocketPath, {
         method: "invoke",
         bindingId: claimed.bindingId,
         wireName: "exec_command",
         arguments: { cmd: "git status --short" },
       }, 30_000);
+      let snapshot = progress.snapshot();
+      while (snapshot.lastToolBatchRevision <= previousBatchRevision) {
+        snapshot = await progress.waitForChange(snapshot.revision, turn.abortSignal);
+      }
+      await progress.acknowledgeToolBatch(snapshot.lastToolBatchRevision);
+      const result = await invocation;
       const simulated = (result.structuredContent as { simulated: boolean }).simulated;
       const answer = `DEV receipt simulated=${simulated}`;
       turn.onTextDelta(answer);

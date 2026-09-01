@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { parseDataUrl } from "../image";
 import type {
   CodexContentPart,
@@ -48,19 +49,37 @@ function toolResult(message: CodexToolResultMessage): BrokerToolResult {
   };
 }
 
-function withActiveCompactionInstruction(result: BrokerToolResult): BrokerToolResult {
+const ACTIVE_COMPACTION_RESPONSE_MARKER_PREFIX = "CODEX_ACTIVE_COMPACTION_CHECKPOINT_";
+
+function createActiveCompactionResponseMarker(): string {
+  return `${ACTIVE_COMPACTION_RESPONSE_MARKER_PREFIX}${randomBytes(16).toString("hex")}`;
+}
+
+function activeCompactionCheckpoint(answer: string, responseMarker: string): string | undefined {
+  const lineEnd = answer.indexOf("\n");
+  const firstLine = (lineEnd < 0 ? answer : answer.slice(0, lineEnd)).replace(/\r$/, "");
+  if (firstLine !== responseMarker) return undefined;
+  const summary = (lineEnd < 0 ? "" : answer.slice(lineEnd + 1)).trim();
+  if (!summary) throw new Error("The active ChatGPT response returned an empty marked compaction summary");
+  return summary;
+}
+
+function withActiveCompactionInstruction(
+  result: BrokerToolResult,
+  responseMarker: string,
+): BrokerToolResult {
   return {
     ...result,
     content: [
       ...result.content,
-      { type: "text", text: activeCompactionToolResultInstruction() },
+      { type: "text", text: activeCompactionToolResultInstruction(responseMarker) },
     ],
   };
 }
 
-function interruptedByActiveCompaction(): BrokerToolResult {
+function interruptedByActiveCompaction(responseMarker: string): BrokerToolResult {
   return {
-    content: [{ type: "text", text: activeCompactionToolResultInstruction(false) }],
+    content: [{ type: "text", text: activeCompactionToolResultInstruction(responseMarker, false) }],
     isError: true,
   };
 }
@@ -130,7 +149,8 @@ export async function settleActiveCompactionSource(
   let token: string | undefined;
   try {
     token = await source.runtime.token;
-    const interruptedQueued = broker.requestCompaction(token, interruptedByActiveCompaction());
+    const responseMarker = createActiveCompactionResponseMarker();
+    const interruptedQueued = broker.requestCompaction(token, interruptedByActiveCompaction(responseMarker));
     for (const [index, request] of outstanding.entries()) {
       const result = results.get(request.callId)!;
       const canonical = toolResult(result);
@@ -138,7 +158,7 @@ export async function settleActiveCompactionSource(
         token,
         request.callId,
         interruptedQueued === 0 && index === outstanding.length - 1
-          ? withActiveCompactionInstruction(canonical)
+          ? withActiveCompactionInstruction(canonical, responseMarker)
           : canonical,
       );
       source.runtime.externalProgress.recordToolResult();
@@ -152,9 +172,7 @@ export async function settleActiveCompactionSource(
     const instructionDelivered = outstanding.length > 0
       || broker.compactionDeliveryCount(token) > 0;
     if (!instructionDelivered) return undefined;
-    const summary = browserOutcome.answer.trim();
-    if (!summary) throw new Error("The active ChatGPT response returned an empty compaction summary");
-    return summary;
+    return activeCompactionCheckpoint(browserOutcome.answer, responseMarker);
   } finally {
     if (token) await broker.revoke(token);
   }

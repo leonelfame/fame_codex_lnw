@@ -25,6 +25,9 @@ interface PendingTurn {
 type HelperMessage =
   | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
+  | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
+  | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
+  | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
   | { type: "result"; id: string; text: string }
@@ -58,6 +61,31 @@ function parseHelperMessage(line: string): HelperMessage {
   }
   if (message.type === "event") {
     const event = message.event;
+    if (event === "tool_batch_observed") {
+      if (!Number.isSafeInteger(message.revision) || (message.revision as number) <= 0) {
+        throw new Error("Launcher browser helper tool-boundary revision is invalid");
+      }
+      return { type: "event", id: message.id, event, revision: message.revision as number };
+    }
+    if (event === "completion_fence_begin") {
+      if (!Number.isSafeInteger(message.requestId) || (message.requestId as number) <= 0) {
+        throw new Error("Launcher browser helper completion fence request id is invalid");
+      }
+      return { type: "event", id: message.id, event, requestId: message.requestId as number };
+    }
+    if (event === "completion_fence_commit") {
+      if (!Number.isSafeInteger(message.requestId) || (message.requestId as number) <= 0
+        || !Number.isSafeInteger(message.revision) || (message.revision as number) < 0) {
+        throw new Error("Launcher browser helper completion fence revision is invalid");
+      }
+      return {
+        type: "event",
+        id: message.id,
+        event,
+        requestId: message.requestId as number,
+        revision: message.revision as number,
+      };
+    }
     if (event === "luna_checkpoint") {
       if (typeof message.answerHash !== "string" || !/^[a-f0-9]{64}$/.test(message.answerHash)) {
         throw new Error("Launcher browser helper Luna checkpoint answer hash is invalid");
@@ -176,6 +204,16 @@ export class LauncherBrowserHelperClient {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await this.ensureChild();
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (turn.externalProgress && !this.helperFeatures.has("tool-boundary-ack")) {
+      throw new Error(
+        "Launcher browser helper does not support causal Codex tool-boundary acknowledgement; update or restart the launcher",
+      );
+    }
+    if (turn.externalProgress && !this.helperFeatures.has("completion-fence")) {
+      throw new Error(
+        "Launcher browser helper does not support the MCP completion fence; update or restart the launcher",
+      );
+    }
     return await new Promise<string>((resolveResult, rejectResult) => {
         if (this.pending.has(turn.traceId)) {
           rejectResult(new Error(`Duplicate launcher browser turn: ${turn.traceId}`));
@@ -233,6 +271,7 @@ export class LauncherBrowserHelperClient {
             ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
             ...(turn.compaction ? { compaction: true } : {}),
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
+            ...(turn.externalProgress ? { externalProgress: true } : {}),
           },
         })
           // Only mirror once the run frame is on the wire, so the helper never sees progress for a
@@ -357,6 +396,70 @@ export class LauncherBrowserHelperClient {
     if (!pending) return;
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
+      else if (message.event === "tool_batch_observed") {
+        const progress = pending.turn.externalProgress;
+        if (!progress) {
+          this.abortWithLocalFailure(
+            message.id,
+            new Error("Launcher browser helper observed a tool boundary for a turn without progress transport"),
+            pending,
+          );
+          return;
+        }
+        void progress.acknowledgeToolBatch(message.revision).catch(error => this.abortWithLocalFailure(
+          message.id,
+          error instanceof Error ? error : new Error(String(error)),
+          pending,
+        ));
+      }
+      else if (message.event === "completion_fence_begin") {
+        const fence = pending.turn.completionFence;
+        if (!fence) {
+          this.abortWithLocalFailure(
+            message.id,
+            new Error("Launcher browser helper requested a completion fence for an unfenced turn"),
+            pending,
+          );
+          return;
+        }
+        void fence.begin().then(revision => {
+          if (this.pending.get(message.id) !== pending || pending.localFailure || pending.turn.abortSignal?.aborted) return;
+          return this.send({
+            type: "completion_fence_begin_ack",
+            id: message.id,
+            requestId: message.requestId,
+            revision: revision ?? null,
+          });
+        }).catch(error => this.abortWithLocalFailure(
+          message.id,
+          error instanceof Error ? error : new Error(String(error)),
+          pending,
+        ));
+      }
+      else if (message.event === "completion_fence_commit") {
+        const fence = pending.turn.completionFence;
+        if (!fence) {
+          this.abortWithLocalFailure(
+            message.id,
+            new Error("Launcher browser helper requested a completion fence for an unfenced turn"),
+            pending,
+          );
+          return;
+        }
+        void fence.commit(message.revision).then(committed => {
+          if (this.pending.get(message.id) !== pending || pending.localFailure || pending.turn.abortSignal?.aborted) return;
+          return this.send({
+            type: "completion_fence_commit_ack",
+            id: message.id,
+            requestId: message.requestId,
+            committed,
+          });
+        }).catch(error => this.abortWithLocalFailure(
+          message.id,
+          error instanceof Error ? error : new Error(String(error)),
+          pending,
+        ));
+      }
       else if (message.event === "send_activated") {
         void Promise.resolve().then(() => pending.turn.onSendActivated?.()).then(() => {
           if (this.pending.get(message.id) !== pending) return;

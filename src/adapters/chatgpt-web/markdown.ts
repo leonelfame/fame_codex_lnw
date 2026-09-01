@@ -21,6 +21,14 @@ turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",
   replacement: () => "",
 });
+turndown.addRule("linkInlineFilePaths", {
+  filter: node => inlineFilePath(node) !== undefined,
+  replacement: (_content, node) => {
+    const path = node.textContent!;
+    const target = path.replaceAll("\\", "/");
+    return `[${path}](<${target}>)`;
+  },
+});
 turndown.addRule("compactListItem", {
   filter: "li",
   replacement: (content, node, options) => {
@@ -37,6 +45,25 @@ turndown.addRule("compactListItem", {
     return `${prefix}${normalized}${node.nextSibling ? "\n" : ""}`;
   },
 });
+
+function inlineFilePath(node: Node): string | undefined {
+  if (node.nodeName !== "CODE") return undefined;
+  for (let ancestor = node.parentNode; ancestor; ancestor = ancestor.parentNode) {
+    if (["A", "PRE"].includes(ancestor.nodeName)) return undefined;
+  }
+
+  const path = node.textContent ?? "";
+  if (path !== path.trim() || /[\s`<>()[\]]/.test(path)) return undefined;
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(path)) return undefined;
+
+  const withoutLocation = path.replace(/:\d+(?::\d+)?$/, "");
+  const separator = Math.max(withoutLocation.lastIndexOf("/"), withoutLocation.lastIndexOf("\\"));
+  if (separator < 0) return undefined;
+
+  const basename = withoutLocation.slice(separator + 1);
+  if (!/\.[a-z\d][a-z\d._-]*$/i.test(basename)) return undefined;
+  return path;
+}
 
 function preserveObsidianWikiLinks(markdown: string): string {
   // Turndown escapes literal brackets, but Codex interprets the resulting `\[` as LaTeX.

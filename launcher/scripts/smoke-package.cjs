@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const artifactsDirectory = path.join(launcherRoot, "artifacts");
@@ -123,9 +124,17 @@ try {
   const installedManifest = JSON.parse(
     fs.readFileSync(path.join(installedRuntime, "manifest.json"), "utf8"),
   );
-  if (installedManifest.appVersion !== expectedVersion
+  validateRuntimeBundle(installedRuntime, {
+    version: expectedVersion,
+    platform: process.platform,
+    arch: process.arch,
+  });
+  if (installedManifest.schemaVersion !== 2
+    || installedManifest.appVersion !== expectedVersion
     || installedManifest.platform !== process.platform
     || installedManifest.arch !== process.arch
+    || !Array.isArray(installedManifest.files)
+    || installedManifest.files.length === 0
     || !/^[a-f0-9]{64}$/.test(installedManifest.bundleId)) {
     throw new Error(`Packaged launcher installed the wrong durable runtime: ${JSON.stringify(installedManifest)}`);
   }

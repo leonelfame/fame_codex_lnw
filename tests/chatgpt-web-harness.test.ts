@@ -38,7 +38,7 @@ test("current-turn MCP progress tracks active calls without claiming completion"
   expect(chatGptExternalProgressIsLive(progress.snapshot(), 1_000, 60_000)).toBeFalse();
 
   const changed = progress.waitForChange(0);
-  progress.recordToolBatch(2, 1_000);
+  const toolBatchRevision = progress.recordToolBatch(2, 1_000);
   expect(await changed).toEqual({
     revision: 1,
     lastToolBatchRevision: 1,
@@ -46,6 +46,9 @@ test("current-turn MCP progress tracks active calls without claiming completion"
     lastProgressAt: 1_000,
   });
   expect(chatGptExternalProgressIsLive(progress.snapshot(), 100_000, 60_000)).toBeTrue();
+  const observed = progress.waitForToolBatchObservation(toolBatchRevision);
+  await progress.acknowledgeToolBatch(toolBatchRevision);
+  await expect(observed).resolves.toBeUndefined();
 
   progress.recordToolResult(2_000);
   progress.recordToolResult(3_000);
@@ -90,6 +93,22 @@ function brokerTestEndpoint(name: string): string {
     : join(tmpdir(), `${name}.sock`);
 }
 
+async function invokeAfterBrowserBoundary<T>(
+  turn: BrowserTurn,
+  invoke: () => Promise<T>,
+): Promise<T> {
+  const progress = turn.externalProgress;
+  if (!progress) throw new Error("tool-capable browser test has no progress transport");
+  const previousBatchRevision = progress.snapshot().lastToolBatchRevision;
+  const invocation = invoke();
+  let snapshot = progress.snapshot();
+  while (snapshot.lastToolBatchRevision <= previousBatchRevision) {
+    snapshot = await progress.waitForChange(snapshot.revision, turn.abortSignal);
+  }
+  await progress.acknowledgeToolBatch(snapshot.lastToolBatchRevision);
+  return await invocation;
+}
+
 interface GatewayProgramCall {
   name: string;
   input: unknown;
@@ -99,27 +118,40 @@ async function executeGatewayProgram(
   program: string,
   availableToolNames: string[],
   calls: GatewayProgramCall[],
-): Promise<void> {
-  const nestedTools = Object.fromEntries(availableToolNames.map(name => [
+  dynamicRegistry = false,
+): Promise<Array<{ type: "text"; text: string }>> {
+  const emitted: Array<{ type: "text"; text: string }> = [];
+  const implementations = Object.fromEntries(availableToolNames.map(name => [
     name,
     async (input: unknown) => {
       calls.push({ name, input });
       return { output: name, exit_code: 0 };
     },
   ]));
+  const nestedTools = dynamicRegistry
+    ? new Proxy(Object.create(null) as Record<string, unknown>, {
+      get: (_target, name) => typeof name === "string" ? implementations[name] : undefined,
+      has: (_target, name) => typeof name === "string" && name in implementations,
+      ownKeys: () => [],
+    })
+    : implementations;
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
     ...args: string[]
   ) => (...values: unknown[]) => Promise<void>;
   const execute = new AsyncFunction("tools", "ALL_TOOLS", "text", "image", "audio", "generatedImage", program);
+  const emitText = (value: unknown): void => {
+    emitted.push({ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) });
+  };
   const ignoreOutput = (_value: unknown): void => {};
   await execute(
     nestedTools,
     availableToolNames.map(name => ({ name, description: `${name} test tool` })),
-    ignoreOutput,
+    emitText,
     ignoreOutput,
     ignoreOutput,
     ignoreOutput,
   );
+  return emitted;
 }
 
 function parsed(developerText?: string): CodexParsedRequest {
@@ -1264,6 +1296,7 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(compiled.text).toContain('"version":3');
     expect(compiled.text).toContain("use the attached Codex Native tools directly according to their declared descriptions and schemas");
     expect(compiled.text).toContain("Use actual Codex Native results as evidence");
+    expect(compiled.text).toContain("Write the user-facing final answer only after the last required tool result has settled");
     expect(compiled.text.match(/turn_123456789012345678901234/g)).toHaveLength(1);
     expect(compiled.text).not.toContain("codex_bind_turn");
     expect(compiled.text).not.toContain("binding_id");
@@ -1828,6 +1861,72 @@ describe("ChatGPT outer-native harness v4", () => {
     await broker.close();
   });
 
+  test("commits browser completion only across an unchanged broker activity fence", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-terminal-fence-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const token = await broker.register(
+      extractChatGptTurnEnvironment(parsed(environmentXml)),
+      10_000,
+      "terminal-fence",
+    );
+
+    expect(broker.beginCompletionFence(token)).toBe(0);
+    const first = await callTurnBroker<{ bindingId: string; activityId: string }>(socketPath, {
+      method: "claim",
+      token,
+    });
+    expect(broker.beginCompletionFence(token)).toBeUndefined();
+    expect(broker.commitCompletionFence(token, 0)).toBeFalse();
+    await callTurnBroker(socketPath, {
+      method: "activity_complete",
+      token,
+      activityId: first.activityId,
+    });
+
+    const revision = broker.beginCompletionFence(token);
+    expect(revision).toBe(2);
+    const crossing = await callTurnBroker<{ bindingId: string; activityId: string }>(socketPath, {
+      method: "claim",
+      token,
+    });
+    await callTurnBroker(socketPath, {
+      method: "activity_complete",
+      token,
+      activityId: crossing.activityId,
+    });
+    expect(broker.commitCompletionFence(token, revision!)).toBeFalse();
+
+    const finalRevision = broker.beginCompletionFence(token);
+    expect(finalRevision).toBe(4);
+    expect(broker.commitCompletionFence(token, finalRevision!)).toBeTrue();
+    await expect(callTurnBroker(socketPath, { method: "claim", token }))
+      .rejects.toThrow("has already finished");
+    await broker.close();
+  });
+
+  test("activity cleanup is idempotent and tombstones an ambiguously delayed claim", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-activity-tombstone-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const token = await broker.register(
+      extractChatGptTurnEnvironment(parsed(environmentXml)),
+      10_000,
+      "activity-tombstone",
+    );
+    const delayed = "activity_delayed_claim_00000001";
+    await callTurnBroker(socketPath, { method: "activity_complete", token, activityId: delayed });
+    await callTurnBroker(socketPath, { method: "activity_complete", token, activityId: delayed });
+    expect(broker.beginCompletionFence(token)).toBe(1);
+    await expect(callTurnBroker(socketPath, { method: "claim", token, activityId: delayed }))
+      .rejects.toThrow("already completed");
+
+    const ordinary = "activity_ordinary_claim_0000001";
+    await callTurnBroker(socketPath, { method: "claim", token, activityId: ordinary });
+    await callTurnBroker(socketPath, { method: "activity_complete", token, activityId: ordinary });
+    await callTurnBroker(socketPath, { method: "activity_complete", token, activityId: ordinary });
+    expect(broker.beginCompletionFence(token)).toBe(3);
+    await broker.close();
+  });
+
   test("batches parallel ChatGPT MCP calls into one native Responses round", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-parallel-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
@@ -1887,13 +1986,13 @@ describe("ChatGPT outer-native harness v4", () => {
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
-        const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+        const nativeResult = await invokeAfterBrowserBoundary(turn, () => callTurnBroker<BrokerToolResult>(socketPath, {
           method: "invoke",
           bindingId: claimed.bindingId,
           wireName: "exec_command",
           freeform: false,
           arguments: { cmd: "collect-large-evidence", workdir: tempRoot },
-        }, 30_000);
+        }, 30_000));
         const output = (nativeResult.structuredContent as { output: string }).output;
         turn.onTextDelta("Evidence bytes: ");
         turn.onTextDelta(String(output.length));
@@ -2015,13 +2114,13 @@ describe("ChatGPT outer-native harness v4", () => {
         if (prepared.text.includes("The project was inspected and the pending command completed.")) {
           continuationTurnToken = token;
           turn.onReasoningSummary?.("Resumed from the compacted Codex history");
-          const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+          const nativeResult = await invokeAfterBrowserBoundary(turn, () => callTurnBroker<BrokerToolResult>(socketPath, {
             method: "invoke",
             bindingId: claimed.bindingId,
             wireName: "exec_command",
             freeform: false,
             arguments: { cmd: "git status --short", workdir: tempRoot },
-          }, 30_000);
+          }, 30_000));
           turn.onReasoningSummary?.("Verified the continued task");
           const answer = `## Browser final\n\nStatus: ${(nativeResult.structuredContent as { output: string }).output}`;
           turn.onTextDelta("## Browser final");
@@ -2032,17 +2131,20 @@ describe("ChatGPT outer-native harness v4", () => {
         originalTurnToken = token;
         turn.onReasoningSummary?.("Mapped the repository surface");
         turn.onReasoningSummary?.("Inspected the working directory");
-        const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+        const nativeResult = await invokeAfterBrowserBoundary(turn, () => callTurnBroker<BrokerToolResult>(socketPath, {
           method: "invoke",
           bindingId: claimed.bindingId,
           wireName: "exec_command",
           freeform: false,
           arguments: { cmd: "pwd", workdir: tempRoot },
-        }, 30_000);
+        }, 30_000));
         originalBrowserReceivedToolResult = true;
         if (JSON.stringify(nativeResult.content).includes(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER)) {
+          const responseMarker = JSON.stringify(nativeResult.content)
+            .match(/CODEX_ACTIVE_COMPACTION_CHECKPOINT_[a-f0-9]{32}/)?.[0];
+          if (!responseMarker) throw new Error("active compaction response marker missing");
           originalBrowserStopped = true;
-          return "The project was inspected and the pending command completed.";
+          return `${responseMarker}\nThe project was inspected and the pending command completed.`;
         }
         return `stale browser continued with ${(nativeResult.structuredContent as { output: string }).output}`;
       } finally {
@@ -2237,13 +2339,13 @@ describe("ChatGPT outer-native harness v4", () => {
         if (!token) throw new Error("turn token missing from compiled Pro prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
         turn.onReasoningSummary?.("Pro requested live workspace evidence");
-        const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
+        const nativeResult = await invokeAfterBrowserBoundary(turn, () => callTurnBroker<BrokerToolResult>(socketPath, {
           method: "invoke",
           bindingId: claimed.bindingId,
           wireName: "exec_command",
           freeform: false,
           arguments: { cmd: "pwd", workdir: tempRoot },
-        }, 30_000);
+        }, 30_000));
         const output = (nativeResult.structuredContent as { output: string }).output;
         turn.onReasoningSummary?.("Pro received the native tool result");
         turn.onTextDelta("## Pro result");
@@ -2479,6 +2581,185 @@ describe("ChatGPT outer-native harness v4", () => {
       expect((await firstExec).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
       expect((await secondExec).structuredContent).toEqual({ output: "clean", exit_code: 0 });
 
+      const inventoryThroughGateway = async (
+        query: string,
+        includeSchema: boolean,
+        nestedToolNames: string[],
+      ) => {
+        const pending = call("codex_tool_inventory", {
+          turn_token: token,
+          query,
+          include_schema: includeSchema,
+        });
+        const [request] = await broker.nextToolBatch(token);
+        expect(request).toMatchObject({ wireName: "exec", freeform: true });
+        const gatewayCalls: GatewayProgramCall[] = [];
+        const content = await executeGatewayProgram(request!.input!, nestedToolNames, gatewayCalls);
+        expect(gatewayCalls).toEqual([]);
+        broker.completeTool(token, request!.callId, { content });
+        return await pending;
+      };
+
+      // Regression for #274: even an empty inventory query crosses the broker through the native
+      // exec gateway, so the browser observes a real tool boundary before the model plans its next
+      // call instead of retiring the token during an invisible local MCP response.
+      const emptyGatewayInventory = await inventoryThroughGateway(
+        "clink opencode pal",
+        false,
+        ["exec", "web__run", "multi_agent_v1__wait_agent"],
+      );
+      expect(emptyGatewayInventory.structuredContent).toEqual({
+        tools: [],
+        total: 0,
+        next_offset: null,
+      });
+
+      const rawGatewayInventory = await inventoryThroughGateway(
+        "Run nested Codex tools",
+        false,
+        ["exec", "web__run", "mcp__codex_apps__codex_native2_codex_exec"],
+      );
+      expect(rawGatewayInventory.structuredContent).toMatchObject({
+        tools: [{
+          wire_name: "exec",
+          name: "exec",
+          kind: "freeform",
+          description: expect.stringContaining("enforced for wait_agent calls made inside exec"),
+        }],
+        total: 1,
+        next_offset: null,
+      });
+
+      const rejectedRawGateway = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "exec",
+        input: "await tools.multi_agent_v1__wait_agent({ targets: ['agent_test'], timeout_ms: 180000 });",
+      });
+      const [rejectedRawGatewayRequest] = await broker.nextToolBatch(token);
+      expect(rejectedRawGatewayRequest).toMatchObject({ wireName: "exec", freeform: true });
+      const rejectedRawGatewayCalls: GatewayProgramCall[] = [];
+      await expect(executeGatewayProgram(
+        rejectedRawGatewayRequest!.input!,
+        ["multi_agent_v1__wait_agent"],
+        rejectedRawGatewayCalls,
+      )).rejects.toThrow("requires timeout_ms=10000");
+      expect(rejectedRawGatewayCalls).toEqual([]);
+      const guardedError = "ChatGPT Web wait_agent requires timeout_ms=10000";
+      broker.completeTool(token, rejectedRawGatewayRequest!.callId, {
+        content: [{ type: "text", text: guardedError }],
+        isError: true,
+      });
+      expect((await rejectedRawGateway).isError).toBe(true);
+
+      const rawWeb = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "exec",
+        input: "const value = await tools.web__run({ search_query: [{ q: 'Codex' }] }); text(value);",
+      });
+      const [rawWebRequest] = await broker.nextToolBatch(token);
+      const rawWebCalls: GatewayProgramCall[] = [];
+      const rawWebContent = await executeGatewayProgram(
+        rawWebRequest!.input!,
+        ["web__run"],
+        rawWebCalls,
+        true,
+      );
+      expect(rawWebCalls).toEqual([{
+        name: "web__run",
+        input: { search_query: [{ q: "Codex" }] },
+      }]);
+      broker.completeTool(token, rawWebRequest!.callId, { content: rawWebContent });
+      expect((await rawWeb).content).toEqual([{
+        type: "text",
+        text: JSON.stringify({ output: "web__run", exit_code: 0 }),
+      }]);
+
+      const rawVendorExec = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "exec",
+        input: "const value = await tools.vendor__exec({ task: 'safe' }); text(value);",
+      });
+      const [rawVendorExecRequest] = await broker.nextToolBatch(token);
+      const rawVendorExecCalls: GatewayProgramCall[] = [];
+      const rawVendorExecContent = await executeGatewayProgram(
+        rawVendorExecRequest!.input!,
+        ["vendor__exec"],
+        rawVendorExecCalls,
+        true,
+      );
+      expect(rawVendorExecCalls).toEqual([{ name: "vendor__exec", input: { task: "safe" } }]);
+      broker.completeTool(token, rawVendorExecRequest!.callId, { content: rawVendorExecContent });
+      expect((await rawVendorExec).isError).not.toBe(true);
+
+      const recursiveRawExec = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "exec",
+        input: "await tools.exec('text(\"nested\")');",
+      });
+      const [recursiveRawExecRequest] = await broker.nextToolBatch(token);
+      const recursiveRawExecCalls: GatewayProgramCall[] = [];
+      await expect(executeGatewayProgram(
+        recursiveRawExecRequest!.input!,
+        ["exec"],
+        recursiveRawExecCalls,
+      )).rejects.toThrow("Nested raw exec is unavailable");
+      expect(recursiveRawExecCalls).toEqual([]);
+      broker.completeTool(token, recursiveRawExecRequest!.callId, {
+        content: [{ type: "text", text: "Nested raw exec is unavailable" }],
+        isError: true,
+      });
+      expect((await recursiveRawExec).isError).toBe(true);
+
+      const vendorInventory = await inventoryThroughGateway(
+        "vendor",
+        false,
+        ["exec", "vendor__exec", "vendor__codex_tool_call"],
+      );
+      expect(vendorInventory.structuredContent).toMatchObject({
+        total: 2,
+        tools: [
+          { wire_name: "vendor__exec", kind: "gateway" },
+          { wire_name: "vendor__codex_tool_call", kind: "gateway" },
+        ],
+      });
+
+      const nestedInventory = await inventoryThroughGateway("web__run", true, ["exec", "web__run"]);
+      expect(nestedInventory.structuredContent).toMatchObject({
+        total: 1,
+        next_offset: null,
+        tools: [{
+          wire_name: "web__run",
+          name: "web__run",
+          namespace: null,
+          kind: "gateway",
+          description: "web__run test tool",
+          parameters: { type: "object", additionalProperties: true },
+        }],
+      });
+
+      const nestedWeb = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "web__run",
+        arguments: { search_query: [{ q: "Codex" }] },
+      });
+      const [nestedWebRequest] = await broker.nextToolBatch(token);
+      expect(nestedWebRequest).toMatchObject({ wireName: "exec", freeform: true });
+      const nestedWebCalls: GatewayProgramCall[] = [];
+      const nestedWebContent = await executeGatewayProgram(
+        nestedWebRequest!.input!,
+        ["web__run"],
+        nestedWebCalls,
+      );
+      expect(nestedWebCalls).toEqual([{
+        name: "web__run",
+        input: { search_query: [{ q: "Codex" }] },
+      }]);
+      broker.completeTool(token, nestedWebRequest!.callId, { content: nestedWebContent });
+      expect((await nestedWeb).content).toEqual([{
+        type: "text",
+        text: JSON.stringify({ output: "web__run", exit_code: 0 }),
+      }]);
+
       const waitPromise = call("codex_tool_call", {
         turn_token: token,
         wire_name: "wait",
@@ -2494,11 +2775,11 @@ describe("ChatGPT outer-native harness v4", () => {
       broker.completeTool(token, waitRequest!.callId, toolResult({ output: "completed" }));
       expect((await waitPromise).structuredContent).toEqual({ output: "completed" });
 
-      const agentInventory = await call("codex_tool_inventory", {
-        turn_token: token,
-        query: "wait_agent",
-        include_schema: true,
-      });
+      const agentInventory = await inventoryThroughGateway(
+        "wait_agent",
+        true,
+        ["multi_agent_v1__wait_agent"],
+      );
       expect(agentInventory.structuredContent).toMatchObject({
         total: 1,
         tools: [{
@@ -2533,6 +2814,38 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       broker.completeTool(token, agentWaitRequest!.callId, toolResult({ statuses: {} }));
       expect((await agentWait).structuredContent).toEqual({ statuses: {} });
+
+      const rejectedNestedLongWait = await call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "multi_agent_v2__wait_agent",
+        arguments: { targets: [{ agent_id: "agent_test" }], timeout_ms: 180_000 },
+      });
+      expect(rejectedNestedLongWait.isError).toBe(true);
+      expect(JSON.stringify(rejectedNestedLongWait.content)).toContain("requires timeout_ms=10000");
+
+      const nestedAgentWait = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "multi_agent_v2__wait_agent",
+        arguments: { targets: [{ agent_id: "agent_test" }], timeout_ms: 10_000 },
+      });
+      const [nestedAgentWaitRequest] = await broker.nextToolBatch(token);
+      expect(nestedAgentWaitRequest).toMatchObject({ wireName: "exec", freeform: true });
+      const nestedAgentWaitCalls: GatewayProgramCall[] = [];
+      const nestedAgentWaitContent = await executeGatewayProgram(
+        nestedAgentWaitRequest!.input!,
+        ["multi_agent_v2__wait_agent"],
+        nestedAgentWaitCalls,
+      );
+      expect(nestedAgentWaitCalls).toEqual([{
+        name: "multi_agent_v2__wait_agent",
+        input: { targets: [{ agent_id: "agent_test" }], timeout_ms: 10_000 },
+      }]);
+      broker.completeTool(token, nestedAgentWaitRequest!.callId, { content: nestedAgentWaitContent });
+      expect((await nestedAgentWait).content).toEqual([{
+        type: "text",
+        text: JSON.stringify({ output: "multi_agent_v2__wait_agent", exit_code: 0 }),
+      }]);
+
     } finally {
       await client.close().catch(() => {});
       broker.revoke(token);
@@ -2573,6 +2886,9 @@ describe("ChatGPT outer-native harness v4", () => {
         tools: [{ wire_name: "exec_command", kind: "function" }],
       });
       expect(JSON.stringify(inventory)).not.toContain("binding_");
+      // A fully local inventory lookup still crosses the broker's activity fence even though it
+      // does not enqueue an outer Codex tool call.
+      expect(broker.beginCompletionFence(token)).toBe(2);
 
       const exec = call("codex_exec", {
         turn_token: token,
@@ -2830,8 +3146,8 @@ describe("ChatGPT outer-native harness v4", () => {
     environment.tools = [
       { name: "exec_command", description: "Run a Codex command", parameters: { type: "object" } },
     ];
-    const timedOutToken = await broker.register(environment, 1_500, "timeout-turn");
-    const replacementToken = await broker.register(environment, undefined, "replacement-turn");
+    let timedOutToken: string | undefined;
+    let replacementToken: string | undefined;
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
@@ -2842,11 +3158,17 @@ describe("ChatGPT outer-native harness v4", () => {
 
     try {
       await client.connect(transport);
+      // Start the short capability deadline only after the MCP child is connected. Charging stdio
+      // process startup made this deadline test depend on host load instead of the broker timeout.
+      const activeTimedOutToken = await broker.register(environment, 1_500, "timeout-turn");
+      const activeReplacementToken = await broker.register(environment, undefined, "replacement-turn");
+      timedOutToken = activeTimedOutToken;
+      replacementToken = activeReplacementToken;
       const timedOut = client.callTool({
         name: "codex_exec",
-        arguments: { turn_token: timedOutToken, cmd: "slow external MCP call" },
+        arguments: { turn_token: activeTimedOutToken, cmd: "slow external MCP call" },
       });
-      const [request] = await broker.nextToolBatch(timedOutToken);
+      const [request] = await broker.nextToolBatch(activeTimedOutToken);
       expect(request).toMatchObject({ wireName: "exec_command" });
 
       const timeoutResult = await timedOut;
@@ -2858,14 +3180,14 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       expect(JSON.stringify(timeoutResult.content)).toContain("did not complete before the MCP transport deadline");
 
-      await expect(callTurnBroker(socketPath, { method: "claim", token: timedOutToken }))
+      await expect(callTurnBroker(socketPath, { method: "claim", token: activeTimedOutToken }))
         .rejects.toThrow("already finished");
-      expect(() => broker.completeTool(timedOutToken, request!.callId, toolResult({ output: "late" })))
+      expect(() => broker.completeTool(activeTimedOutToken, request!.callId, toolResult({ output: "late" })))
         .toThrow("turn token is invalid or expired");
 
       const inventory = await client.callTool({
         name: "codex_tool_inventory",
-        arguments: { turn_token: replacementToken, query: "exec_command", include_schema: false },
+        arguments: { turn_token: activeReplacementToken, query: "exec_command", include_schema: false },
       });
       expect(inventory.structuredContent).toMatchObject({
         total: 1,
@@ -2873,8 +3195,8 @@ describe("ChatGPT outer-native harness v4", () => {
       });
     } finally {
       await client.close().catch(() => {});
-      broker.revoke(timedOutToken);
-      broker.revoke(replacementToken);
+      if (timedOutToken) broker.revoke(timedOutToken);
+      if (replacementToken) broker.revoke(replacementToken);
       await broker.close();
     }
   }, 10_000);
@@ -2882,15 +3204,18 @@ describe("ChatGPT outer-native harness v4", () => {
 
 test("mirrored turn progress carries daemon MCP activity into the browser helper process", async () => {
   const daemon = new ChatGptExternalTurnProgress();
-  const mirror = new ChatGptMirroredTurnProgress();
+  const mirror = new ChatGptMirroredTurnProgress(revision => daemon.acknowledgeToolBatch(revision));
 
   // A helper process with no mirrored progress reports "not live", which is exactly what let the
   // DOM grace cancel turns whose tool calls were still completing.
   expect(chatGptExternalProgressIsLive(mirror.snapshot(), 1_000, 60_000)).toBeFalse();
 
-  daemon.recordToolBatch(1, 1_000);
+  const toolBatchRevision = daemon.recordToolBatch(1, 1_000);
   expect(mirror.apply(daemon.snapshot())).toBeTrue();
   expect(chatGptExternalProgressIsLive(mirror.snapshot(), 30_000, 60_000)).toBeTrue();
+  const observed = daemon.waitForToolBatchObservation(toolBatchRevision);
+  await mirror.acknowledgeToolBatch(toolBatchRevision);
+  await expect(observed).resolves.toBeUndefined();
 
   daemon.recordToolResult(2_000);
   expect(mirror.apply(daemon.snapshot())).toBeTrue();
@@ -2908,7 +3233,12 @@ test("mirrored turn progress carries daemon MCP activity into the browser helper
 
 test("mirrored turn progress ignores replayed frames and rejects malformed ones", async () => {
   const mirror = new ChatGptMirroredTurnProgress();
-  const first = { revision: 4, lastToolBatchRevision: 3, activeToolCalls: 1, lastProgressAt: 5_000 };
+  const first = {
+    revision: 4,
+    lastToolBatchRevision: 3,
+    activeToolCalls: 1,
+    lastProgressAt: 5_000,
+  };
 
   expect(mirror.apply(first)).toBeTrue();
   expect(mirror.apply(first)).toBeFalse();
@@ -2927,7 +3257,12 @@ test("mirrored turn progress ignores replayed frames and rejects malformed ones"
 test("mirrored turn progress wakes waiters exactly like the recording instance", async () => {
   const mirror = new ChatGptMirroredTurnProgress();
   const changed = mirror.waitForChange(0);
-  mirror.apply({ revision: 1, lastToolBatchRevision: 1, activeToolCalls: 2, lastProgressAt: 7_000 });
+  mirror.apply({
+    revision: 1,
+    lastToolBatchRevision: 1,
+    activeToolCalls: 2,
+    lastProgressAt: 7_000,
+  });
   expect(await changed).toEqual({
     revision: 1,
     lastToolBatchRevision: 1,
@@ -2938,7 +3273,12 @@ test("mirrored turn progress wakes waiters exactly like the recording instance",
 
 test("mirrored progress rejects frames that regress against the observed state", async () => {
   const mirror = new ChatGptMirroredTurnProgress();
-  mirror.apply({ revision: 3, lastToolBatchRevision: 3, activeToolCalls: 1, lastProgressAt: 5_000 });
+  mirror.apply({
+    revision: 3,
+    lastToolBatchRevision: 3,
+    activeToolCalls: 1,
+    lastProgressAt: 5_000,
+  });
 
   // Higher revision but contradicting what it already reported: a corrupt or forged frame, not an
   // ordering artefact, and accepting it would desynchronise observed liveness.

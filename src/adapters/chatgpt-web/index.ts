@@ -20,7 +20,10 @@ import {
   ChatGptLunaCheckpointStore,
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
-import { ChatGptExternalTurnProgress } from "./turn-progress";
+import {
+  CHATGPT_TOOL_BOUNDARY_OBSERVATION_TIMEOUT_MS,
+  ChatGptExternalTurnProgress,
+} from "./turn-progress";
 import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
@@ -429,6 +432,10 @@ export function createChatGptWebAdapter(
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
       externalProgress,
+      completionFence: {
+        begin: async () => broker.beginCompletionFence(await token.promise),
+        commit: async revision => broker.commitCompletionFence(await token.promise, revision),
+      },
       ...(captureLunaCheckpoint ? {
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
@@ -766,15 +773,40 @@ export function createChatGptWebAdapter(
               const externalProgress = session.runtime.mode === "tools"
                 ? session.runtime.externalProgress
                 : undefined;
-              const nextTools = turnToken
-                ? broker.nextToolBatch(turnToken, toolWaitAbort.signal).then(requests => {
+              const armNextTools = () => turnToken
+                ? broker.nextToolBatch(turnToken, toolWaitAbort.signal).then(async requests => {
                   if (!externalProgress) {
                     throw new Error("ChatGPT broker returned tools for a read-only browser turn");
                   }
-                  externalProgress.recordToolBatch(requests.length);
+                  if (requests.length > 0) {
+                    const revision = externalProgress.recordToolBatch(requests.length);
+                    const observationTimeout = new AbortController();
+                    const timer = setTimeout(
+                      () => observationTimeout.abort(),
+                      CHATGPT_TOOL_BOUNDARY_OBSERVATION_TIMEOUT_MS,
+                    );
+                    try {
+                      await externalProgress.waitForToolBatchObservation(
+                        revision,
+                        AbortSignal.any([toolWaitAbort.signal, observationTimeout.signal]),
+                      );
+                    } catch (error) {
+                      if (observationTimeout.signal.aborted && !toolWaitAbort.signal.aborted) {
+                        throw new Error(
+                          `ChatGPT browser did not acknowledge Codex tool batch ${revision}`
+                          + ` within ${CHATGPT_TOOL_BOUNDARY_OBSERVATION_TIMEOUT_MS}ms`,
+                          { cause: error },
+                        );
+                      }
+                      throw error;
+                    } finally {
+                      clearTimeout(timer);
+                    }
+                  }
                   return { type: "tools" as const, requests };
                 })
                 : undefined;
+              let nextTools = armNextTools();
               const browserOutcome = session.browserOutcome.then(outcome => ({ type: "browser" as const, outcome }));
               let nextTrace = session.runtime.trace.wait(toolWaitAbort.signal).then(() => ({ type: "trace" as const }));
               let nextText = session.runtime.text.wait(toolWaitAbort.signal).then(() => ({ type: "text" as const }));
@@ -822,7 +854,7 @@ export function createChatGptWebAdapter(
                   chatGptWebTurnRetryPolicy.clear(retryKey);
                   return;
                 }
-                if (!turnToken || session.runtime.mode !== "tools") {
+                if (!turnToken || session.runtime.mode !== "tools" || !externalProgress) {
                   throw new Error("Read-only ChatGPT Web runtime received a broker tool batch");
                 }
                 if (next.requests.length === 0) throw new Error("ChatGPT tool bridge returned an empty batch");

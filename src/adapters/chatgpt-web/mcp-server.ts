@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
@@ -10,9 +10,14 @@ import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from ".
 
 interface ClaimedTurn {
   bindingId: string;
+  activityId: string;
   environment: ChatGptTurnEnvironment & { expiresAt?: number };
 }
 
+const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
+  "multi_agent_v1__wait_agent",
+  "multi_agent_v2__wait_agent",
+]);
 const turnTokenSchema = z.string().min(20).max(256);
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 10_000;
@@ -70,10 +75,8 @@ function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool
   return environment.tools.find(tool => !tool.namespace && tool.name === name);
 }
 
-function namedTool(environment: ChatGptTurnEnvironment, requestedWireName: string): CodexTool {
-  const tool = environment.tools.find(candidate => wireName(candidate) === requestedWireName);
-  if (!tool) throw new Error(`Codex tool is not available in this turn: ${requestedWireName}`);
-  return tool;
+function gatewayToolNameIsValid(name: string): boolean {
+  return /^[A-Za-z0-9_$]+$/.test(name);
 }
 
 function isAgentWaitTool(tool: CodexTool): boolean {
@@ -81,9 +84,17 @@ function isAgentWaitTool(tool: CodexTool): boolean {
     && (tool.namespace === "multi_agent_v1" || tool.namespace === "multi_agent_v2");
 }
 
+function isGatewayAgentWaitTool(name: string): boolean {
+  return GATEWAY_AGENT_WAIT_TOOL_NAMES.has(name);
+}
+
 function browserToolDescription(tool: CodexTool): string {
-  if (!isAgentWaitTool(tool)) return tool.description;
-  return `${tool.description}\n\nChatGPT Web transport rule: wait for exactly 10 seconds per call, then release the MCP channel so spawned Web agents can use their own tools. Repeat with the same target ids until a terminal status is returned.`;
+  const waitRule = "ChatGPT Web transport rule: wait for exactly 10 seconds per call, then release the MCP channel so spawned Web agents can use their own tools. Repeat with the same target ids until a terminal status is returned.";
+  if (isAgentWaitTool(tool)) return `${tool.description}\n\n${waitRule}`;
+  if (!tool.namespace && tool.name === "exec") {
+    return `${tool.description}\n\n${waitRule} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.`;
+  }
+  return tool.description;
 }
 
 function browserToolParameters(tool: CodexTool): Record<string, unknown> {
@@ -125,6 +136,16 @@ function assertBrowserToolArguments(tool: CodexTool, args: Record<string, unknow
   }
 }
 
+function assertGatewayToolArguments(name: string, args: Record<string, unknown>): void {
+  if (!isGatewayAgentWaitTool(name)) return;
+  if (args.timeout_ms !== CHATGPT_WEB_AGENT_WAIT_POLL_MS) {
+    throw new Error(
+      `ChatGPT Web wait_agent requires timeout_ms=${CHATGPT_WEB_AGENT_WAIT_POLL_MS}`
+      + " so the shared MCP channel remains available to spawned Web agents",
+    );
+  }
+}
+
 export function chatGptMcpInvocationTimeout(
   environment: ChatGptTurnEnvironment & { expiresAt?: number },
   now = Date.now(),
@@ -157,6 +178,89 @@ function gatewayNestedToolName(toolName: string): string {
   return toolName.replace(/[^A-Za-z0-9_$]/g, "_");
 }
 
+interface GatewayToolDescriptor {
+  name: string;
+  description: string;
+}
+
+interface GatewayToolCatalogPage {
+  tools: GatewayToolDescriptor[];
+  total: number;
+}
+
+function gatewayToolDescription(tool: GatewayToolDescriptor): string {
+  if (!isGatewayAgentWaitTool(tool.name)) return tool.description;
+  return `${tool.description}\n\nChatGPT Web transport rule: wait for exactly 10 seconds per call, then release the MCP channel so spawned Web agents can use their own tools. Repeat with the same target ids until a terminal status is returned.`;
+}
+
+function gatewayToolCatalogProgram(options: {
+  query?: string;
+  offset: number;
+  limit: number;
+  excludedNames: string[];
+}): string {
+  const needle = options.query?.trim().toLowerCase() ?? "";
+  return [
+    "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native nested tool registry is unavailable\");",
+    `const excludedNames = new Set(${JSON.stringify(options.excludedNames)});`,
+    `const needle = ${JSON.stringify(needle)};`,
+    "const visibleName = name => {",
+    "  return typeof name === \"string\" && /^[A-Za-z0-9_$]+$/.test(name) && !excludedNames.has(name);",
+    "};",
+    "const matches = ALL_TOOLS",
+    "  .filter(tool => visibleName(tool?.name))",
+    "  .map(tool => ({ name: tool.name, description: typeof tool.description === \"string\" ? tool.description : \"\" }))",
+    "  .filter(tool => !needle || (tool.name + \"\\n\" + tool.description).toLowerCase().includes(needle));",
+    `const page = matches.slice(${options.offset}, ${options.offset + options.limit});`,
+    "text(JSON.stringify({ tools: page, total: matches.length }));",
+  ].join("\n");
+}
+
+function gatewayToolCatalogPage(response: {
+  content: unknown[];
+  isError?: boolean;
+}, excludedNames: ReadonlySet<string>): GatewayToolCatalogPage {
+  const textBlocks = response.content
+    .map(item => item && typeof item === "object" && !Array.isArray(item)
+      ? item as Record<string, unknown>
+      : undefined)
+    .filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
+    .map(item => item.text as string);
+  if (response.isError) {
+    throw new Error(`Native nested tool inventory failed: ${textBlocks.join("\n") || "unknown error"}`);
+  }
+  if (textBlocks.length !== 1) {
+    throw new Error("Native nested tool inventory returned an invalid text response");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(textBlocks[0]!);
+  } catch {
+    throw new Error("Native nested tool inventory returned invalid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Native nested tool inventory returned an invalid catalog");
+  }
+  const catalog = parsed as Record<string, unknown>;
+  if (!Number.isSafeInteger(catalog.total) || (catalog.total as number) < 0 || !Array.isArray(catalog.tools)) {
+    throw new Error("Native nested tool inventory returned invalid pagination");
+  }
+  const tools = catalog.tools.map((value): GatewayToolDescriptor => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Native nested tool inventory returned an invalid tool entry");
+    }
+    const tool = value as Record<string, unknown>;
+    if (typeof tool.name !== "string"
+      || typeof tool.description !== "string"
+      || !gatewayToolNameIsValid(tool.name)
+      || excludedNames.has(tool.name)) {
+      throw new Error("Native nested tool inventory returned an invalid tool descriptor");
+    }
+    return { name: tool.name, description: tool.description };
+  });
+  return { tools, total: catalog.total as number };
+}
+
 function execGatewayResultProgram(invocation: string[]): string {
   return [
     ...invocation,
@@ -181,11 +285,83 @@ function execGatewayProgram(
   nestedToolName: string,
   freeform: boolean,
   payload: { arguments?: Record<string, unknown>; input?: string },
+  excludedNames: string[],
 ): string {
+  if (!gatewayToolNameIsValid(nestedToolName) || excludedNames.includes(nestedToolName)) {
+    throw new Error(`Codex nested tool is not available in this turn: ${nestedToolName}`);
+  }
+  const gatewayName = gatewayNestedToolName(nestedToolName);
+  if (gatewayName !== nestedToolName) {
+    throw new Error(`Codex nested tool name is invalid: ${nestedToolName}`);
+  }
   const nestedInput = freeform ? payload.input ?? "" : payload.arguments ?? {};
   return execGatewayResultProgram([
-    `const result = await tools[${JSON.stringify(gatewayNestedToolName(nestedToolName))}](${JSON.stringify(nestedInput)});`,
+    "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native nested tool registry is unavailable\");",
+    `const nestedToolName = ${JSON.stringify(gatewayName)};`,
+    `const excludedNames = new Set(${JSON.stringify(excludedNames)});`,
+    "if (excludedNames.has(nestedToolName)) throw new Error(\"Native nested tool is not callable through the structured gateway\");",
+    "if (!ALL_TOOLS.some(tool => tool?.name === nestedToolName)) throw new Error(\"Native nested tool is not listed in this turn\");",
+    "const nestedTool = tools[nestedToolName];",
+    "if (typeof nestedTool !== \"function\") throw new Error(\"Native nested tool is listed but unavailable\");",
+    `const result = await nestedTool(${JSON.stringify(nestedInput)});`,
   ]);
+}
+
+/**
+ * Preserve the native freeform exec surface while applying the same wait_agent deadline contract
+ * as direct calls. The model still owns its JavaScript; only the tool registry it receives is a
+ * transparent proxy whose two wait functions validate their transport-bound argument before dispatch.
+ */
+function transportBoundRawExecProgram(input: string, blockedExecName: string): string {
+  return [
+    "await (async (tools) => {",
+    input,
+    "})((() => {",
+    "  const source = tools;",
+    `  const waitNames = new Set(${JSON.stringify([...GATEWAY_AGENT_WAIT_TOOL_NAMES])});`,
+    `  const blockedExecName = ${JSON.stringify(blockedExecName)};`,
+    `  const pollMs = ${CHATGPT_WEB_AGENT_WAIT_POLL_MS};`,
+    "  const registryNames = new Set(Reflect.ownKeys(source));",
+    "  if (typeof ALL_TOOLS !== \"undefined\" && Array.isArray(ALL_TOOLS)) {",
+    "    for (const tool of ALL_TOOLS) if (typeof tool?.name === \"string\") registryNames.add(tool.name);",
+    "  }",
+    "  const wrappers = new Map();",
+    "  const expose = name => {",
+    "    if (wrappers.has(name)) return wrappers.get(name);",
+    "    const value = Reflect.get(source, name, source);",
+    "    let exposed = value;",
+    "    if (typeof value === \"function\" && name === blockedExecName) {",
+    "      exposed = () => { throw new Error(\"Nested raw exec is unavailable inside ChatGPT Web exec\"); };",
+    "    } else if (typeof value === \"function\" && typeof name === \"string\" && waitNames.has(name)) {",
+    "      exposed = args => {",
+    "        if (!args || typeof args !== \"object\" || Array.isArray(args) || args.timeout_ms !== pollMs) {",
+    "          throw new Error(\"ChatGPT Web wait_agent requires timeout_ms=\" + pollMs + \" so the shared MCP channel remains available to spawned Web agents\");",
+    "        }",
+    "        return Reflect.apply(value, source, [args]);",
+    "      };",
+    "    } else if (typeof value === \"function\") {",
+    "      exposed = (...args) => Reflect.apply(value, source, args);",
+    "    }",
+    "    wrappers.set(name, exposed);",
+    "    return exposed;",
+    "  };",
+    "  return new Proxy(Object.create(null), {",
+    "    get: (_target, name) => expose(name),",
+    "    has: (_target, name) => registryNames.has(name) || Reflect.has(source, name),",
+    "    ownKeys: () => [...registryNames],",
+    "    getOwnPropertyDescriptor: (_target, name) =>",
+    "      registryNames.has(name) || Reflect.has(source, name)",
+    "        ? { configurable: true, enumerable: true, writable: false, value: expose(name) }",
+    "        : undefined,",
+    "    set: () => false,",
+    "    defineProperty: () => false,",
+    "    deleteProperty: () => false,",
+    "    setPrototypeOf: () => false,",
+    "    getPrototypeOf: () => null,",
+    "    preventExtensions: () => false,",
+    "  });",
+    "})());",
+  ].join("\n");
 }
 
 function execCommandGatewayProgram(
@@ -216,12 +392,63 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     extra: McpRequestExtra,
   ): Promise<ClaimedTurn> => {
     console.error(`[chatgpt-web-mcp] ${toolName} scope=${requestScopeSummary(extra)}`);
-    return await callTurnBroker<ClaimedTurn>(
-      options.brokerSocketPath,
-      { method: "claim", token: turnToken },
-      5_000,
-      extra.signal,
+    const activityId = `activity_${randomBytes(18).toString("base64url")}`;
+    try {
+      const claimed = await callTurnBroker<Omit<ClaimedTurn, "activityId">>(
+        options.brokerSocketPath,
+        { method: "claim", token: turnToken, activityId },
+        5_000,
+        extra.signal,
+      );
+      return { ...claimed, activityId };
+    } catch (error) {
+      try {
+        await settleTurnActivity(turnToken, activityId);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Codex Native claim failed and its broker activity could not be retired",
+        );
+      }
+      throw error;
+    }
+  };
+
+  const settleTurnActivity = async (turnToken: string, activityId: string): Promise<void> => {
+    let firstError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await callTurnBroker(options.brokerSocketPath, {
+          method: "activity_complete",
+          token: turnToken,
+          activityId,
+        }, 5_000);
+        return;
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    throw new AggregateError(
+      [firstError],
+      "Codex Native broker activity cleanup failed after an idempotent retry",
     );
+  };
+
+  const withClaimedTurn = async <T>(
+    toolName: string,
+    turnToken: string,
+    extra: McpRequestExtra,
+    action: (claimed: ClaimedTurn) => Promise<T> | T,
+  ): Promise<T> => {
+    const claimed = await claimTurn(toolName, turnToken, extra);
+    try {
+      return await action(claimed);
+    } finally {
+      // The broker's terminal fence treats even a fully local inventory lookup as live MCP work.
+      // Settle the lease without the request AbortSignal: cancellation must not strand activity
+      // and silently prevent every later completion candidate from committing.
+      await settleTurnActivity(turnToken, claimed.activityId);
+    }
   };
 
   const invoke = async (
@@ -283,7 +510,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);
     }
     return invoke(bindingId, bound, gateway, {
-      input: execGatewayProgram(nestedToolName, freeform, payload),
+      input: execGatewayProgram(nestedToolName, freeform, payload, bound.tools.map(wireName)),
     }, signal);
   };
 
@@ -302,8 +529,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ turn_token, cmd, workdir, yield_time_ms, max_output_tokens, tty }, extra) => {
-      const claimed = await claimTurn("codex_exec", turn_token, extra);
+    async ({ turn_token, cmd, workdir, yield_time_ms, max_output_tokens, tty }, extra) => withClaimedTurn(
+      "codex_exec",
+      turn_token,
+      extra,
+      async claimed => {
       const bound = claimed.environment;
       const execCommandArguments = {
         cmd,
@@ -329,7 +559,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       return invoke(claimed.bindingId, bound, gateway, {
         input: execCommandGatewayProgram(execCommandArguments, shellCommandArguments),
       }, extra.signal);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -346,8 +577,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ turn_token, session_id, chars, yield_time_ms, max_output_tokens }, extra) => {
-      const claimed = await claimTurn("codex_write_stdin", turn_token, extra);
+    async ({ turn_token, session_id, chars, yield_time_ms, max_output_tokens }, extra) => withClaimedTurn(
+      "codex_write_stdin",
+      turn_token,
+      extra,
+      async claimed => {
       const bound = claimed.environment;
       const tool = exactTool(bound, "write_stdin");
       const payload = { arguments: {
@@ -359,7 +593,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       return tool
         ? invoke(claimed.bindingId, bound, tool, payload, extra.signal)
         : invokeNestedNative(claimed.bindingId, bound, "write_stdin", false, payload, extra.signal);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -370,15 +605,19 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       inputSchema: { turn_token: turnTokenSchema, patch: z.string().min(1).max(5_000_000) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ turn_token, patch }, extra) => {
-      const claimed = await claimTurn("codex_apply_patch", turn_token, extra);
+    async ({ turn_token, patch }, extra) => withClaimedTurn(
+      "codex_apply_patch",
+      turn_token,
+      extra,
+      async claimed => {
       const bound = claimed.environment;
       const tool = exactTool(bound, "apply_patch");
       if (!tool) return invokeNestedNative(claimed.bindingId, bound, "apply_patch", true, { input: patch }, extra.signal);
       return tool.freeform
         ? invoke(claimed.bindingId, bound, tool, { input: patch }, extra.signal)
         : invoke(claimed.bindingId, bound, tool, { arguments: { input: patch } }, extra.signal);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -393,15 +632,19 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ turn_token, path, detail }, extra) => {
-      const claimed = await claimTurn("codex_view_image", turn_token, extra);
+    async ({ turn_token, path, detail }, extra) => withClaimedTurn(
+      "codex_view_image",
+      turn_token,
+      extra,
+      async claimed => {
       const bound = claimed.environment;
       const tool = exactTool(bound, "view_image");
       const payload = { arguments: { path, ...(detail ? { detail } : {}) } };
       return tool
         ? invoke(claimed.bindingId, bound, tool, payload, extra.signal)
         : invokeNestedNative(claimed.bindingId, bound, "view_image", false, payload, extra.signal);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -418,17 +661,20 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ turn_token, query, offset, limit, include_schema }, extra) => {
-      const claimed = await claimTurn("codex_tool_inventory", turn_token, extra);
+    async ({ turn_token, query, offset, limit, include_schema }, extra) => withClaimedTurn(
+      "codex_tool_inventory",
+      turn_token,
+      extra,
+      async claimed => {
       const bound = claimed.environment;
       const needle = query?.trim().toLowerCase();
-      const matches = bound.tools.filter(tool => !needle || [
+      const directMatches = bound.tools.filter(tool => !needle || [
         wireName(tool),
         tool.name,
         tool.namespace ?? "",
         tool.description,
       ].join("\n").toLowerCase().includes(needle));
-      const page = matches.slice(offset, offset + limit).map(tool => ({
+      const directPage = directMatches.slice(offset, offset + limit).map(tool => ({
         wire_name: wireName(tool),
         name: tool.name,
         namespace: tool.namespace ?? null,
@@ -436,12 +682,49 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
         ...(include_schema ? { parameters: browserToolParameters(tool) } : {}),
       }));
+      let nestedTotal = 0;
+      let nestedPage: Array<Record<string, unknown>> = [];
+      const gateway = execGateway(bound);
+      if (gateway) {
+        const excludedGatewayNames = bound.tools.map(wireName);
+        const nestedOffset = Math.max(0, offset - directMatches.length);
+        const nestedLimit = Math.max(0, limit - directPage.length);
+        const response = await invoke(claimed.bindingId, bound, gateway, {
+          input: gatewayToolCatalogProgram({
+            query,
+            offset: nestedOffset,
+            limit: nestedLimit,
+            // A gateway-discovered entry may supplement the outer registry, but it must never
+            // duplicate or reopen a tool already represented by that outer registry.
+            excludedNames: excludedGatewayNames,
+          }),
+        }, extra.signal);
+        const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames));
+        nestedTotal = catalog.total;
+        nestedPage = catalog.tools.map(tool => ({
+          wire_name: tool.name,
+          name: tool.name,
+          namespace: null,
+          description: gatewayToolDescription(tool),
+          kind: "gateway",
+          ...(include_schema ? {
+            parameters: {
+              type: "object",
+              additionalProperties: true,
+              description: "Pass the exact structured arguments declared in this tool's description. For a declared freeform tool, use codex_tool_call.input instead.",
+            },
+          } : {}),
+        }));
+      }
+      const page = [...directPage, ...nestedPage];
+      const total = directMatches.length + nestedTotal;
       return result({
         tools: page,
-        total: matches.length,
-        next_offset: offset + page.length < matches.length ? offset + page.length : null,
+        total,
+        next_offset: offset + page.length < total ? offset + page.length : null,
       });
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -478,18 +761,42 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         }, 5_000, extra.signal);
         return result({ submitted: true });
       }
-      const claimed = await claimTurn("codex_tool_call", turn_token, extra);
-      const bound = claimed.environment;
-      const tool = namedTool(bound, wire_name);
-      if (tool.freeform) {
-        if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
-        if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
-        return invoke(claimed.bindingId, bound, tool, { input }, extra.signal);
-      }
-      if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-      const invocationArguments = args ?? {};
-      assertBrowserToolArguments(tool, invocationArguments);
-      return invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
+      return withClaimedTurn("codex_tool_call", turn_token, extra, async claimed => {
+        const bound = claimed.environment;
+        const tool = bound.tools
+          .find(candidate => wireName(candidate) === wire_name);
+        if (!tool) {
+          const gateway = execGateway(bound);
+          const hiddenOuterTool = bound.tools.some(candidate => wireName(candidate) === wire_name);
+          if (!gateway || hiddenOuterTool || !gatewayToolNameIsValid(wire_name)) {
+            throw new Error(`Codex tool is not available in this turn: ${wire_name}`);
+          }
+          if (input !== undefined && args && Object.keys(args).length > 0) {
+            throw new Error(`Codex nested tool ${wire_name} accepts either arguments or freeform input, not both`);
+          }
+          if (isGatewayAgentWaitTool(wire_name) && input !== undefined) {
+            throw new Error(`ChatGPT Web wait_agent requires structured arguments and timeout_ms=${CHATGPT_WEB_AGENT_WAIT_POLL_MS}`);
+          }
+          const invocationArguments = args ?? {};
+          assertGatewayToolArguments(wire_name, invocationArguments);
+          return invoke(claimed.bindingId, bound, gateway, {
+            input: execGatewayProgram(wire_name, input !== undefined, {
+              ...(input !== undefined ? { input } : { arguments: invocationArguments }),
+            }, bound.tools.map(wireName)),
+          }, extra.signal);
+        }
+        if (tool.freeform) {
+          if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
+          if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
+          return invoke(claimed.bindingId, bound, tool, {
+            input: tool === execGateway(bound) ? transportBoundRawExecProgram(input, wireName(tool)) : input,
+          }, extra.signal);
+        }
+        if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
+        const invocationArguments = args ?? {};
+        assertBrowserToolArguments(tool, invocationArguments);
+        return invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
+      });
     },
   );
 

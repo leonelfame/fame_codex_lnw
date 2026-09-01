@@ -30,6 +30,7 @@ function compactionControlBinding(transaction: CompactionTransactionHandle): str
  * need a second visible ChatGPT message merely to ask the same agent for a summary.
  */
 export function activeCompactionToolResultInstruction(
+  responseMarker: string,
   toolExecuted = true,
 ): string {
   return [
@@ -38,10 +39,12 @@ export function activeCompactionToolResultInstruction(
       ? "Codex reached its context limit while this Web response was waiting for the tool result above."
       : "Codex reached its context limit before the requested tool could be sent for execution. The tool was not executed.",
     toolExecuted
-      ? "Consume that canonical result, stop ordinary task work now, and do not call any more tools."
-      : "Stop ordinary task work now and do not call any more tools.",
+      ? "Consume that canonical result, stop ordinary task work now, and do not call any more work tools."
+      : "Stop ordinary task work now and do not call any more work tools.",
     COMPACT_PROMPT,
-    "Call no more tools. Finish this same Web response with only the complete checkpoint summary in ordinary text; that final response is the compaction result.",
+    "Call no more tools. Finish this same Web response with the exact private marker below as its first line, followed by the complete checkpoint summary in ordinary text:",
+    responseMarker,
+    "Do not add whitespace, Markdown, or any other text before the marker. The outer bridge removes the marker before using the checkpoint.",
     `</${CODEX_ACTIVE_COMPACTION_REQUEST_MARKER}>`,
   ].join("\n");
 }
