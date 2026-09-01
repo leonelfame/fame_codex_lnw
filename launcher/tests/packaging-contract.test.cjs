@@ -26,6 +26,10 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
   assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
+  assert.deepEqual(
+    manifest.build.mac.signIgnore,
+    ["[/\\\\]Contents[/\\\\]Resources[/\\\\]runtime[/\\\\]runtime[/\\\\]bun$"],
+  );
   assert.deepEqual(manifest.build.win.target, ["nsis"]);
   assert.equal(manifest.build.win.icon, "assets/icon.ico");
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
@@ -61,6 +65,9 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);
   assert.match(packager, /target === "--mac" && !env\.CSC_LINK && !env\.CSC_NAME/);
   assert.match(packager, /--config\.mac\.identity=-/);
+  assert.match(packager, /verifySignedMacArchive\(\)/);
+  assert.match(packager, /codesign[\s\S]*--verify[\s\S]*--deep[\s\S]*--strict/);
+  assert.match(packager, /validateRuntimeBundle/);
   assert.doesNotMatch(packager, /electron-builder\.cmd/);
   assert.match(shellInstaller, /shell_quote\(\)/);
   assert.match(shellInstaller, /RUNNER_SOURCE/);
