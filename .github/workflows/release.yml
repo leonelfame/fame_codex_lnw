@@ -135,7 +135,7 @@ jobs:
             | xargs -0 sha256sum \
             | sed 's#  \./#  #' > "$checksum_file"
           mv "$checksum_file" checksums.txt
-      - name: Verify every published asset is checksummed
+      - name: Verify every built asset is checksummed
         run: |
           cd release-assets
           missing=""
@@ -175,3 +175,41 @@ jobs:
               "${release_flags[@]}" \
               --generate-notes
           fi
+
+          published_manifest="$(mktemp)"
+          gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[] | select(.name != "checksums.txt") | [.name, .digest] | @tsv' \
+            | while IFS=$'\t' read -r name digest; do
+                if [[ "$digest" != sha256:* || -z "${digest#sha256:}" ]]; then
+                  echo "Published asset has no SHA-256 digest: $name" >&2
+                  exit 1
+                fi
+                printf '%s  %s\n' "${digest#sha256:}" "$name"
+              done \
+            | LC_ALL=C sort -k2 > "$published_manifest"
+          test -s "$published_manifest"
+          mv "$published_manifest" release-assets/checksums.txt
+          gh release upload "$GITHUB_REF_NAME" release-assets/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          while IFS=$'\t' read -r name digest; do
+            if [ "$name" = checksums.txt ]; then continue; fi
+            expected="$(awk -v asset="$name" '$2 == asset { print $1 }' release-assets/checksums.txt)"
+            if [ -z "$expected" ] || [ "sha256:$expected" != "$digest" ]; then
+              echo "Published asset checksum mismatch: $name" >&2
+              exit 1
+            fi
+          done < <(gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[] | [.name, .digest] | @tsv')
+
+          local_manifest_digest="$(sha256sum release-assets/checksums.txt | awk '{ print $1 }')"
+          remote_manifest_digest="$(gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[] | select(.name == "checksums.txt") | .digest')"
+          test "sha256:$local_manifest_digest" = "$remote_manifest_digest"
