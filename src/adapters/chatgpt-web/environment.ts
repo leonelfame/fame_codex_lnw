@@ -101,6 +101,25 @@ function isTurnAbortedNotice(value: Record<string, unknown>): boolean {
   return /^<turn_aborted>[\s\S]*<\/turn_aborted>$/.test(rawMessageText(value).trim());
 }
 
+/** Native turn ids that Codex has authoritatively marked as interrupted in this thread. */
+export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[] {
+  const currentTurnId = extractChatGptTurnIdentity(parsed).turnId;
+  if (!currentTurnId) return [];
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  return [...new Set(input.flatMap(value => {
+    const item = record(value);
+    const abortedTurnId = item ? itemTurnId(item) : undefined;
+    return item?.type === "message"
+      && item.role === "user"
+      && isTurnAbortedNotice(item)
+      && abortedTurnId !== undefined
+      && abortedTurnId !== currentTurnId
+      ? [abortedTurnId]
+      : [];
+  }))];
+}
+
 /**
  * Return the latest real user instruction owned by the current native Codex turn.
  *
@@ -459,7 +478,23 @@ function decodeXmlText(value: string): string {
 function environmentCwdMatches(text: string, preferredRoots: string[] = []): string[] {
   const sections = [...text.matchAll(/<environments>([\s\S]*?)<\/environments>/gi)];
   if (sections.length === 0) {
-    return [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
+    const cwdMatches = [...text.matchAll(/<cwd>([^<]+)<\/cwd>/gi)].map(match => match[1] ?? "");
+    if (cwdMatches.length > 0 || /<\/?cwd\b/i.test(text)) return cwdMatches;
+
+    // Codex Desktop 0.150+ can emit a filesystem-only environment diff when an existing task is
+    // rebound to another model. Its ordered multi-folder contract uses the first workspace root as
+    // the task's working directory and the remaining roots as additional filesystem authority.
+    // Recover only that exact cwd-less shape; malformed cwd markup and multi-environment payloads
+    // continue to fail closed.
+    const rootSections = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/gi)];
+    if (rootSections.length !== 1) return [];
+    const rootSection = rootSections[0]![0];
+    const roots = [...rootSection.matchAll(/<root>([^<]+)<\/root>/gi)]
+      .map(match => match[1] ?? "");
+    const rootOpenings = [...rootSection.matchAll(/<root\b[^>]*>/gi)];
+    const rootClosings = [...rootSection.matchAll(/<\/root\s*>/gi)];
+    if (rootOpenings.length !== roots.length || rootClosings.length !== roots.length) return [];
+    return roots.length > 0 ? [roots[0]!] : [];
   }
   if (sections.length !== 1) return [];
 

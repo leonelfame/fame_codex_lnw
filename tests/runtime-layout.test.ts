@@ -16,11 +16,17 @@ import {
   providerConfig,
   resolveBrokerEndpoint,
   resolveDevSetupConnectorName,
+  resolveInteractionConnectorIdentities,
   resolveSetupConnectorName,
   runtimeCommandForProcess,
+  ZERO_RISK_CHATGPT_CONNECTOR_NAME,
 } from "../src/config";
 import { removeLegacyRuntimeArtifacts } from "../src/service";
 import { processRunning } from "../src/process";
+import {
+  CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
+  CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
+} from "../src/chatgpt-web-models";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -90,12 +96,38 @@ test("user-home expansion accepts native Unix and Windows separators", () => {
 
 test("the direct-turn connector identity migrates known legacy setup without overwriting custom names", () => {
   expect(defaultConfig("full").appName).toBe(CHATGPT_CONNECTOR_NAME);
+  expect(defaultConfig("full").automaticAppName).toBe(CHATGPT_CONNECTOR_NAME);
+  expect(defaultConfig("full").manualAppName).toBe(ZERO_RISK_CHATGPT_CONNECTOR_NAME);
   expect(defaultConfig("full").subagentProtocol).toBe("compatibility-v1");
+  expect(defaultConfig("full").browserInteractionMode).toBe("automatic");
+  expect(defaultConfig("full").zeroRiskProEnabled).toBe(false);
   expect(resolveSetupConnectorName("Codex Native")).toBe("Codex Native2");
   expect(resolveSetupConnectorName("Team Codex Harness")).toBe("Team Codex Harness");
   expect(resolveSetupConnectorName(undefined, "Team Codex Harness")).toBe("Team Codex Harness");
   expect(() => resolveSetupConnectorName(undefined, "Codex Native"))
     .toThrow(/requires a newly created connector named "Codex Native2"/);
+});
+
+test("manual connector selection preserves and restores a custom automatic identity", () => {
+  const automatic = {
+    appName: "Team Codex Harness",
+    automaticAppName: "Team Codex Harness",
+    browserInteractionMode: "automatic" as const,
+  };
+  const manual = resolveInteractionConnectorIdentities(automatic, "manual");
+  expect(manual).toEqual({
+    appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+    automaticAppName: "Team Codex Harness",
+    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+  });
+  expect(resolveInteractionConnectorIdentities({
+    ...manual,
+    browserInteractionMode: "manual",
+  }, "automatic")).toEqual({
+    appName: "Team Codex Harness",
+    automaticAppName: "Team Codex Harness",
+    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+  });
 });
 
 test("the DEV profile uses a distinct connector identity without overwriting custom names", () => {
@@ -134,9 +166,45 @@ test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", 
     version: 3,
     mode: "browser-only",
     browserHost: "managed-chrome",
+    browserInteractionMode: "automatic",
     subagentProtocol: "compatibility-v1",
     solAvailable: true,
   });
+});
+
+test("existing v3 configurations deterministically retain automatic browser interaction", () => {
+  const root = join(tmpdir(), `codex-chatgpt-web-v3-interaction-migration-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const legacyV3: Record<string, unknown> = { ...defaultConfig("browser-only") };
+  delete legacyV3.browserInteractionMode;
+  delete legacyV3.zeroRiskProEnabled;
+  writeFileSync(join(root, "config.json"), `${JSON.stringify(legacyV3)}\n`);
+
+  expect(loadConfig()).toMatchObject({
+    browserInteractionMode: "automatic",
+    zeroRiskProEnabled: false,
+  });
+  expect(loadConfigForSetup()).toMatchObject({
+    appName: CHATGPT_CONNECTOR_NAME,
+    automaticAppName: CHATGPT_CONNECTOR_NAME,
+    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+    browserInteractionMode: "automatic",
+  });
+});
+
+test("Zero Risk fails closed without the Launcher browser host", () => {
+  const root = join(tmpdir(), `codex-chatgpt-web-manual-host-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const invalid = defaultConfig("full");
+  invalid.browserInteractionMode = "manual";
+  invalid.appName = ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  writeFileSync(join(root, "config.json"), `${JSON.stringify(invalid)}\n`);
+
+  expect(() => loadConfig()).toThrow("requires the launcher browser host");
 });
 
 test("legacy temp-path wrapper and vendor are removed only after runtime ownership changes", () => {
@@ -181,4 +249,36 @@ test("Luna-only provider configuration exposes only the Luna backend", () => {
   expect(provider.defaultModel).toBe("gpt-5.6-luna");
   expect(provider.modelReasoningEfforts).toEqual({ "gpt-5.6-luna": ["low", "medium"] });
   expect(provider.chatgptWeb).toMatchObject({ solAvailable: false, proAvailable: false });
+});
+
+test("manual provider configuration preserves a distinct backend without guessing a ChatGPT model", () => {
+  const config = defaultConfig("full");
+  config.browserInteractionMode = "manual";
+  config.solAvailable = true;
+  config.proAvailable = true;
+  const provider = providerConfig(config);
+
+  expect(provider.models).toEqual([CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]);
+  expect(provider.defaultModel).toBe(CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL);
+  expect(provider.modelReasoningEfforts).toEqual({ [CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]: ["low"] });
+  expect(provider.modelDefaultReasoningEfforts).toEqual({ [CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]: "low" });
+  expect(provider.modelInputModalities).toEqual({ [CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]: ["text"] });
+  expect(provider.chatgptWeb).toMatchObject({
+    appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+    browserInteractionMode: "manual",
+    solAvailable: false,
+    proAvailable: false,
+    experimentalBiggerContext: false,
+  });
+
+  config.zeroRiskProEnabled = true;
+  const proProvider = providerConfig(config);
+  expect(proProvider.models).toEqual([
+    CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
+    CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
+  ]);
+  expect(proProvider.modelReasoningEfforts).toEqual({
+    [CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]: ["low"],
+    [CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL]: ["low"],
+  });
 });

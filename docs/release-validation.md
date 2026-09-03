@@ -24,13 +24,21 @@ Run this list on a maintained Windows 11 x64 machine with a real ChatGPT account
    tool turn. Repeat with Pro when the account exposes Pro.
 6. Drive a chat past the compaction threshold and prove that it continues after compaction without
    a duplicate or orphaned browser turn.
-7. Cancel a running turn by closing its launcher tab, then cancel another with the launcher action;
+7. On a clean install, prove that setup offers both interaction modes and defaults to With
+   Automation. Select Zero Risk and prove that Codex shows exactly one generic Web model after
+   restart, a retained chat receives only the next prompt, and
+   compaction completes through MCP before the compacted continuation opens a fresh manual chat.
+   Inspect the copied prompt and prove that it contains only the current `request_id`, never a
+   surface nonce, capability token, or prompt-level lifecycle commands.
+   Switch back to Automatic and prove that the account-visible catalog is restored.
+8. Cancel a running turn by closing its launcher tab, then cancel another with the launcher action;
    prove that neither turn recreates a tab or keeps the runtime busy.
-8. Quit the launcher during an active turn, confirm the explicit cancellation path, reopen it, and
+9. Quit the launcher during an active turn, confirm the explicit cancellation path, reopen it, and
    prove that the saved ChatGPT session and Codex route are still valid.
-9. Disconnect the bridge and prove that the exact previous Codex route is restored. Reconnect it
-   and prove that the existing private MCP credentials are reused rather than replaced.
-10. Upgrade from the previous public release and prove that launcher state, browser state, Codex
+10. Prove Codex Voice can create a WebRTC call while Responses use the local bridge. Disconnect the
+   bridge and prove that both exact previous route assignments are restored; reconnect it and prove
+   that the existing private MCP credentials are reused rather than replaced.
+11. Upgrade from the previous public release and prove that launcher state, browser state, Codex
     settings, and MCP configuration survive the updater transaction.
 
 Any failed or unexecuted item blocks a stable release. An alpha may ship with a named failed item

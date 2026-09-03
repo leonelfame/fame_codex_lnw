@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { stripUtf8Bom } from "./config";
 import {
   MANAGED_COMMENT,
+  MANAGED_ROUTE_COMMENT,
   MANAGED_MULTI_AGENT_LINE,
   MANAGED_MULTI_AGENT_V2_LINE,
   MANAGED_MULTI_AGENT_V2_TABLE_LINE,
@@ -53,6 +54,146 @@ function stripTomlComment(value: string): string {
     if (char === "#") return value.slice(0, index).trimEnd();
   }
   return value.trimEnd();
+}
+
+interface InlineBooleanField {
+  value: "true" | "false" | "unset";
+  valueStart?: number;
+  valueEnd?: number;
+  closeIndex: number;
+  bodyContentEnd: number;
+}
+
+function decodeTomlInlineKey(raw: string): string | undefined {
+  const key = raw.trim();
+  if (/^[A-Za-z0-9_-]+$/.test(key)) return key;
+  if (key.startsWith('"') && key.endsWith('"')) {
+    try {
+      const decoded = JSON.parse(key);
+      return typeof decoded === "string" ? decoded : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (key.startsWith("'") && key.endsWith("'")) return key.slice(1, -1);
+  return undefined;
+}
+
+function topLevelEquals(raw: string, start: number, end: number): number | undefined {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+  for (let index = start; index < end; index += 1) {
+    const char = raw[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"' && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "[") squareDepth += 1;
+    else if (char === "]") squareDepth -= 1;
+    else if (char === "{") curlyDepth += 1;
+    else if (char === "}") curlyDepth -= 1;
+    else if (char === "=" && squareDepth === 0 && curlyDepth === 0) return index;
+    if (squareDepth < 0 || curlyDepth < 0) return undefined;
+  }
+  return undefined;
+}
+
+function parseInlineBooleanField(raw: string, key: string): InlineBooleanField | undefined {
+  const value = stripTomlComment(raw);
+  const openIndex = value.search(/\S/);
+  if (openIndex < 0 || value[openIndex] !== "{") return undefined;
+  let closeIndex = value.length;
+  while (closeIndex > openIndex && /\s/.test(value[closeIndex - 1]!)) closeIndex -= 1;
+  closeIndex -= 1;
+  if (value[closeIndex] !== "}") {
+    throw new Error(`Could not parse ${key} inline table in Codex [features]`);
+  }
+
+  const segments: Array<readonly [number, number]> = [];
+  let segmentStart = openIndex + 1;
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+  for (let index = openIndex + 1; index < closeIndex; index += 1) {
+    const char = value[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"' && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "[") squareDepth += 1;
+    else if (char === "]") squareDepth -= 1;
+    else if (char === "{") curlyDepth += 1;
+    else if (char === "}") curlyDepth -= 1;
+    else if (char === "," && squareDepth === 0 && curlyDepth === 0) {
+      segments.push([segmentStart, index]);
+      segmentStart = index + 1;
+    }
+    if (squareDepth < 0 || curlyDepth < 0) {
+      throw new Error(`Could not parse ${key} inline table in Codex [features]`);
+    }
+  }
+  if (quote || squareDepth !== 0 || curlyDepth !== 0) {
+    throw new Error(`Could not parse ${key} inline table in Codex [features]`);
+  }
+  segments.push([segmentStart, closeIndex]);
+
+  let match: { value: "true" | "false"; start: number; end: number } | undefined;
+  for (const [start, end] of segments) {
+    if (!value.slice(start, end).trim()) continue;
+    const equals = topLevelEquals(value, start, end);
+    if (equals === undefined) {
+      throw new Error(`Could not parse ${key} inline table in Codex [features]`);
+    }
+    if (decodeTomlInlineKey(value.slice(start, equals)) !== "enabled") continue;
+    let fieldStart = equals + 1;
+    while (fieldStart < end && /\s/.test(value[fieldStart]!)) fieldStart += 1;
+    let fieldEnd = end;
+    while (fieldEnd > fieldStart && /\s/.test(value[fieldEnd - 1]!)) fieldEnd -= 1;
+    const fieldValue = value.slice(fieldStart, fieldEnd);
+    if (fieldValue !== "true" && fieldValue !== "false") {
+      throw new Error("enabled in Codex [features].multi_agent_v2 inline table must be a boolean");
+    }
+    if (match) {
+      throw new Error("Codex [features].multi_agent_v2 inline table contains duplicate enabled assignments");
+    }
+    match = { value: fieldValue, start: fieldStart, end: fieldEnd };
+  }
+
+  let bodyContentEnd = closeIndex;
+  while (bodyContentEnd > openIndex + 1 && /\s/.test(value[bodyContentEnd - 1]!)) bodyContentEnd -= 1;
+  return {
+    value: match?.value ?? "unset",
+    ...(match ? { valueStart: match.start, valueEnd: match.end } : {}),
+    closeIndex,
+    bodyContentEnd,
+  };
 }
 
 function decodeTomlString(raw: string, key: string): string {
@@ -118,14 +259,14 @@ export function assignments(lines: string[]): Record<ManagedAssignmentKey, Previ
 
 export function textFormat(text: string): NonNullable<CodexIntegrationJournal["format"]> {
   return {
-    lineEnding: text.includes("\r\n") ? "\r\n" : "\n",
-    trailingNewline: /\r?\n$/.test(text),
+    lineEnding: text.includes("\r\n") ? "\r\n" : text.includes("\n") ? "\n" : text.includes("\r") ? "\r" : "\n",
+    trailingNewline: /(?:\r\n|\n|\r)$/.test(text),
   };
 }
 
 export function splitLines(text: string): string[] {
   const normalized = stripUtf8Bom(text);
-  return normalized.length > 0 ? normalized.replace(/\r?\n$/, "").split(/\r?\n/) : [];
+  return normalized.length > 0 ? normalized.replace(/(?:\r\n|\n|\r)$/, "").split(/\r\n|\n|\r/) : [];
 }
 
 /**
@@ -193,7 +334,9 @@ export function removeDocumentLine(document: CodexConfigDocument, index: number)
 
 export function removeManagedComment(document: CodexConfigDocument): void {
   for (let index = document.lines.length - 1; index >= 0; index -= 1) {
-    if (document.lines[index] === MANAGED_COMMENT) removeDocumentLine(document, index);
+    if (document.lines[index] === MANAGED_COMMENT || document.lines[index] === MANAGED_ROUTE_COMMENT) {
+      removeDocumentLine(document, index);
+    }
   }
 }
 
@@ -242,7 +385,7 @@ function setScalarFeature(
   insertDocumentLine(document, table.endIndex, managedLine);
 }
 
-function findBooleanAssignmentInTable(
+function rawAssignmentInTable(
   lines: string[],
   tableName: "features" | "features.multi_agent_v2",
   key: string,
@@ -255,17 +398,26 @@ function findBooleanAssignmentInTable(
     const line = lines[index]!;
     if (/^\s*#/.test(line)) continue;
     const match = regex.exec(line);
-    if (!match) continue;
-    const value = stripTomlComment(match[1]!).trim();
-    if (value !== "true" && value !== "false") {
-      throw new Error(`${key} in Codex [${tableName}] must be a boolean`);
-    }
-    matches.push({ present: true, rawLine: line, value, index });
+    if (match) matches.push({ present: true, rawLine: line, value: match[1]!, index });
   }
   if (matches.length > 1) {
     throw new Error(`Codex config contains duplicate [${tableName}].${key} assignments`);
   }
   return { ...(matches[0] ?? { present: false }), tablePresent: true, tableName };
+}
+
+function findBooleanAssignmentInTable(
+  lines: string[],
+  tableName: "features" | "features.multi_agent_v2",
+  key: string,
+): PreviousFeatureAssignment {
+  const assignment = rawAssignmentInTable(lines, tableName, key);
+  if (!assignment.present) return assignment;
+  const value = stripTomlComment(assignment.value!).trim();
+  if (value !== "true" && value !== "false") {
+    throw new Error(`${key} in Codex [${tableName}] must be a boolean`);
+  }
+  return { ...assignment, value };
 }
 
 export function findAgentMaxDepthAssignment(lines: string[]): PreviousAgentAssignment {
@@ -311,16 +463,48 @@ export function findFeatureAssignment(lines: string[], key: string): PreviousFea
 }
 
 export function findMultiAgentV2Assignment(lines: string[]): PreviousFeatureAssignment {
-  const scalar = findFeatureAssignment(lines, "multi_agent_v2");
+  const rawScalar = rawAssignmentInTable(lines, "features", "multi_agent_v2");
   const table = findTomlTable(lines, "features.multi_agent_v2");
-  if (scalar.present && table) {
+  if (rawScalar.present && table) {
     throw new Error(
       "Codex config defines multi_agent_v2 as both [features] scalar and [features.multi_agent_v2] table",
     );
   }
-  return table
-    ? findBooleanAssignmentInTable(lines, "features.multi_agent_v2", "enabled")
-    : scalar;
+  if (table) return findBooleanAssignmentInTable(lines, "features.multi_agent_v2", "enabled");
+  if (!rawScalar.present) return rawScalar;
+  const rawValue = rawScalar.value!;
+  const scalarValue = stripTomlComment(rawValue).trim();
+  if (scalarValue === "true" || scalarValue === "false") {
+    return { ...rawScalar, value: scalarValue };
+  }
+  const inline = parseInlineBooleanField(rawValue, "multi_agent_v2");
+  if (!inline) throw new Error("multi_agent_v2 in Codex [features] must be a boolean or inline table");
+  return { ...rawScalar, value: inline.value, inlineTable: true };
+}
+
+export function managedMultiAgentV2AssignmentLine(previous: PreviousFeatureAssignment): string {
+  if (!previous.inlineTable) {
+    return previous.tableName === "features.multi_agent_v2"
+      ? MANAGED_MULTI_AGENT_V2_TABLE_LINE
+      : MANAGED_MULTI_AGENT_V2_LINE;
+  }
+  if (!previous.rawLine) {
+    throw new Error("Codex integration journal is missing the prior multi_agent_v2 inline table");
+  }
+  const prefix = /^\s*multi_agent_v2\s*=\s*/.exec(previous.rawLine);
+  if (!prefix) throw new Error("Could not parse the prior multi_agent_v2 inline table");
+  const rawValue = previous.rawLine.slice(prefix[0].length);
+  const inline = parseInlineBooleanField(rawValue, "multi_agent_v2");
+  if (!inline) throw new Error("Could not parse the prior multi_agent_v2 inline table");
+  if (inline.valueStart !== undefined && inline.valueEnd !== undefined) {
+    return previous.rawLine.slice(0, prefix[0].length + inline.valueStart)
+      + "false"
+      + previous.rawLine.slice(prefix[0].length + inline.valueEnd);
+  }
+  const bodyHasValues = rawValue.slice(0, inline.bodyContentEnd).trimEnd().endsWith("{") === false;
+  return previous.rawLine.slice(0, prefix[0].length + inline.bodyContentEnd)
+    + `${bodyHasValues ? ", " : ""}enabled = false`
+    + previous.rawLine.slice(prefix[0].length + inline.bodyContentEnd);
 }
 
 export function installCompatibilityV1Features(text: string): {
@@ -344,7 +528,12 @@ export function installCompatibilityV1Features(text: string): {
     MIN_COMPATIBILITY_V1_AGENT_DEPTH,
   );
   setScalarFeature(document, "multi_agent", MANAGED_MULTI_AGENT_LINE);
-  if (previousMultiAgentV2.tableName === "features.multi_agent_v2") {
+  if (previousMultiAgentV2.inlineTable) {
+    if (previousMultiAgentV2.index === undefined) {
+      throw new Error("Codex [features].multi_agent_v2 inline table disappeared during setup");
+    }
+    document.lines[previousMultiAgentV2.index] = managedMultiAgentV2AssignmentLine(previousMultiAgentV2);
+  } else if (previousMultiAgentV2.tableName === "features.multi_agent_v2") {
     const current = findBooleanAssignmentInTable(
       document.lines,
       "features.multi_agent_v2",
@@ -388,6 +577,17 @@ function verifyInstalledMultiAgentV2Feature(
   text: string,
   previous: PreviousFeatureAssignment,
 ): void {
+  if (previous.inlineTable) {
+    const current = findMultiAgentV2Assignment(splitLines(text));
+    if (!current.inlineTable
+      || current.value !== "false"
+      || current.rawLine !== managedMultiAgentV2AssignmentLine(previous)) {
+      throw new Error(
+        "Codex [features].multi_agent_v2 changed after setup; refusing to overwrite the user's newer value",
+      );
+    }
+    return;
+  }
   if (previous.tableName !== "features.multi_agent_v2") {
     const current = findMultiAgentV2Assignment(splitLines(text));
     if (current.tableName !== "features"
@@ -447,6 +647,17 @@ export function restoreMultiAgentV2Feature(
   text: string,
   previous: PreviousFeatureAssignment,
 ): string {
+  if (previous.inlineTable) {
+    verifyInstalledMultiAgentV2Feature(text, previous);
+    if (!previous.rawLine) {
+      throw new Error("Codex integration journal is missing the prior multi_agent_v2 inline table");
+    }
+    const document = parseDocument(text);
+    const current = findMultiAgentV2Assignment(document.lines);
+    if (current.index === undefined) throw new Error("Managed Codex multi_agent_v2 inline table is missing");
+    document.lines[current.index] = previous.rawLine;
+    return renderDocument(document);
+  }
   if (previous.tableName !== "features.multi_agent_v2") {
     return restoreBooleanFeature(
       text,

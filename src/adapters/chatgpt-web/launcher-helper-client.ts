@@ -384,8 +384,7 @@ export class LauncherBrowserHelperClient {
       return;
     }
     if (message.type === "ready") {
-      // An older helper advertises nothing and must never be sent optional frames: it would route
-      // them to its run handler and destroy the turn with an opaque TypeError.
+      // Optional frames are sent only when the helper advertises support for them.
       this.helperFeatures = new Set(message.features ?? []);
       this.readyResolve?.();
       this.readyResolve = undefined;

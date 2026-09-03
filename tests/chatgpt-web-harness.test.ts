@@ -10,7 +10,7 @@ import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-erro
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
-import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
+import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
 import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -68,6 +68,17 @@ test("current-turn MCP progress wait remains abortable", async () => {
   const controller = new AbortController();
   const waiting = progress.waitForChange(0, controller.signal);
   controller.abort();
+  await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("tool-boundary observation wait is cancelled by browser settlement", async () => {
+  const progress = new ChatGptExternalTurnProgress();
+  const revision = progress.recordToolBatch(1);
+  const browserSettlement = new AbortController();
+  const waiting = progress.waitForToolBatchObservation(revision, browserSettlement.signal);
+
+  browserSettlement.abort();
+
   await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
 });
 
@@ -863,6 +874,26 @@ describe("ChatGPT outer-native harness v4", () => {
     sessions.clear();
   });
 
+  test("retires only the exact active native turn that Codex marked aborted", () => {
+    const sessions = new ChatGptTurnSessions();
+    const cancelled: string[] = [];
+    const runtime = (name: string) => ({
+      mode: "read-only" as const,
+      browser: new Promise<string>(() => {}),
+      physicalSettlement: new Promise<void>(() => {}),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => { cancelled.push(name); },
+    });
+    sessions.getOrCreate("old", () => runtime("old"), "old-trace", "shared-owner", "turn_old");
+    sessions.getOrCreate("other", () => runtime("other"), "other-trace", "other-owner", "turn_other");
+
+    expect(sessions.retireAbortedOwnerTurns("shared-owner", new Set(["turn_old"]), "new")).toBe(1);
+    expect(sessions.find("old")).toBeUndefined();
+    expect(sessions.find("other")?.nativeTurnId).toBe("turn_other");
+    expect(cancelled).toEqual(["old"]);
+  });
+
   test("retires a failed session so the next native retry starts a new browser turn", async () => {
     const sessions = new ChatGptTurnSessions();
     let starts = 0;
@@ -1012,7 +1043,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("an ambiguous failure after Send activation is replayed without resending the Web prompt", async () => {
+  test("an ambiguous submission outcome is stable across native reconnects", async () => {
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: `browser://chatgpt-ambiguous-send-${Date.now()}`,
@@ -1037,6 +1068,7 @@ describe("ChatGPT outer-native harness v4", () => {
           type: "error",
           code: "chatgpt_submission_ambiguous",
           retryable: false,
+          message: "ChatGPT did not confirm that the prompt was sent. Check the ChatGPT tab before continuing.",
         });
       }
       expect(browserStarts).toBe(1);
@@ -1435,7 +1467,7 @@ describe("ChatGPT outer-native harness v4", () => {
 
     const missingEffort = buildResponseJSON([{
       type: "error",
-      message: "ChatGPT effort menu did not expose item index 1; item count: 0",
+      message: "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.",
       status: 502,
       errorType: "server_error",
       code: "upstream_server_error",
@@ -1557,10 +1589,12 @@ describe("ChatGPT outer-native harness v4", () => {
     });
   });
 
-  test("preserves Obsidian wiki links without turning them into LaTeX delimiters", () => {
+  test("turns Obsidian wiki links into file links without treating them as LaTeX", () => {
     expect(chatGptHtmlToMarkdown(
-      "<p>Sources: [[Goals/финансовые цели]] · [[wiki/entities/me]]</p>",
-    )).toBe("Sources: [[Goals/финансовые цели]] · [[wiki/entities/me]]");
+      "<p>Sources: [[Projects/sample-roadmap]] · [[Notes/example]]</p>",
+    )).toBe(
+      "Sources: [Projects/sample-roadmap](<Projects/sample-roadmap.md>) · [Notes/example](<Notes/example.md>)",
+    );
     expect(chatGptHtmlToMarkdown("<p>Ordinary [brackets] stay escaped</p>"))
       .toBe("Ordinary \\[brackets\\] stay escaped");
   });
@@ -2551,9 +2585,8 @@ describe("ChatGPT outer-native harness v4", () => {
         return await pending;
       };
 
-      // Regression for #274: even an empty inventory query crosses the broker through the native
-      // exec gateway, so the browser observes a real tool boundary before the model plans its next
-      // call instead of retiring the token during an invisible local MCP response.
+      // Even an empty inventory query crosses the broker through the native exec gateway. The
+      // browser therefore observes a real tool boundary before the model plans its next call.
       const emptyGatewayInventory = await inventoryThroughGateway(
         "clink opencode pal",
         false,
@@ -3251,9 +3284,8 @@ test("mirrored progress rejects frames that regress against the observed state",
 });
 
 test("an interrupted turn's abort notice is not mistaken for the next turn's instruction", () => {
-  // Reproduces a real failure: the user stopped a turn, Codex appended <turn_aborted> carrying the
-  // interrupted turn's id, and the next turn read that notice as its own user revision. The ids
-  // disagreed and every following turn failed with a turn_id conflict.
+  // An abort notice belongs to the interrupted turn and cannot become the following turn's active
+  // user revision.
   const request = rawWireRequest(environmentXml);
   const abortedNotice = "<turn_aborted>\nThe user interrupted the previous turn on purpose."
     + " Any running unified exec processes may still be running in the background."
@@ -3269,6 +3301,7 @@ test("an interrupted turn's abort notice is not mistaken for the next turn's ins
   expect(extractChatGptTurnUserRevision(request)).toEqual([
     { type: "input_text", text: "Inspect the project" },
   ]);
+  expect(priorChatGptAbortedTurnIds(request)).toEqual(["turn_test_interrupted"]);
 
   // A genuine steering message from a foreign turn must still be rejected.
   const steered = structuredClone(request);
@@ -3295,13 +3328,13 @@ test("a literal turn-aborted instruction with the current turn id remains user i
   expect(extractChatGptTurnUserRevision(request)).toEqual([
     { type: "input_text", text: literal },
   ]);
+  expect(priorChatGptAbortedTurnIds(request)).toEqual([]);
 });
 
 describe("adapter liveness covers every path through a turn", () => {
   // The Responses bridge cancels a turn after DEFAULT_STALL_TIMEOUT_SEC without a single adapter
-  // event (bridge.ts, `upstream_stall_timeout`). Any window inside runTurn that awaits without
-  // emitting is therefore a turn the user loses, and the waits that run before a session exists
-  // — the structured compaction handoff and the owner-retirement wait — used to be exactly that.
+  // event (bridge.ts, `upstream_stall_timeout`). Every wait inside runTurn, including waits before
+  // a session exists, must therefore keep the adapter observably alive.
   function livenessRequest(turnId: string, threadId: string, compaction: boolean): CodexParsedRequest {
     const request = parsed();
     if (compaction) request._compactionRequest = true;

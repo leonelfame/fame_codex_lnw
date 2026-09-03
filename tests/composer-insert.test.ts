@@ -51,7 +51,7 @@ function harness(options: {
 }
 
 test("places the caret itself when focus has not yet produced one in the composer", () => {
-  // The exact state left behind a tenth of a second after the effort menu closes.
+  // A focusable composer may be ready before the browser has placed a caret inside it.
   const { composer, calls, selection } = harness({ focusable: true, caretInsideComposer: false });
 
   expect(insertPlainTextIntoComposer(composer, "staged part")).toBeTrue();

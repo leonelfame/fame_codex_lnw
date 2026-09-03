@@ -41,6 +41,26 @@ interface ToolWaiter {
   onAbort?: () => void;
 }
 
+export type SafeTurnState = "awaiting_start" | "running" | "completed" | "revoked";
+
+interface SafeWaiter<T> {
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+interface SafeTurnControl {
+  state: SafeTurnState;
+  surfaceNonce: string;
+  launcherSent: boolean;
+  connectorStarted: boolean;
+  finalAnswer?: string;
+  sentWaiters: Set<SafeWaiter<void>>;
+  startWaiters: Set<SafeWaiter<void>>;
+  completionWaiters: Set<SafeWaiter<string>>;
+}
+
 interface TurnChannel {
   traceId: string;
   externalOwner: boolean;
@@ -53,6 +73,7 @@ interface TurnChannel {
   compactionRequested: boolean;
   compactionResult?: BrokerToolResult;
   compactionDeliveryCount: number;
+  safe?: SafeTurnControl;
   /** Every MCP request owns a lease from token claim until its handler has settled. */
   activities: Set<string>;
   /** Prevents a lost/retried or delayed claim from resurrecting activity after cleanup. */
@@ -73,12 +94,20 @@ interface BrokerRequest {
     | "invoke"
     | "owner_status"
     | "owner_register"
+    | "owner_register_safe"
     | "owner_update"
+    | "owner_safe_sent"
     | "owner_next"
     | "owner_complete"
     | "owner_completion_fence_begin"
     | "owner_completion_fence_commit"
     | "owner_revoke"
+    | "owner_safe_wait_start"
+    | "owner_safe_wait_completion"
+    | "owner_request_compaction"
+    | "owner_compaction_delivery_count"
+    | "safe_start"
+    | "safe_complete"
     | "activity_complete"
     | "submit_compaction_handoff";
   token?: string;
@@ -96,6 +125,9 @@ interface BrokerRequest {
   toolResult?: BrokerToolResult;
   handoffId?: string;
   summary?: string;
+  surfaceNonce?: string;
+  finalAnswer?: string;
+  contract?: "native" | "safe";
 }
 
 interface BrokerResponse {
@@ -166,11 +198,31 @@ function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
   return structuredClone(environment as ChatGptTurnEnvironment);
 }
 
+function assertSurfaceNonce(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{20,256}$/.test(value)) {
+    throw new Error("Zero Risk local browser binding is invalid");
+  }
+}
+
 export interface TurnBrokerOwner {
   register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
+  registerSafe(
+    environment: ChatGptTurnEnvironment,
+    surfaceNonce: string,
+    ttlMs?: number,
+    traceId?: string,
+  ): Promise<string>;
   updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void | Promise<void>;
+  confirmSafeTurnSent(
+    token: string,
+    surfaceNonce: string,
+  ): { confirmed: true; duplicate: boolean } | Promise<{ confirmed: true; duplicate: boolean }>;
   nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]>;
   completeTool(token: string, callId: string, result: BrokerToolResult): void | Promise<void>;
+  waitForSafeStart(token: string, signal?: AbortSignal): Promise<void>;
+  waitForSafeCompletion(token: string, signal?: AbortSignal): Promise<string>;
+  requestCompaction(token: string, queuedResult: BrokerToolResult): number | Promise<number>;
+  compactionDeliveryCount(token: string): number | Promise<number>;
   beginCompletionFence(token: string): number | undefined | Promise<number | undefined>;
   commitCompletionFence(token: string, revision: number): boolean | Promise<boolean>;
   revoke(token: string, reason?: Error): void | Promise<void>;
@@ -223,6 +275,7 @@ export class TurnBroker implements TurnBrokerOwner {
     ttlMs?: number,
     traceId = "unknown",
     externalOwner = false,
+    handlePrefix = "turn",
   ): Promise<string> {
     await this.start();
     this.prune();
@@ -232,7 +285,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
       throw new Error("ChatGPT web turn broker TTL must be a positive finite number");
     }
-    const token = opaqueId("turn");
+    const token = opaqueId(handlePrefix);
     const channel: TurnChannel = {
       traceId,
       externalOwner,
@@ -254,6 +307,29 @@ export class TurnBroker implements TurnBrokerOwner {
     this.channels.set(token, channel);
     this.pending.set(token, channel);
     console.info(`[chatgpt-web] broker trace=${traceId} registered tokenHash=${handleFingerprint(token)}`);
+    return token;
+  }
+
+  async registerSafe(
+    environment: ChatGptTurnEnvironment,
+    surfaceNonce: string,
+    ttlMs?: number,
+    traceId = "unknown",
+    externalOwner = false,
+  ): Promise<string> {
+    assertSurfaceNonce(surfaceNonce);
+    const token = await this.register(environment, ttlMs, traceId, externalOwner, "request");
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("Zero Risk turn registration was revoked before initialization");
+    channel.safe = {
+      state: "awaiting_start",
+      surfaceNonce,
+      launcherSent: false,
+      connectorStarted: false,
+      sentWaiters: new Set(),
+      startWaiters: new Set(),
+      completionWaiters: new Set(),
+    };
     return token;
   }
 
@@ -284,6 +360,10 @@ export class TurnBroker implements TurnBrokerOwner {
     if (environmentIdentity(channel.environment) !== environmentIdentity(environment)) {
       throw new Error("Codex turn environment changed during an active ChatGPT tool loop");
     }
+    if (channel.safe?.state === "revoked") throw new Error("Zero Risk turn is already terminal");
+    // A no-tool Zero Risk answer can complete before its outer Responses observer reaches this owner
+    // readback. The environment is already proven identical, so completion makes this a no-op.
+    if (channel.safe?.state === "completed") return;
     channel.environment = {
       ...environment,
       ...(channel.environment.expiresAt !== undefined
@@ -294,8 +374,20 @@ export class TurnBroker implements TurnBrokerOwner {
 
   async nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> {
     this.prune();
-    const channel = this.channels.get(token);
+    let channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    if (channel.safe?.state === "awaiting_start") {
+      // The outer Codex adapter owns this wait. It crosses the start boundary only after the user
+      // confirms in the Launcher that the copied prompt was sent in the visible ChatGPT tab.
+      await this.waitForSafeStart(token, signal);
+      this.prune();
+      channel = this.channels.get(token);
+      if (!channel) throw new Error("turn token is invalid or expired");
+    }
+    // This owner-only empty batch tells the adapter to consume the already accepted completion.
+    // Public Zero Risk MCP calls remain fail-closed after the turn reaches its terminal state.
+    if (channel.safe?.state === "completed") return [];
+    this.assertSafeHarnessRunning(channel);
     if (channel.compactionRequested) {
       throw new Error("Codex context compaction superseded ordinary MCP tool delivery");
     }
@@ -326,6 +418,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    this.assertSafeHarnessRunning(channel, true);
     const invocation = channel.invocations.get(callId);
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (!channel.deliveredCallIds.delete(callId)) {
@@ -368,6 +461,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    this.assertSafeHarnessRunning(channel);
     if (channel.compactionRequested) {
       throw new Error("Codex context compaction was already requested for this turn");
     }
@@ -399,6 +493,104 @@ export class TurnBroker implements TurnBrokerOwner {
     return channel.compactionDeliveryCount;
   }
 
+  startSafeTurn(requestId: string): { started: true; duplicate: boolean } {
+    this.prune();
+    const channel = this.channels.get(requestId);
+    if (!channel) throw new Error("Zero Risk request_id is invalid, expired, or revoked");
+    const safe = channel.safe;
+    if (!safe) throw new Error("request_id is not registered for Zero Risk browser interaction");
+    if (safe.state === "completed" || safe.state === "revoked") {
+      throw new Error("Zero Risk turn is already terminal");
+    }
+    if (safe.connectorStarted) return { started: true, duplicate: true };
+    safe.connectorStarted = true;
+    this.activateSafeTurn(channel, safe);
+    return { started: true, duplicate: false };
+  }
+
+  confirmSafeTurnSent(requestId: string, surfaceNonce: string): { confirmed: true; duplicate: boolean } {
+    this.prune();
+    assertSurfaceNonce(surfaceNonce);
+    const channel = this.channels.get(requestId);
+    if (!channel) throw new Error("Zero Risk request_id is invalid, expired, or revoked");
+    const safe = channel.safe;
+    if (!safe) throw new Error("request_id is not registered for Zero Risk browser interaction");
+    this.assertSafeNonce(safe, surfaceNonce);
+    if (safe.state === "completed" || safe.state === "revoked") {
+      throw new Error("Zero Risk turn is already terminal");
+    }
+    if (safe.launcherSent) return { confirmed: true, duplicate: true };
+    safe.launcherSent = true;
+    this.resolveSafeWaiters(safe.sentWaiters, undefined);
+    this.activateSafeTurn(channel, safe);
+    return { confirmed: true, duplicate: false };
+  }
+
+  completeSafeTurn(
+    requestId: string,
+    finalAnswer: string,
+  ): { completed: true; duplicate: boolean } {
+    this.prune();
+    if (typeof finalAnswer !== "string" || finalAnswer.trim().length === 0) {
+      throw new Error("Zero Risk turn final_answer must not be empty");
+    }
+    const channel = this.channels.get(requestId);
+    if (!channel) throw new Error("Zero Risk request_id is invalid, expired, or revoked");
+    const safe = channel.safe;
+    if (!safe) throw new Error("request_id is not registered for Zero Risk browser interaction");
+    if (safe.state === "completed") {
+      if (safe.finalAnswer !== finalAnswer) {
+        throw new Error("Zero Risk turn completion conflicts with the accepted final_answer");
+      }
+      return { completed: true, duplicate: true };
+    }
+    if (safe.state === "revoked") throw new Error("Zero Risk turn is already terminal");
+    if (safe.state !== "running") throw new Error("Zero Risk turn has not started");
+    if (channel.invocations.size > 0) {
+      throw new Error(`Zero Risk turn cannot complete with ${channel.invocations.size} pending Codex tool invocation(s)`);
+    }
+    if (channel.activities.size > 0) {
+      throw new Error(`Zero Risk turn cannot complete with ${channel.activities.size} active Codex MCP request(s)`);
+    }
+    safe.state = "completed";
+    safe.finalAnswer = finalAnswer;
+    this.resolveSafeWaiters(safe.completionWaiters, finalAnswer);
+    return { completed: true, duplicate: false };
+  }
+
+  waitForSafeStart(requestId: string, signal?: AbortSignal): Promise<void> {
+    this.prune();
+    const channel = this.channels.get(requestId);
+    if (!channel) return Promise.reject(new Error("Zero Risk request_id is invalid, expired, or revoked"));
+    const safe = channel.safe;
+    if (!safe) return Promise.reject(new Error("request_id is not registered for Zero Risk browser interaction"));
+    if (safe.state === "running" || safe.state === "completed") return Promise.resolve();
+    if (safe.state === "revoked") return Promise.reject(new Error("Zero Risk turn was revoked"));
+    return this.waitForSafeState(safe.startWaiters, signal, "Zero Risk turn start wait aborted");
+  }
+
+  private waitForSafeSent(requestId: string, signal?: AbortSignal): Promise<void> {
+    this.prune();
+    const channel = this.channels.get(requestId);
+    if (!channel) return Promise.reject(new Error("Zero Risk request_id is invalid, expired, or revoked"));
+    const safe = channel.safe;
+    if (!safe) return Promise.reject(new Error("request_id is not registered for Zero Risk browser interaction"));
+    if (safe.launcherSent) return Promise.resolve();
+    if (safe.state === "revoked") return Promise.reject(new Error("Zero Risk turn was revoked"));
+    return this.waitForSafeState(safe.sentWaiters, signal, "Zero Risk turn Sent wait aborted");
+  }
+
+  waitForSafeCompletion(requestId: string, signal?: AbortSignal): Promise<string> {
+    this.prune();
+    const channel = this.channels.get(requestId);
+    if (!channel) return Promise.reject(new Error("Zero Risk request_id is invalid, expired, or revoked"));
+    const safe = channel.safe;
+    if (!safe) return Promise.reject(new Error("request_id is not registered for Zero Risk browser interaction"));
+    if (safe.state === "completed" && safe.finalAnswer !== undefined) return Promise.resolve(safe.finalAnswer);
+    if (safe.state === "revoked") return Promise.reject(new Error("Zero Risk turn was revoked"));
+    return this.waitForSafeState(safe.completionWaiters, signal, "Zero Risk turn completion wait aborted");
+  }
+
   revoke(token: string, reason = new Error("Codex turn binding was revoked")): void {
     const channel = this.channels.get(token);
     if (!channel) return;
@@ -407,6 +599,12 @@ export class TurnBroker implements TurnBrokerOwner {
     if (channel.bindingId) {
       this.bindings.delete(channel.bindingId);
       this.retire(this.retiredBindings, channel.bindingId, channel.traceId);
+    }
+    if (channel.safe) {
+      channel.safe.state = "revoked";
+      this.rejectSafeWaiters(channel.safe.sentWaiters, reason);
+      this.rejectSafeWaiters(channel.safe.startWaiters, reason);
+      this.rejectSafeWaiters(channel.safe.completionWaiters, reason);
     }
     this.retire(this.retiredTokens, token, channel.traceId);
     this.rejectChannel(channel, reason);
@@ -445,6 +643,67 @@ export class TurnBroker implements TurnBrokerOwner {
       if (oldest.done) return;
       history.delete(oldest.value);
     }
+  }
+
+  private assertSafeNonce(safe: SafeTurnControl, surfaceNonce: string): void {
+    if (safe.surfaceNonce !== surfaceNonce) throw new Error("Zero Risk local browser binding does not match this turn");
+  }
+
+  private activateSafeTurn(channel: TurnChannel, safe: SafeTurnControl): void {
+    if (safe.state !== "awaiting_start" || !safe.launcherSent || !safe.connectorStarted) return;
+    safe.state = "running";
+    // The setup window may be bounded, but a turn authorized by the user and bound by the
+    // Zero Risk connector remains live until completion, cancellation, or runtime shutdown.
+    delete channel.environment.expiresAt;
+    this.resolveSafeWaiters(safe.startWaiters, undefined);
+  }
+
+  private assertSafeHarnessRunning(channel: TurnChannel, allowCompaction = false): void {
+    const safe = channel.safe;
+    if (!safe) return;
+    if (safe.state === "awaiting_start") {
+      if (!safe.launcherSent) throw new Error("Zero Risk turn is waiting for the user's Sent confirmation");
+      throw new Error("Zero Risk request is not connected yet. Call codex_turn_start with its request_id first");
+    }
+    if (safe.state !== "running") throw new Error("Zero Risk turn is already terminal");
+    if (channel.compactionRequested && !allowCompaction) {
+      throw new Error("Zero Risk turn is awaiting completion for Codex context compaction");
+    }
+  }
+
+  private waitForSafeState<T>(
+    waiters: Set<SafeWaiter<T>>,
+    signal: AbortSignal | undefined,
+    abortMessage: string,
+  ): Promise<T> {
+    if (signal?.aborted) return Promise.reject(new DOMException(abortMessage, "AbortError"));
+    return new Promise<T>((resolveWait, rejectWait) => {
+      const waiter: SafeWaiter<T> = { resolve: resolveWait, reject: rejectWait, ...(signal ? { signal } : {}) };
+      if (signal) {
+        waiter.onAbort = () => {
+          waiters.delete(waiter);
+          rejectWait(new DOMException(abortMessage, "AbortError"));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      waiters.add(waiter);
+    });
+  }
+
+  private resolveSafeWaiters<T>(waiters: Set<SafeWaiter<T>>, value: T): void {
+    for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(value);
+    }
+    waiters.clear();
+  }
+
+  private rejectSafeWaiters<T>(waiters: Set<SafeWaiter<T>>, error: Error): void {
+    for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.reject(error);
+    }
+    waiters.clear();
   }
 
   async close(): Promise<void> {
@@ -561,8 +820,10 @@ export class TurnBroker implements TurnBrokerOwner {
   private handleSocket(socket: Socket): void {
     let buffered = "";
     let handled = false;
+    const disconnected = new AbortController();
     socket.setEncoding("utf8");
     socket.on("error", () => {});
+    socket.once("close", () => disconnected.abort());
     socket.on("data", chunk => {
       if (handled) return;
       buffered += chunk;
@@ -584,9 +845,7 @@ export class TurnBroker implements TurnBrokerOwner {
         this.writeSocketResponse(socket, { id: request?.id ?? "unknown", error: errorOf(error).message });
         return;
       }
-      const requestAbort = new AbortController();
-      socket.once("close", () => requestAbort.abort());
-      void Promise.resolve().then(() => this.dispatch(request!, requestAbort.signal)).then(
+      void Promise.resolve().then(() => this.dispatch(request!, disconnected.signal)).then(
         result => this.writeSocketResponse(socket, { id: request!.id, result }),
         error => this.writeSocketResponse(socket, { id: request!.id, error: errorOf(error).message }),
       );
@@ -606,13 +865,28 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_update", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_revoke", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
 
-  private dispatch(request: BrokerRequest, signal?: AbortSignal): unknown | Promise<unknown> {
+  private async dispatch(request: BrokerRequest, socketSignal?: AbortSignal): Promise<unknown> {
     this.prune();
+    if (request.method === "safe_start") {
+      if (!request.token) throw new Error("Zero Risk request_id is required");
+      return this.startSafeTurn(request.token);
+    }
+    if (request.method === "safe_complete") {
+      if (!request.token) throw new Error("Zero Risk request_id is required");
+      if (typeof request.finalAnswer !== "string") throw new Error("Zero Risk turn final_answer is required");
+      let channel = this.channels.get(request.token);
+      if (channel?.safe?.state === "awaiting_start" && !channel.safe.launcherSent) {
+        await this.waitForSafeSent(request.token, socketSignal);
+        this.prune();
+        channel = this.channels.get(request.token);
+      }
+      return this.completeSafeTurn(request.token, request.finalAnswer);
+    }
     if (request.method === "submit_compaction_handoff") {
       if (typeof request.token !== "string" || request.token.length === 0) {
         throw new Error("compaction control token is required");
@@ -627,7 +901,7 @@ export class TurnBroker implements TurnBrokerOwner {
       return { submitted: true };
     }
     if (request.method === "owner_status") {
-      return { protocolVersion: 2, acceptingExternalOwners: this.acceptingExternalOwners };
+      return { protocolVersion: 4, acceptingExternalOwners: this.acceptingExternalOwners };
     }
     if (request.method === "owner_register") {
       const environment = ownerEnvironment(request.environment);
@@ -636,14 +910,33 @@ export class TurnBroker implements TurnBrokerOwner {
       }
       return this.register(environment, request.ttlMs, request.traceId, true).then(token => ({ token }));
     }
+    if (request.method === "owner_register_safe") {
+      const environment = ownerEnvironment(request.environment);
+      assertSurfaceNonce(request.surfaceNonce);
+      if (request.traceId !== undefined && !/^[A-Za-z0-9_-]{6,128}$/.test(request.traceId)) {
+        throw new Error("turn owner trace id is invalid");
+      }
+      return this.registerSafe(
+        environment,
+        request.surfaceNonce,
+        request.ttlMs,
+        request.traceId,
+        true,
+      ).then(token => ({ token }));
+    }
     if (request.method === "owner_update") {
       if (!request.token) throw new Error("turn owner token is required");
       this.updateEnvironment(request.token, ownerEnvironment(request.environment));
       return { updated: true };
     }
+    if (request.method === "owner_safe_sent") {
+      if (!request.token) throw new Error("turn owner token is required");
+      assertSurfaceNonce(request.surfaceNonce);
+      return this.confirmSafeTurnSent(request.token, request.surfaceNonce);
+    }
     if (request.method === "owner_next") {
       if (!request.token) throw new Error("turn owner token is required");
-      return this.nextToolBatch(request.token, signal).then(requests => ({ requests }));
+      return this.nextToolBatch(request.token, socketSignal).then(requests => ({ requests }));
     }
     if (request.method === "owner_complete") {
       if (!request.token) throw new Error("turn owner token is required");
@@ -670,11 +963,33 @@ export class TurnBroker implements TurnBrokerOwner {
       this.revoke(request.token);
       return { revoked: true };
     }
+    if (request.method === "owner_safe_wait_start") {
+      if (!request.token) throw new Error("turn owner token is required");
+      return this.waitForSafeStart(request.token, socketSignal).then(() => ({ started: true }));
+    }
+    if (request.method === "owner_safe_wait_completion") {
+      if (!request.token) throw new Error("turn owner token is required");
+      return this.waitForSafeCompletion(request.token, socketSignal).then(finalAnswer => ({ finalAnswer }));
+    }
+    if (request.method === "owner_request_compaction") {
+      if (!request.token) throw new Error("turn owner token is required");
+      if (!request.toolResult || !Array.isArray(request.toolResult.content)) {
+        throw new Error("turn owner compaction result is invalid");
+      }
+      return { interrupted: this.requestCompaction(request.token, request.toolResult) };
+    }
+    if (request.method === "owner_compaction_delivery_count") {
+      if (!request.token) throw new Error("turn owner token is required");
+      return { count: this.compactionDeliveryCount(request.token) };
+    }
     if (request.method === "claim") {
+      const contract = request.contract ?? "native";
       const token = request.token;
-      if (typeof token !== "string" || token.length === 0) throw new Error("turn token is required");
+      if (typeof token !== "string" || token.length === 0) {
+        throw new Error(contract === "safe" ? "request id is required" : "turn token is required");
+      }
       const channel = this.channels.get(token);
-      const activeChannel = channel && !channel.completionCommitted ? channel : undefined;
+      let activeChannel = channel && !channel.completionCommitted ? channel : undefined;
       const retiredTurn = channel?.completionCommitted ? channel.traceId : this.retiredTokens.get(token);
       console.error(
         `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(activeChannel)}`
@@ -682,9 +997,26 @@ export class TurnBroker implements TurnBrokerOwner {
       );
       if (!activeChannel) {
         throw new Error(retiredTurn !== undefined
-          ? `This turn_token was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
+          ? `${contract === "safe" ? "This request_id" : "This turn_token"} was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
           + " This Codex Native action can no longer run."
-          : "turn token is invalid, expired, or revoked");
+          : `${contract === "safe" ? "request id" : "turn token"} is invalid, expired, or revoked`);
+      }
+      if (activeChannel.safe) {
+        if (contract !== "safe") throw new Error("Zero Risk request id requires the Zero Risk MCP contract");
+        if (activeChannel.safe.state === "awaiting_start" && !activeChannel.safe.launcherSent) {
+          // ChatGPT can issue its first Harness call in the brief interval between the user sending
+          // the copied prompt and confirming Sent in the Launcher. Hold that call behind the local
+          // authorization boundary, but still require codex_turn_start before it can run.
+          await this.waitForSafeSent(token, socketSignal);
+          this.prune();
+          activeChannel = this.channels.get(token);
+          if (!activeChannel || activeChannel.completionCommitted) {
+            throw new Error("turn token is invalid, expired, or revoked");
+          }
+        }
+        this.assertSafeHarnessRunning(activeChannel);
+      } else if (contract === "safe") {
+        throw new Error("Zero Risk MCP contract requires a Zero Risk request id");
       }
       if (typeof request.activityId !== "string" || !/^activity_[A-Za-z0-9_-]{16,128}$/.test(request.activityId)) {
         throw new Error("turn activity id is invalid");
@@ -750,6 +1082,7 @@ export class TurnBroker implements TurnBrokerOwner {
       return { released: true };
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
+    this.assertSafeHarnessRunning(binding.channel);
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
       if (!result) throw new Error("Codex context compaction control result is unavailable");
@@ -888,6 +1221,7 @@ export async function callTurnBroker<T>(
       settled = true;
       clearTimeout(timer);
       cleanup();
+      socket.destroy();
       if (response.error) rejectCall(new Error(response.error));
       else resolveCall(response.result as T);
     };
@@ -901,8 +1235,7 @@ export async function callTurnBroker<T>(
     }
     socket.setEncoding("utf8");
     socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
-    // The server owns response termination. Waiting for the pipe/socket to close before resolving
-    // prevents callers from retiring the broker while Bun still has a named-pipe write in flight.
+    // A close without a complete newline-delimited response is still an explicit broker failure.
     socket.once("close", finishResponse);
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`));
     socket.on("data", chunk => {
@@ -926,6 +1259,9 @@ export async function callTurnBroker<T>(
         return;
       }
       response = parsed;
+      // A full newline-delimited response proves the server write reached this process. Settling
+      // here avoids relying on Bun to close both halves of a long-polled Unix socket/named pipe.
+      finishResponse();
     });
   });
 }
@@ -948,7 +1284,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
         + ` (${error instanceof Error ? error.message : String(error)})`,
       );
     }
-    if (status.protocolVersion !== 2) {
+    if (status.protocolVersion !== 4) {
       throw new Error(`Unsupported DEV turn-owner protocol version: ${String(status.protocolVersion)}`);
     }
     if (status.acceptingExternalOwners !== true) {
@@ -969,8 +1305,43 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
     return response.token;
   }
 
+  async registerSafe(
+    environment: ChatGptTurnEnvironment,
+    surfaceNonce: string,
+    ttlMs?: number,
+    traceId = "unknown",
+  ): Promise<string> {
+    assertSurfaceNonce(surfaceNonce);
+    const response = await callTurnBroker<{ token?: unknown }>(this.socketPath, {
+      method: "owner_register_safe",
+      environment,
+      surfaceNonce,
+      ...(ttlMs !== undefined ? { ttlMs } : {}),
+      ...(traceId !== "unknown" ? { traceId } : {}),
+    });
+    if (typeof response.token !== "string" || !response.token.startsWith("request_")) {
+      throw new Error("DEV Zero Risk turn owner received an invalid broker request id");
+    }
+    return response.token;
+  }
+
   async updateEnvironment(token: string, environment: ChatGptTurnEnvironment): Promise<void> {
     await callTurnBroker(this.socketPath, { method: "owner_update", token, environment });
+  }
+
+  async confirmSafeTurnSent(
+    token: string,
+    surfaceNonce: string,
+  ): Promise<{ confirmed: true; duplicate: boolean }> {
+    const response = await callTurnBroker<{ confirmed?: unknown; duplicate?: unknown }>(this.socketPath, {
+      method: "owner_safe_sent",
+      token,
+      surfaceNonce,
+    });
+    if (response.confirmed !== true || typeof response.duplicate !== "boolean") {
+      throw new Error("DEV Zero Risk turn owner received an invalid Sent confirmation result");
+    }
+    return { confirmed: true, duplicate: response.duplicate };
   }
 
   async nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> {
@@ -999,6 +1370,52 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
       callId,
       toolResult: result,
     }, null);
+  }
+
+  async waitForSafeStart(token: string, signal?: AbortSignal): Promise<void> {
+    const response = await callTurnBroker<{ started?: unknown }>(
+      this.socketPath,
+      { method: "owner_safe_wait_start", token },
+      null,
+      signal,
+    );
+    if (response.started !== true) throw new Error("DEV Zero Risk turn owner received an invalid start result");
+  }
+
+  async waitForSafeCompletion(token: string, signal?: AbortSignal): Promise<string> {
+    const response = await callTurnBroker<{ finalAnswer?: unknown }>(
+      this.socketPath,
+      { method: "owner_safe_wait_completion", token },
+      null,
+      signal,
+    );
+    if (typeof response.finalAnswer !== "string" || response.finalAnswer.trim().length === 0) {
+      throw new Error("DEV Zero Risk turn owner received an invalid completion result");
+    }
+    return response.finalAnswer;
+  }
+
+  async requestCompaction(token: string, queuedResult: BrokerToolResult): Promise<number> {
+    const response = await callTurnBroker<{ interrupted?: unknown }>(this.socketPath, {
+      method: "owner_request_compaction",
+      token,
+      toolResult: queuedResult,
+    }, null);
+    if (!Number.isSafeInteger(response.interrupted) || Number(response.interrupted) < 0) {
+      throw new Error("DEV Zero Risk turn owner received an invalid compaction interrupt count");
+    }
+    return Number(response.interrupted);
+  }
+
+  async compactionDeliveryCount(token: string): Promise<number> {
+    const response = await callTurnBroker<{ count?: unknown }>(this.socketPath, {
+      method: "owner_compaction_delivery_count",
+      token,
+    });
+    if (!Number.isSafeInteger(response.count) || Number(response.count) < 0) {
+      throw new Error("DEV Zero Risk turn owner received an invalid compaction delivery count");
+    }
+    return Number(response.count);
   }
 
   async beginCompletionFence(token: string): Promise<number | undefined> {

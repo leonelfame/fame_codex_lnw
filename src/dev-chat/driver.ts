@@ -356,6 +356,7 @@ function usageOf(response: ResponsesEnvelope): DevChatUsage {
 }
 
 export function defaultDevChatModel(config: AppConfig): DevChatModel {
+  if (config.browserInteractionMode === "manual") return "chatgpt-web/zero-risk";
   return config.solAvailable ? "chatgpt-web/light" : "chatgpt-web/luna";
 }
 
@@ -422,6 +423,10 @@ export class DevChatDriver {
     const opened = this.store.loadOrCreate(name, model, this.cwd);
     if (resolve(opened.state.cwd) !== resolve(this.cwd)) {
       throw new Error(`DEV chat ${JSON.stringify(name)} belongs to ${opened.state.cwd}; use another name for ${this.cwd}`);
+    }
+    if (!opened.created && requestedModel && opened.state.model !== requestedModel) {
+      opened.state.model = requestedModel;
+      this.store.save(opened.state);
     }
     requireChatGptWebModelRoute(opened.state.model, this.config);
     this.assertBiggerContextModel(opened.state.model);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -25,6 +26,12 @@ export interface CompiledChatGptWebPrompt {
 export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  /**
+   * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
+   * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
+   * reads or mutates ChatGPT's DOM. Completion is accepted only through the bound Zero Risk MCP tools.
+   */
+  manualControl?: true;
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
@@ -129,7 +136,7 @@ export function formatChatGptWebMultipartCommit(
   ].join("\n");
 }
 
-const RETIRED_TURN_HANDLE = /\b(turn|binding)_[A-Za-z0-9_-]{24,}/g;
+const RETIRED_TURN_HANDLE = /\b(turn|request|binding)_[A-Za-z0-9_-]{24,}/g;
 
 /**
  * The accumulated Codex context replays earlier turns, including the broker handles those turns
@@ -348,6 +355,7 @@ export function chatGptReadOnlyContextWarning(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
 ): string | undefined {
+  if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) return undefined;
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (mode.localTools) return undefined;
   const label = mode.effort === "max" ? "ChatGPT Pro" : `ChatGPT Web ${mode.displayLabel}`;
@@ -356,12 +364,12 @@ export function chatGptReadOnlyContextWarning(
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
   const browserOnlyGuidance = !capabilities.localToolsEnabled
-    ? " This installation is in Browser-only mode. Open MCP in the launcher and connect the Full harness to give the selected ChatGPT Web model access to local tools."
+    ? "\n>\n> **Action:** Open `MCP` in `Codex Web GPT` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
     : "";
   if (hasLocalEvidence) {
-    return `⚠️ ${label} cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
+    return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
   }
-  return `⚠️ ${label} cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
+  return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
 }
 
 export function compileChatGptWebPrompt(
@@ -370,10 +378,21 @@ export function compileChatGptWebPrompt(
   turnToken?: string,
   options?: CompileChatGptWebPromptOptions,
 ): CompiledChatGptWebPrompt {
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const manualControl = options?.manualControl === true;
+  const mode = manualControl
+    ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
+    : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
   const multipartEnabled = multipartParts !== undefined;
+  if (manualControl) {
+    if (!capabilities.localToolsEnabled) {
+      throw new Error("ChatGPT Zero Risk requires the Full Codex harness");
+    }
+    if (captureLunaCheckpoint || multipartEnabled) {
+      throw new Error("ChatGPT Zero Risk does not support rolling or multipart browser transport");
+    }
+  }
   if (multipartParts !== undefined && multipartParts !== 2 && multipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
     throw new Error("Bigger Context requires two or three multipart stages");
   }
@@ -387,7 +406,9 @@ export function compileChatGptWebPrompt(
     throw new Error("Rolling checkpoints are supported only for normal ChatGPT Luna turns");
   }
   if (mode.localTools && !turnToken) {
-    throw new Error("Tool-capable ChatGPT web mode requires a broker turn token");
+    throw new Error(manualControl
+      ? "ChatGPT Zero Risk requires a broker request id"
+      : "Tool-capable ChatGPT web mode requires a broker turn token");
   }
   if (!mode.localTools && turnToken !== undefined) {
     throw new Error("A read-only ChatGPT Web effort must not receive a local-tool capability token");
@@ -405,19 +426,26 @@ export function compileChatGptWebPrompt(
     multipartEnabled
       ? "Read and reconstruct every acknowledged staged JSON record before acting."
       : "Read the complete inline JSON task context before acting.",
-    multipartEnabled
-      ? "Each image_attachment in the staged context refers to the correspondingly named image attached to this commit message; inspect it directly."
-      : "Each image_attachment in the context refers to the correspondingly named image attached to this ChatGPT message; inspect it directly.",
+    manualControl
+      ? "Each image_attachment in the context refers, in order, to an image the user manually attached to this ChatGPT message. If its corresponding image is absent, say that it was not provided instead of guessing."
+      : multipartEnabled
+        ? "Each image_attachment in the staged context refers to the correspondingly named image attached to this commit message; inspect it directly."
+        : "Each image_attachment in the context refers to the correspondingly named image attached to this ChatGPT message; inspect it directly.",
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to Codex.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
   ];
   const transportContract = parsed._compactionRequest
-    ? [
+    ? manualControl
+      ? [
+        "This is a Codex history-compaction checkpoint, not a normal task turn.",
+        "Do not call work tools or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
+      ]
+      : [
       "This is a Codex history-compaction checkpoint, not a normal task turn.",
       "Do not call local or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
       "Return only the checkpoint summary that the next model needs to resume the task.",
-    ]
+      ]
     : mode.localTools
     ? [
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
@@ -467,10 +495,29 @@ export function compileChatGptWebPrompt(
       "The outer bridge removes this marker and checkpoint from the user-facing stream. Never refer to the checkpoint in the visible answer.",
     ]
     : [];
-  const transportResume = parsed._compactionRequest
+  const manualControlContract = manualControl
     ? [
+      "<codex_zero_risk_request_json>",
+      JSON.stringify({ request_id: turnToken }),
+      "</codex_zero_risk_request_json>",
+    ]
+    : [];
+  const transportResume = parsed._compactionRequest
+    ? manualControl
+      ? [
+        "<codex_transport_resume>",
+        "The task context is complete. Produce the requested checkpoint summary now.",
+        "</codex_transport_resume>",
+      ]
+      : [
       "<codex_transport_resume>",
       "The task context is complete. Produce the requested checkpoint summary now without calling tools.",
+      "</codex_transport_resume>",
+      ]
+    : manualControl
+    ? [
+      "<codex_transport_resume>",
+      "The task context is complete. Execute the latest active user request now.",
       "</codex_transport_resume>",
     ]
     : mode.localTools
@@ -509,6 +556,7 @@ export function compileChatGptWebPrompt(
           ...sharedContract,
           ...transportContract,
           ...outputControlContract,
+          ...manualControlContract,
           ...checkpointContract,
           answerContract,
           ...transportResume,
@@ -521,6 +569,7 @@ export function compileChatGptWebPrompt(
       ...sharedContract,
       ...transportContract,
       ...outputControlContract,
+      ...manualControlContract,
       ...checkpointContract,
       answerContract,
       "<codex_context_json>",

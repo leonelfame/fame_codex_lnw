@@ -442,17 +442,16 @@ input.on("line", line => {
     completionFenceCommitWaiters.delete(message.id);
     waiter.resolve(message.committed);
   } else if (message.type === "progress") {
-    // Progress is only meaningful for a turn this helper is actually running. Creating a mirror
-    // for any unrecognised id let late, malformed, or misaddressed frames grow this map without
-    // bound, since nothing would ever remove an entry that has no turn to end it.
+    // Progress is meaningful only for a turn this helper is currently running. Ignore every other
+    // id so the mirror map remains owned by active turn lifecycles.
     if (!abortControllers.has(message.id)) return;
     const progress = turnProgress.get(message.id) ?? new ChatGptMirroredTurnProgress();
     turnProgress.set(message.id, progress);
     try {
       progress.apply(message.snapshot);
     } catch (error) {
-      // Progress is a liveness and tool-boundary signal, never response content. A malformed frame
-      // is dropped instead of destroying an accepted ChatGPT turn that cannot be resent.
+      // Progress carries liveness and tool-boundary state, never response content. Invalid progress
+      // cannot determine the outcome of the active ChatGPT turn, so it is logged and ignored.
       diagnostic(
         `[chatgpt-web] discarded an invalid MCP progress frame for ${message.id}:`,
         error instanceof Error ? error.message : String(error),
@@ -492,9 +491,7 @@ input.on("line", line => {
       message: error instanceof Error ? error.message : String(error),
     }));
   } else {
-    // Never treat an unrecognised frame as a run. Doing so dereferenced `message.turn` on a frame
-    // that has none, so a newer daemon speaking to an older helper destroyed the turn with an
-    // opaque TypeError instead of degrading.
+    // Never treat an unrecognised frame as a run; unsupported protocol data fails explicitly.
     writeProtocol({
       type: "error",
       id: (message as { id?: string }).id ?? "unknown",
@@ -512,6 +509,5 @@ process.once("SIGTERM", () => {
   void requestShutdown();
 });
 
-// Advertise optional frames so a newer daemon can tell whether this helper understands them. An
-// older helper omits the field, and the daemon then withholds those frames instead of breaking it.
+// Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
 writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence"] });

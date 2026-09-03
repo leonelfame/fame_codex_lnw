@@ -103,6 +103,18 @@ out of the JSON and are attached natively with stable references. The runtime do
 context JSONL file, upload a synthetic context document, include prompt hashes, or silently truncate
 the envelope. Attachment acceptance and send readiness are verified before the turn begins.
 
+Initial Launcher setup asks which interaction mode to install and defaults to With Automation. The
+same choice remains available in Settings; changing it uses the transactional setup path, replaces
+the installed catalog, and requires a Codex restart. Zero Risk never reads or mutates the ChatGPT DOM.
+For a new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained
+chat it also provides an incremental prompt containing only the Codex suffix after the last assistant
+reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes
+the selected text to the system clipboard. The user has thirty seconds to paste, select the visible
+ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent.
+The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion
+sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the
+per-tab nonce used to validate the Launcher confirmation never leaves the local runtime.
+
 The appended models advertise the authenticated account's context window and a ten-percent
 auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
 reserves, rather than inferred from character length. The ChatGPT composer also has an independent
@@ -114,8 +126,14 @@ retain their measured adapter-owned limits.
 
 In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
 capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool
-environment. A missing retained source falls back to a dedicated read-only Temporary Chat built from
-canonical Codex history; an invalid or ambiguous handoff still fails explicitly. Browser-only mode
+environment. Zero Risk always advertises a fixed three-times compaction interval without enabling
+Bigger Context multipart transport. At that boundary its active ChatGPT response receives the
+checkpoint instruction as an MCP result, returns the compacted context through its bound completion
+control, and ends. The old manual chat is retired; the next compacted Codex request owns a fresh
+Temporary Chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
+retained source falls back to a dedicated read-only Temporary Chat built from canonical Codex
+history; a missing Zero Risk source uses the same explicit manual checkpoint contract. An invalid or
+ambiguous handoff still fails explicitly. Browser-only mode
 uses the same read-only summarization path, then returns the native replacement-history shape expected
 by Codex. A prompt-level checkpoint marker is translated into a visible Codex trace item;
 every later tool action in the same turn continues to present the current turn capability. Visible
@@ -146,9 +164,12 @@ launcher runtime from a stale or external process. Legacy macOS launchd services
 removed during an explicit launcher migration; launchd remains only for the advanced terminal-only
 mode.
 
-Setup keeps Codex's built-in `openai` provider; its only managed provider-routing assignment is
-`openai_base_url`. The daemon
-forwards the authenticated official model catalog and appends only the routed models owned by the
+Setup keeps Codex's built-in `openai` provider. It routes Responses through the local daemon with
+`openai_base_url`, while pinning `experimental_realtime_webrtc_call_base_url` to Codex's official
+ChatGPT endpoint so Voice session creation never falls through to the Responses-only bridge. Both
+assignments are journaled and restored exactly on disconnect or uninstall; a conflicting existing
+Voice route requires explicit `--replace-codex-route` ownership. The daemon forwards the
+authenticated official model catalog and appends only the routed models owned by the
 `chatgpt-web/` namespace; no static catalog is installed. Subagent protocol selection is explicit,
 and new installations default to Compatibility V1 because it is the only surface portable across
 native and routed Web backends:

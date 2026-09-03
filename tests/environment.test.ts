@@ -81,6 +81,77 @@ describe("trusted current Codex environment envelope", () => {
     });
   });
 
+  test("recovers the primary cwd from a Codex 0.150 filesystem-only multi-folder diff", () => {
+    const primary = resolve(root, "workspace-primary");
+    const additional = resolve(root, "workspace-additional");
+    const cwdlessEnvironment = `<environment_context>
+  <current_date>2026-09-02</current_date>
+  <timezone>UTC</timezone>
+  <filesystem><workspace_roots><root>${primary}</root><root>${additional}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(extractChatGptTurnEnvironment(currentWire({
+      workspace: primary,
+      environmentXml: cwdlessEnvironment,
+    }))).toEqual({
+      cwd: primary,
+      roots: [primary, additional],
+      writableRoots: [primary, additional],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test("recovers a projectless Codex 0.150 cwd when git workspace metadata is empty", () => {
+    const primary = resolve(root, "projectless-primary");
+    const cwdlessEnvironment = `<environment_context>
+  <filesystem><workspace_roots><root>${primary}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+    const request = currentWire({ environmentXml: cwdlessEnvironment });
+    const body = request._rawBody as { client_metadata: { "x-codex-turn-metadata": string } };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "thread_current",
+      turn_id: "turn_current",
+      sandbox: "none",
+      workspaces: {},
+    });
+
+    expect(extractChatGptTurnEnvironment(request).cwd).toBe(primary);
+  });
+
+  test("does not hide malformed cwd markup behind workspace-root recovery", () => {
+    const malformedEnvironment = `<environment_context>
+  <cwd/>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(() => extractChatGptTurnEnvironment(currentWire({ environmentXml: malformedEnvironment })))
+      .toThrow("missing cwd");
+  });
+
+  test("does not hide malformed workspace-root markup when cwd is absent", () => {
+    const malformedEnvironment = `<environment_context>
+  <filesystem><workspace_roots><root/><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(() => extractChatGptTurnEnvironment(currentWire({ environmentXml: malformedEnvironment })))
+      .toThrow("missing cwd");
+  });
+
+  test("keeps an explicit cwd authoritative over workspace-root order", () => {
+    const firstRoot = resolve(root, "workspace-first");
+    const explicitCwd = resolve(root, "workspace-second");
+    const explicitEnvironment = `<environment_context>
+  <cwd>${explicitCwd}</cwd>
+  <filesystem><workspace_roots><root>${firstRoot}</root><root>${explicitCwd}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(extractChatGptTurnEnvironment(currentWire({
+      workspace: explicitCwd,
+      environmentXml: explicitEnvironment,
+    })).cwd).toBe(explicitCwd);
+  });
+
   test("accepts a trusted same-turn developer message between the environment and prompt", () => {
     const request = currentWire();
     const body = request._rawBody as { input: Array<Record<string, unknown>> };

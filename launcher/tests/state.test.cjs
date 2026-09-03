@@ -24,7 +24,9 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       autoStart: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
+      browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -48,7 +50,9 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       autoStart: true,
       keepRunningOnClose: false,
       showBrowserDuringTurns: true,
+      browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      zeroRiskProEnabled: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
       sidebarOpen: true,
@@ -111,7 +115,9 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       autoStart: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
+      browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -119,6 +125,37 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("browser interaction defaults to Automatic and preserves a completed onboarding choice", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-interaction-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().browserInteractionMode, "automatic");
+    store.update({ browserInteractionMode: "manual", onboardingComplete: true });
+    assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
+    assert.equal(createStateStore(file).read().zeroRiskProEnabled, false);
+    store.update({ coreSetupComplete: true, zeroRiskProEnabled: true });
+    assert.equal(createStateStore(file).read().zeroRiskProEnabled, true);
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      browserInteractionMode: "manual",
+      zeroRiskProEnabled: true,
+    }));
+    assert.equal(createStateStore(file).read().browserInteractionMode, "automatic");
+    assert.equal(createStateStore(file).read().zeroRiskProEnabled, false);
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      onboardingComplete: true,
+      browserInteractionMode: "manual",
+    }));
+    assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
+    fs.writeFileSync(file, JSON.stringify({ version: 1, browserInteractionMode: "unsafe" }));
+    assert.equal(createStateStore(file).read().browserInteractionMode, "automatic");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
