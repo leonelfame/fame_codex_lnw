@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "../src/adapters/chatgpt-web/native-compaction-control";
 import {
@@ -13,7 +14,8 @@ import {
 import { defaultBrokerEndpoint } from "../src/config";
 import type { ChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environment";
 
-const root = mkdtempSync("/tmp/cgw-zero-risk-mcp-");
+const testTempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
+const root = mkdtempSync(join(testTempRoot, "cgw-zero-risk-mcp-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 const nonceA = "surface_nonce_A_0123456789";

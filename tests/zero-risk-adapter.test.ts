@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import {
@@ -12,7 +13,8 @@ import { CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL } from "../src/chatgpt-web-models";
 import { defaultBrokerEndpoint } from "../src/config";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
-const root = mkdtempSync("/tmp/cgw-zero-risk-adapter-");
+const testTempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
+const root = mkdtempSync(join(testTempRoot, "cgw-zero-risk-adapter-"));
 afterAll(() => {
   chatGptTurnSessions.clear();
   rmSync(root, { recursive: true, force: true });

@@ -1191,6 +1191,7 @@ export async function callTurnBroker<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const id = opaqueId("request");
+  const settleOnResponseFrame = timeoutMs === null;
   // The wire protocol requires a client-owned activity identity. Most callers never need to see
   // it; the MCP server supplies its own so it can retire an ambiguously delivered claim, while
   // lower-level diagnostics receive an equally client-generated identity here.
@@ -1221,7 +1222,6 @@ export async function callTurnBroker<T>(
       settled = true;
       clearTimeout(timer);
       cleanup();
-      socket.destroy();
       if (response.error) rejectCall(new Error(response.error));
       else resolveCall(response.result as T);
     };
@@ -1235,7 +1235,8 @@ export async function callTurnBroker<T>(
     }
     socket.setEncoding("utf8");
     socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
-    // A close without a complete newline-delimited response is still an explicit broker failure.
+    // The server owns response termination. Waiting for the pipe/socket to close before resolving
+    // prevents callers from retiring the broker while Bun still has a named-pipe write in flight.
     socket.once("close", finishResponse);
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`));
     socket.on("data", chunk => {
@@ -1259,9 +1260,12 @@ export async function callTurnBroker<T>(
         return;
       }
       response = parsed;
-      // A full newline-delimited response proves the server write reached this process. Settling
-      // here avoids relying on Bun to close both halves of a long-polled Unix socket/named pipe.
-      finishResponse();
+      if (settleOnResponseFrame) {
+        // A long-poll keeps its request half open while the server waits. Its complete response
+        // frame is therefore the terminal boundary; ordinary calls still wait for physical close.
+        finishResponse();
+        socket.destroy();
+      }
     });
   });
 }
