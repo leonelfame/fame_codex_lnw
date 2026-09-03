@@ -1667,7 +1667,7 @@ function SettingsSurface({
         </SettingRow> : null}
         <InteractionModePicker
           copy={copy}
-          disabled={busy || snapshot.state.coreSetupComplete !== true}
+          disabled={busy}
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />

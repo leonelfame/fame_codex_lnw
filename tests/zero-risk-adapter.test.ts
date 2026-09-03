@@ -140,6 +140,43 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
   }
 });
 
+test("a lost launcher completion acknowledgement cannot replace an authoritative Zero Risk answer", async () => {
+  const config = provider("completion-ack-lost");
+  const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
+  let exactBinding: ReturnType<typeof binding> | undefined;
+  const endStatuses: string[] = [];
+  const control: ChatGptZeroRiskManualControl = {
+    async start(_path, activity) { exactBinding = binding(activity.prompt); },
+    async waitSent() { broker.startSafeTurn(exactBinding!.request_id); },
+    waitTerminal: noManualTerminal,
+    async markStarted() {
+      broker.completeSafeTurn(exactBinding!.request_id, "Answer completed before the acknowledgement was lost");
+    },
+    async end(_path, activity) {
+      endStatuses.push(activity.status);
+      throw new Error("local completion acknowledgement was lost");
+    },
+    async cancel() {},
+  };
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(config, { broker, zeroRiskManualControl: control }).runTurn!(
+      request("turn_safe_completion_ack_lost"),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    expect(endStatuses).toEqual(["completed"]);
+    expect(events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => (
+      event.type === "text_delta" && event.phase === "final_answer"
+    )).map(event => event.text).join(""))
+      .toBe("Answer completed before the acknowledgement was lost");
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+  } finally {
+    chatGptTurnSessions.clear();
+    await broker.close();
+  }
+});
+
 test("Zero Risk keeps image handoff manual and says so in the paste instruction", async () => {
   const config = provider("image-boundary");
   const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);

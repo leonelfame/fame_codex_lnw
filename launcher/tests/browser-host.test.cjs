@@ -2427,6 +2427,7 @@ function manualTurnFixture() {
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map(),
     manualTerminalSignals: new Map(),
+    manualCompletionSignals: new Map(),
     manualOperation: null,
     selectedTabId: "home",
     clipboard: { writeText: value => clipboardWrites.push(value) },
@@ -2482,6 +2483,64 @@ test("manual start is idempotent and never exposes its private prompt in snapsho
   assert.deepEqual(clipboardWrites, ["private prompt"]);
   assert.equal(JSON.stringify(fixture.snapshot()).includes("private prompt"), false);
   for (const tab of fixture.turnTabs.values()) clearTimeout(tab.manualDeadlineTimer);
+});
+
+test("manual completion is idempotent and cannot be downgraded after a lost acknowledgement", () => {
+  const { fixture } = manualTurnFixture();
+  const retained = fixture.beginManualTurn(
+    "manual_completed_retained",
+    process.pid,
+    "private prompt",
+    "a".repeat(64),
+  );
+  fixture.confirmManualSent(retained.tabId);
+  fixture.markManualTurnStarted("manual_completed_retained", process.pid);
+  assert.deepEqual(
+    fixture.endManualTurn("manual_completed_retained", process.pid, "completed", true),
+    { cancelledByUser: false },
+  );
+  assert.deepEqual(
+    fixture.endManualTurn("manual_completed_retained", process.pid, "failed", false),
+    { cancelledByUser: false },
+  );
+  assert.equal(fixture.turnTabs.get(retained.tabId).status, "ready");
+  assert.equal(fixture.turnTabs.get(retained.tabId).manualState, "completed");
+
+  const released = fixture.beginManualTurn(
+    "manual_completed_released",
+    process.pid,
+    "another private prompt",
+  );
+  fixture.confirmManualSent(released.tabId);
+  fixture.markManualTurnStarted("manual_completed_released", process.pid);
+  fixture.endManualTurn("manual_completed_released", process.pid, "completed", false);
+  assert.equal(fixture.turnTabs.has(released.tabId), false);
+  assert.deepEqual(
+    fixture.endManualTurn("manual_completed_released", process.pid, "failed", false),
+    { cancelledByUser: false },
+  );
+});
+
+test("terminal Zero Risk tabs are reclaimed before retained conversations", () => {
+  const { fixture } = manualTurnFixture();
+  fixture.turnTabs.set("manual-timeout", {
+    id: "manual-timeout",
+    interactionMode: "manual",
+    status: "error",
+    manualState: "timed-out",
+    lastHeartbeatAt: 1,
+  });
+  fixture.turnTabs.set("manual-retained", {
+    id: "manual-retained",
+    interactionMode: "manual",
+    status: "ready",
+    manualState: "completed",
+    lastHeartbeatAt: 0,
+  });
+
+  assert.equal(fixture.evictOldestReclaimableTurnTab(), true);
+  assert.equal(fixture.turnTabs.has("manual-timeout"), false);
+  assert.equal(fixture.turnTabs.has("manual-retained"), true);
 });
 
 test("a retained manual chat copies only its incremental resume prompt", () => {

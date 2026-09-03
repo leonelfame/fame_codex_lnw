@@ -565,7 +565,16 @@ export function createChatGptWebAdapter(
             browserAbort.signal.removeEventListener("abort", abortTerminal);
           }
           text.push(answer);
-          await finishLauncher("completed");
+          try {
+            await finishLauncher("completed");
+          } catch (controlError) {
+            // The broker result is already authoritative. A launcher acknowledgement failure may
+            // leave UI cleanup pending, but it must not replace a completed Codex answer with an
+            // error or trigger a contradictory failed terminal mutation.
+            console.error(
+              `[chatgpt-web] completed Zero Risk turn but could not confirm launcher cleanup: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+            );
+          }
           return answer;
         } catch (error) {
           const normalized = safeManualAdapterError(error);

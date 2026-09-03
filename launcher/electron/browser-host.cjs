@@ -354,6 +354,7 @@ class BrowserHost {
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
     this.manualTerminalSignals = new Map();
+    this.manualCompletionSignals = new Map();
     this.interactionModeOverride = null;
     this.selectedTabId = "home";
     this.manualOperation = null;
@@ -519,7 +520,7 @@ class BrowserHost {
 
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
     if (this.turnTabs.size >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestRetainedTurnTab.call(this)) {
+      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
         `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
@@ -589,7 +590,7 @@ class BrowserHost {
 
   createManualTurnTab(traceId, helperPid, conversationKey, prompt) {
     if (this.turnTabs.size >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestRetainedTurnTab.call(this)) {
+      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
         `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
@@ -694,6 +695,19 @@ class BrowserHost {
     if (!retained) return false;
     this.removeTurnTab(retained, false);
     return true;
+  }
+
+  evictOldestReclaimableTurnTab() {
+    const terminalManual = [...this.turnTabs.values()]
+      .filter(tab => tab.interactionMode === "manual"
+        && tab.status === "error"
+        && ["timed-out", "failed", "cancelled"].includes(tab.manualState))
+      .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
+    if (terminalManual) {
+      this.removeTurnTab(terminalManual, false);
+      return true;
+    }
+    return BrowserHost.prototype.evictOldestRetainedTurnTab.call(this);
   }
 
   zoomShell(action) {
@@ -1810,12 +1824,23 @@ class BrowserHost {
     }
   }
 
+  rememberManualCompletion(traceId, helperPid) {
+    this.manualCompletionSignals.delete(traceId);
+    this.manualCompletionSignals.set(traceId, { helperPid });
+    while (this.manualCompletionSignals.size > MAX_MANUAL_TERMINAL_SIGNALS) {
+      const oldest = this.manualCompletionSignals.keys().next();
+      if (oldest.done) break;
+      this.manualCompletionSignals.delete(oldest.value);
+    }
+  }
+
   signalManualTerminal(tab, status) {
     if (tab.interactionMode !== "manual") return;
     if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
     tab.manualDeadlineTimer = null;
     tab.manualDeadlineAt = null;
     tab.manualState = status === "timeout" ? "timed-out" : status;
+    tab.lastHeartbeatAt = Date.now();
     tab.prompt = null;
     tab.promptDigest = null;
     this.rememberManualTerminal(tab.traceId, tab.helperPid, status);
@@ -1869,6 +1894,12 @@ class BrowserHost {
         || resumePrompt.length < 1
         || resumePrompt.length > MAX_MANUAL_PROMPT_CHARS)) {
       throw new Error(`Manual resume prompt must contain between 1 and ${MAX_MANUAL_PROMPT_CHARS} characters`);
+    }
+    const completion = this.manualCompletionSignals.get(traceId);
+    if (completion) {
+      throw new Error(completion.helperPid === helperPid
+        ? `Zero Risk turn ${traceId} is already completed`
+        : `Zero Risk turn ${traceId} is owned by another process`);
     }
     const terminal = this.manualTerminalSignals.get(traceId);
     if (terminal?.helperPid === helperPid) {
@@ -2073,11 +2104,17 @@ class BrowserHost {
   }
 
   endManualTurn(traceId, helperPid, status, retain = false) {
+    const completion = this.manualCompletionSignals.get(traceId);
+    if (completion?.helperPid === helperPid) return { cancelledByUser: false };
     const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
     if (!tab || tab.interactionMode !== "manual" || tab.helperPid !== helperPid) {
       const terminal = this.manualTerminalSignals.get(traceId);
       if (terminal?.helperPid === helperPid) return { cancelledByUser: terminal.status === "cancelled" };
       throw new Error(`Zero Risk turn ownership mismatch: no browser tab owns ${traceId}`);
+    }
+    if (tab.manualState === "completed") {
+      this.rememberManualCompletion(traceId, helperPid);
+      return { cancelledByUser: false };
     }
     if (status === "completed" && tab.manualState !== "sent" && tab.manualState !== "running") {
       throw new Error(`Zero Risk turn ${traceId} cannot complete before Sent confirmation`);
@@ -2093,6 +2130,7 @@ class BrowserHost {
       tab.message = "Task completed";
       tab.loading = false;
       tab.lastHeartbeatAt = Date.now();
+      this.rememberManualCompletion(traceId, helperPid);
       this.publishState?.(this.snapshot());
       return { cancelledByUser: false };
     }
@@ -2105,6 +2143,7 @@ class BrowserHost {
       tab.promptDigest = null;
       tab.manualState = "completed";
       tab.manualTerminalResolutionSuppressed = true;
+      this.rememberManualCompletion(traceId, helperPid);
     } else {
       this.signalManualTerminal(tab, status === "aborted" ? "cancelled" : status);
     }
