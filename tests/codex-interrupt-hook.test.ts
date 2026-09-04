@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   codexInterruptHookCommand,
   codexInterruptHookHash,
@@ -25,7 +25,7 @@ test("installs one narrowly trusted Interrupt hook and restores the exact Codex 
   const installed = installCodexInterruptHook(original, "/Users/test/.codex/config.toml", config);
 
   expect(installed.installed.groupIndex).toBe(1);
-  expect(installed.installed.stateKey).toBe("/Users/test/.codex/config.toml:interrupt:1:0");
+  expect(installed.installed.stateKey).toBe(`${resolve("/Users/test/.codex/config.toml")}:interrupt:1:0`);
   expect(installed.text).toContain('[[hooks.Interrupt]]');
   expect(installed.text).toContain(`[hooks.state.${JSON.stringify(installed.installed.stateKey)}]`);
   expect(installed.text).toContain(`trusted_hash = ${JSON.stringify(installed.installed.trustedHash)}`);

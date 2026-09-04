@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { basename, dirname, join, resolve, win32 } from "node:path";
+import { basename, dirname, join, posix, resolve, win32 } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigDir } from "./config";
 import type { InstalledCodexInterruptHook } from "./codex-integration-shared";
@@ -52,7 +52,7 @@ export function codexInterruptHookCommand(
   home = getConfigDir(),
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const absoluteHome = platform === "win32" ? win32.resolve(home) : resolve(home);
+  const absoluteHome = platform === "win32" ? win32.resolve(home) : posix.resolve(home);
   const args = [...config.runtimeCommand, "--home", absoluteHome, "hook", "interrupt"];
   return args.map(platform === "win32" ? cmdShellArgument : posixShellArgument).join(" ");
 }
