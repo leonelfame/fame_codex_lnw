@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { mock } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1247,6 +1248,55 @@ test("structured compact rebuilds canonical context when its retained source is 
       && event.text.includes("CODEX_LATEST_USER_PROMPT_JSON"))).toBeTrue();
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
   } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh multipart compaction gives each acknowledged phase its own handoff budget", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-phased-fallback-compact-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://phased-fallback-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root),
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+      turnTimeoutMs: 40,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    expect(turn.onMultipartStageAcknowledged).toBeDefined();
+    expect(turn.onSubmitted).toBeDefined();
+    mock.timers.tick(25);
+    expect(turn.abortSignal?.aborted).toBeFalse();
+    await turn.onMultipartStageAcknowledged!(1);
+    mock.timers.tick(25);
+    expect(turn.abortSignal?.aborted).toBeFalse();
+    turn.onSubmitted!();
+    mock.timers.tick(25);
+    expect(turn.abortSignal?.aborted).toBeFalse();
+    return "Fallback checkpoint after separately bounded phases";
+  };
+  const events: AdapterEvent[] = [];
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(
+      request(true),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    expect(events.some(event => event.type === "text_delta"
+      && event.text.includes("Fallback checkpoint after separately bounded phases"))).toBeTrue();
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+  } finally {
+    mock.timers.reset();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });

@@ -226,6 +226,7 @@ test("manual control keeps start idempotency separate from long Sent observation
       prompt,
       resumePrompt: "incremental prompt",
       conversationKey: "c".repeat(64),
+      compaction: true,
     })).status, 200);
     assert.equal((await post("/v1/manual/wait-sent", owner)).status, 200);
     assert.equal((await post("/v1/manual/wait-terminal", owner)).status, 200);
@@ -234,6 +235,7 @@ test("manual control keeps start idempotency separate from long Sent observation
     assert.equal(calls[0][0], "start");
     assert.equal(calls[0][3], prompt);
     assert.equal(calls[0][5], "incremental prompt");
+    assert.equal(calls[0][6], true);
     assert.equal(calls[1][0], "wait");
     assert.equal(calls[2][0], "wait-terminal");
     assert.equal(logs.some(([, detail]) => JSON.stringify(detail).includes(prompt)), false);

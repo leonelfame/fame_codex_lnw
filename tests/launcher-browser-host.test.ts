@@ -456,7 +456,11 @@ test("manual launcher control separates idempotent start from reconnectable Sent
     if (!address || typeof address === "string") throw new Error("test server has no port");
     const path = descriptorFile(`http://127.0.0.1:${address.port}`);
     const owner = { traceId: "manual123456", helperPid: process.pid };
-    await expect(startLauncherManualTurn(path, { ...owner, prompt: "private prompt" })).resolves.toMatchObject({
+    await expect(startLauncherManualTurn(path, {
+      ...owner,
+      prompt: "private prompt",
+      compaction: true,
+    })).resolves.toMatchObject({
       tabId: "manual-tab",
       reused: false,
       state: "awaiting-user",
@@ -476,7 +480,7 @@ test("manual launcher control separates idempotent start from reconnectable Sent
       "/v1/manual/wait-terminal",
       "/v1/manual/end",
     ]);
-    expect(requests[0]?.body).toEqual({ ...owner, prompt: "private prompt" });
+    expect(requests[0]?.body).toEqual({ ...owner, prompt: "private prompt", compaction: true });
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }

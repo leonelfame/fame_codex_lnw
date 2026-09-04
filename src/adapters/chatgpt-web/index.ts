@@ -200,8 +200,14 @@ export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): str
 }
 
 export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexParsedRequest): string {
+  const namespace = chatGptWebExecutionNamespace(provider);
+  // The logical response key survives compaction so a final answer that won the handoff race
+  // can still be replayed. A new physical browser owner must instead belong to the new context
+  // epoch; otherwise Zero Risk correctly rejects it against the previous owner's completion.
+  const conversation = parsed._compactionRequest ? undefined : chatGptConversationKey(parsed, namespace);
   return createHash("sha256")
-    .update(`${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(parsed)}`)
+    .update(`${namespace}:${chatGptTurnExecutionKey(parsed)}`)
+    .update(conversation ? `:${conversation}` : "")
     .digest("hex")
     .slice(0, 12);
 }
@@ -386,6 +392,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
+    hooks: { onCompactionProgress?: () => void } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -484,10 +491,18 @@ export function createChatGptWebAdapter(
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
-    const submissionLifecycle = parsed._compactionRequest ? {} : {
-      onSendActivated: () => { submission.phase = "send_activated" as const; },
-      onSubmitted: () => { submission.phase = "accepted" as const; },
+    const submissionLifecycle = {
+      ...(!parsed._compactionRequest ? {
+        onSendActivated: () => { submission.phase = "send_activated" as const; },
+      } : {}),
+      onSubmitted: () => {
+        if (!parsed._compactionRequest) submission.phase = "accepted";
+        hooks.onCompactionProgress?.();
+      },
     };
+    const multipartProgressLifecycle = hooks.onCompactionProgress
+      ? { onMultipartStageAcknowledged: hooks.onCompactionProgress }
+      : {};
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
       if (!retainedLauncherDescriptor) throw new Error("ChatGPT Zero Risk requires the Launcher browser host");
@@ -550,6 +565,7 @@ export function createChatGptWebAdapter(
             prompt: compiled.text,
             ...(resumeCompiled ? { resumePrompt: resumeCompiled.text } : {}),
             ...(conversationKey ? { conversationKey } : {}),
+            ...(parsed._compactionRequest ? { compaction: true as const } : {}),
           });
           launcherStarted = true;
           await zeroRiskManualControl.waitSent(retainedLauncherDescriptor, owner, {
@@ -670,6 +686,7 @@ export function createChatGptWebAdapter(
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
+        ...multipartProgressLifecycle,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
@@ -731,6 +748,7 @@ export function createChatGptWebAdapter(
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
+      ...multipartProgressLifecycle,
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
@@ -891,20 +909,31 @@ export function createChatGptWebAdapter(
                       retryable: false,
                     },
                   );
-                  const handoffTimer = setTimeout(
-                    () => handoffDeadline.abort(handoffTimeoutError),
-                    handoffTimeoutMs,
-                  );
-                  handoffTimer.unref?.();
+                  let handoffTimer: ReturnType<typeof setTimeout> | undefined;
+                  const armHandoffDeadline = (): void => {
+                    if (handoffDeadline.signal.aborted) return;
+                    if (handoffTimer) clearTimeout(handoffTimer);
+                    handoffTimer = setTimeout(
+                      () => handoffDeadline.abort(handoffTimeoutError),
+                      handoffTimeoutMs,
+                    );
+                    handoffTimer.unref?.();
+                  };
+                  armHandoffDeadline();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
                   const runFreshCompactionFallback = async (reason: string): Promise<string> => {
                     console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
+                    // The fallback is a new bounded phase. Each exact multipart acknowledgement
+                    // and the final accepted compact prompt re-arms the five-minute liveness budget;
+                    // transport time cannot consume the model-generation window.
+                    armHandoffDeadline();
                     const fallbackRuntime = startRuntime(
                       parsed,
                       manualRequest ? environment : undefined,
                       `${handoffTraceId}_fallback`,
                       turnCapabilities,
+                      { onCompactionProgress: armHandoffDeadline },
                     );
                     try {
                       const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
@@ -1039,7 +1068,7 @@ export function createChatGptWebAdapter(
                     }
                     throw handoffError;
                   } finally {
-                    clearTimeout(handoffTimer);
+                    if (handoffTimer) clearTimeout(handoffTimer);
                   }
                 },
               );
@@ -1089,7 +1118,7 @@ export function createChatGptWebAdapter(
         if (abortedTurnIds?.size) {
           chatGptTurnSessions.retireAbortedOwnerTurns(ownerKey, abortedTurnIds, executionKey);
         }
-        const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+        const traceId = chatGptWebTraceId(provider, parsed);
         const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
           executionKey,
           ownerKey,

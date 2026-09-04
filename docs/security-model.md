@@ -9,9 +9,15 @@ created. Repository contents, tool output, websites, and prompt text are untrust
 ## Full-mode capability flow
 
 1. The daemon accepts a Codex Responses turn on `127.0.0.1`.
-2. It extracts `cwd`, workspace roots, sandbox policy, and the tool registry only from the native
-   Codex wire envelope with matching turn metadata. A user-authored `<environment_context>` is not
-   accepted as authority.
+2. It extracts `cwd`, workspace roots, and sandbox policy from the native Codex envelope. When a
+   resumed root task or subagent omits that envelope, its canonical local rollout must prove the
+   exact thread and current turn (or latest source turn for standalone compaction). Request metadata
+   can only constrain that authority. Tools always come from the current request; user-authored
+   `<environment_context>` text is never a source of recovered authority.
+   A context-only continuation after completed compaction additionally binds the exact checkpoint
+   and source instruction to its native thread, turn, model and effort. A freshly emitted environment
+   claim without a new human message must match that turn's canonical rollout in cwd, roots and
+   sandbox policy; the checkpoint alone does not grant filesystem authority.
 3. It creates a random, turn-scoped token and embeds it in that one ChatGPT browser prompt.
 4. Every Codex Native action presents that same turn token. The MCP handler idempotently claims an
    internal binding plus a request-scoped activity lease and immediately dispatches the requested

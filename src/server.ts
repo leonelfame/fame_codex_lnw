@@ -13,7 +13,9 @@ import {
   CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
   extractChatGptTurnIdentity,
   extractCodexTurnIdentityFromBody,
+  extractChatGptCompactionSourceRevision,
 } from "./adapters/chatgpt-web/environment";
+import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -493,6 +495,28 @@ export async function responseRequest(
   }
 
   const compaction = parsed._compactionRequest === true;
+  const rememberCompletedResponse = (response: Record<string, unknown>): void => {
+    if (!compaction) {
+      if (options.rememberState !== false) rememberResponseState(parsed._rawBody, response, { force: true });
+      return;
+    }
+    if (response.status !== "completed") return;
+    const identity = extractChatGptTurnIdentity(parsed);
+    if (!identity.threadId || !identity.turnId || !Array.isArray(response.output) || response.output.length !== 1) return;
+    const item = response.output[0];
+    if (item?.type !== "compaction" || typeof item.encrypted_content !== "string") return;
+    const summary = decodeCompactionSummary(item.encrypted_content);
+    if (!summary) return;
+    const source = extractChatGptCompactionSourceRevision(parsed);
+    const body = parsed._rawBody as { input?: unknown[] };
+    // v1 installs the bounded user-message output, whereas v2 retains the original source.
+    // Authenticate both exact producer-defined representations, never arbitrary rewrites.
+    const v1Source = extractChatGptCompactionSourceRevision({
+      ...parsed,
+      _rawBody: { ...body, input: buildCompactV1Output(extractCompactUserMessages(body.input), summary) },
+    });
+    rememberCompactionContinuation(parsed, identity, [source, v1Source], summary);
+  };
   if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     return formatErrorResponse(
       409,
@@ -583,11 +607,8 @@ export async function responseRequest(
         ...(provider.chatgptWeb?.stallTimeoutSec !== undefined
           ? { stallTimeoutSec: provider.chatgptWeb.stallTimeoutSec }
           : {}),
-        ...(compaction ? { compaction: true } : {
-          ...(options.rememberState === false ? {} : {
-            onCompletedResponse: (response: Record<string, unknown>) => rememberResponseState(parsed._rawBody, response, { force: true }),
-          }),
-        }),
+        ...(compaction ? { compaction: true } : {}),
+        onCompletedResponse: rememberCompletedResponse,
       },
     );
     return new Response(stream, {
@@ -609,9 +630,7 @@ export async function responseRequest(
     toolSearchToolNames: maps.toolSearchToolNames,
     ...(compaction ? { compaction: true } : {}),
   });
-  if (!compaction && options.rememberState !== false) {
-    rememberResponseState(parsed._rawBody, json, { force: true });
-  }
+  rememberCompletedResponse(json);
   return Response.json(json);
 }
 

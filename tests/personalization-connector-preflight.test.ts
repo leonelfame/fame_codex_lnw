@@ -10,13 +10,13 @@ function visibleLocator(count: () => number, overrides: Record<string, unknown> 
   return locator;
 }
 
-test("an already Personalized Temporary Chat is a connector preflight no-op", async () => {
+for (const ariaHidden of [false, true]) test(`a visible Personalized control is a preflight no-op (aria-hidden=${ariaHidden})`, async () => {
   const diagnostics: string[] = [];
   const personalized = visibleLocator(() => 1);
   const unpersonalized = visibleLocator(() => 0);
   const page = {
-    getByRole: (_role: string, options: { name: string }) => (
-      options.name === "Personalized" ? personalized : unpersonalized
+    getByRole: (_role: string, options: { name: string; includeHidden?: boolean }) => (
+      options.name === "Personalized" && (!ariaHidden || options.includeHidden) ? personalized : unpersonalized
     ),
   } as any;
 
@@ -276,7 +276,8 @@ test("a localized preflight waits for its semantic control to hydrate without as
       if (selector.includes('[aria-haspopup="menu"]')) {
         expect(selector).toBe(
           '[data-testid="thread-header-right-actions"] [aria-haspopup="menu"], '
-          + '#conversation-header-actions [aria-haspopup="menu"]',
+          + '#conversation-header-actions [aria-haspopup="menu"], '
+          + '[data-content-sheet-root] > button[aria-expanded][aria-controls]',
         );
         return controls;
       }

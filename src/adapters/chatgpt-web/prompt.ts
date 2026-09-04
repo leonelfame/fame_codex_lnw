@@ -310,7 +310,46 @@ function multipartRecordWeight(record: MultipartContextRecord): number {
   return Buffer.byteLength(JSON.stringify(record), "utf8");
 }
 
-/** Partition complete semantic records without cutting a JSON string or an individual message. */
+function minimumMultipartGroupCapacity(
+  weights: readonly number[],
+  totalParts: ChatGptWebMultipartPartCount,
+): number {
+  if (weights.length === 0) return 0;
+  let lower = 0;
+  let upper = 0;
+  for (const weight of weights) {
+    lower = Math.max(lower, weight);
+    upper += weight;
+  }
+  const requiredGroups = (capacity: number): number => {
+    let groups = 1;
+    let groupWeight = 0;
+    for (const weight of weights) {
+      if (groupWeight > 0 && groupWeight + weight > capacity) {
+        groups += 1;
+        groupWeight = weight;
+      } else {
+        groupWeight += weight;
+      }
+    }
+    return groups;
+  };
+  while (lower < upper) {
+    const candidate = Math.floor((lower + upper) / 2);
+    if (requiredGroups(candidate) <= totalParts) upper = candidate;
+    else lower = candidate + 1;
+  }
+  return lower;
+}
+
+/**
+ * Partition complete semantic records without cutting a JSON string or an individual message.
+ *
+ * A target-average greedy split can put two near-target records into the same part merely because
+ * the first is a few bytes below the average. The following part is then almost empty, while the
+ * oversized middle part is accepted by the composer but cannot be ingested by the model. Find the
+ * minimum possible maximum weight for ordered contiguous groups instead.
+ */
 function partitionMultipartContext(
   records: readonly MultipartContextRecord[],
   totalParts: ChatGptWebMultipartPartCount,
@@ -319,8 +358,9 @@ function partitionMultipartContext(
     { length: totalParts },
     () => [],
   );
+  const weights = records.map(multipartRecordWeight);
+  const capacity = minimumMultipartGroupCapacity(weights, totalParts);
   let offset = 0;
-  let remainingWeight = records.reduce((total, record) => total + multipartRecordWeight(record), 0);
 
   for (let part = 0; part < totalParts; part += 1) {
     const remainingParts = totalParts - part;
@@ -328,14 +368,13 @@ function partitionMultipartContext(
     if (remainingRecords <= 0) break;
     const reserveForLater = Math.min(remainingRecords, remainingParts - 1);
     const maximumEnd = records.length - reserveForLater;
-    const target = Math.ceil(remainingWeight / remainingParts);
     let groupWeight = 0;
-    while (offset < maximumEnd && (groups[part]!.length === 0 || groupWeight < target)) {
+    while (offset < maximumEnd) {
       const record = records[offset]!;
+      const weight = weights[offset]!;
+      if (groups[part]!.length > 0 && groupWeight + weight > capacity) break;
       groups[part]!.push(record);
-      const weight = multipartRecordWeight(record);
       groupWeight += weight;
-      remainingWeight -= weight;
       offset += 1;
     }
   }

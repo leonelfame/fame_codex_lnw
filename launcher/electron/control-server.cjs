@@ -188,12 +188,16 @@ class BrowserControlServer {
             && (typeof body.resumePrompt !== "string" || body.resumePrompt.length < 1)) {
             throw new Error("manual resume prompt is invalid");
           }
+          if (body.compaction !== undefined && body.compaction !== true) {
+            throw new Error("manual compaction flag is invalid");
+          }
           const lease = host.beginManualTurn(
             body.traceId,
             body.helperPid,
             body.prompt,
             body.conversationKey,
             body.resumePrompt,
+            body.compaction === true,
           );
           this.logger.info("browser.manual_control_started", {
             traceId: body.traceId,
@@ -213,7 +217,7 @@ class BrowserControlServer {
             return;
           }
           if (observed.status === "timeout") {
-            writeJson(response, 408, { error: "Manual prompt was not confirmed within 30 seconds", code: "manual_turn_timed_out" });
+            writeJson(response, 408, { error: "Manual prompt was not confirmed within its allowed time", code: "manual_turn_timed_out" });
             return;
           }
           if (observed.status === "cancelled") {
@@ -239,7 +243,7 @@ class BrowserControlServer {
           }
           if (observed.status === "timeout") {
             writeJson(response, 408, {
-              error: "Codex Zero Risk did not start within 30 seconds after Sent confirmation",
+              error: "Codex Zero Risk did not start within its allowed time after Sent confirmation",
               code: "manual_turn_timed_out",
             });
             return;
