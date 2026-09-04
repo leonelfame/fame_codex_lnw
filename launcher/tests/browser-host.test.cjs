@@ -1377,6 +1377,39 @@ test("connector verification is effort-independent and works while the browser s
   );
 });
 
+test("connector verification records the helper failure in launcher diagnostics", async () => {
+  const calls = [];
+  const failure = new Error("ChatGPT connector proof did not leave a verified empty composer");
+  failure.name = "ChatGptPersistentBrowserStateError";
+  failure.operationId = "verify-contract-trace";
+  const fixture = {
+    helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
+    descriptorPath: "/runtime/launcher-browser.json",
+    logger: {
+      info: (event, detail) => calls.push(["info", event, detail]),
+      error: (event, detail) => calls.push(["error", event, detail]),
+    },
+    setState: (patch) => calls.push(["state", patch]),
+    refreshChatGptHomeDocument: async () => calls.push(["refresh"]),
+    verifyConnectorWithBrowserHelper: async () => { throw failure; },
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.runConnectorVerification.call(fixture, "Codex Native2"),
+    failure,
+  );
+  assert.deepEqual(calls.find(call => call[1] === "connector.verification_failed"), [
+    "error",
+    "connector.verification_failed",
+    {
+      appName: "Codex Native2",
+      traceId: "verify-contract-trace",
+      errorName: "ChatGptPersistentBrowserStateError",
+      message: "ChatGPT connector proof did not leave a verified empty composer",
+    },
+  ]);
+});
+
 test("a live helper retains exclusive ownership of its running turn", async () => {
   const tab = {
     id: "tab-live-owner",

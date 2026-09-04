@@ -124,7 +124,11 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
         return;
       }
       if (message.type === "error" && typeof message.message === "string") {
-        finish(new Error(message.message));
+        const helperError = new Error(message.message);
+        if (typeof message.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(message.name)) {
+          helperError.name = message.name;
+        }
+        finish(helperError);
         return;
       }
       finish(new Error("Browser helper verification emitted an unexpected message"));
@@ -156,7 +160,10 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
     output.close();
     errors.close();
   }
-  if (primaryError) throw primaryError;
+  if (primaryError) {
+    primaryError.operationId = id;
+    throw primaryError;
+  }
   return value;
 }
 

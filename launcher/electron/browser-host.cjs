@@ -2720,15 +2720,25 @@ class BrowserHost {
     const connectorName = validateConnectorName(appName);
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
     await this.refreshChatGptHomeDocument();
-    const result = await this.verifyConnectorWithBrowserHelper({
-      helper: this.helper,
-      descriptorPath: this.descriptorPath,
-      appName: connectorName,
-      logger: this.logger,
-    });
-    this.logger.info("connector.verified", { appName: connectorName });
-    this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
-    return result;
+    try {
+      const result = await this.verifyConnectorWithBrowserHelper({
+        helper: this.helper,
+        descriptorPath: this.descriptorPath,
+        appName: connectorName,
+        logger: this.logger,
+      });
+      this.logger.info("connector.verified", { appName: connectorName });
+      this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
+      return result;
+    } catch (error) {
+      this.logger.error("connector.verification_failed", {
+        appName: connectorName,
+        ...(error && typeof error.operationId === "string" ? { traceId: error.operationId } : {}),
+        errorName: error instanceof Error ? error.name : "Error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   async inspectSession(detectCapabilities = false) {

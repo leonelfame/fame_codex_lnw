@@ -59,3 +59,40 @@ test("launcher verification consumes a helper input EOF after the result", async
 
   assert.deepEqual(result, { ok: true, appName: "Codex Native2" });
 });
+
+test("launcher verification preserves the helper error class and correlation id", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-browser-helper-error-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.join(root, "helper.cjs");
+  fs.writeFileSync(script, `
+    const input = require("node:readline").createInterface({ input: process.stdin });
+    const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+    send({ type: "ready" });
+    input.on("line", line => {
+      const message = JSON.parse(line);
+      if (message.type === "shutdown") process.exit(0);
+      if (message.type !== "verify") return;
+      send({
+        type: "error",
+        id: message.id,
+        name: "ChatGptPersistentBrowserStateError",
+        message: "connector proof cleanup failed",
+      });
+    });
+  `);
+
+  await assert.rejects(
+    verifyConnectorWithBrowserHelper({
+      helper: { executable: process.execPath, script },
+      descriptorPath: "/runtime/launcher-browser.json",
+      appName: "Codex Native2",
+      logger: { info() {} },
+    }),
+    (error) => {
+      assert.equal(error.name, "ChatGptPersistentBrowserStateError");
+      assert.equal(error.message, "connector proof cleanup failed");
+      assert.match(error.operationId, /^verify-[a-f0-9]{24}$/);
+      return true;
+    },
+  );
+});

@@ -2033,8 +2033,11 @@ export class ChatGptBrowserWorker {
     return run;
   }
 
-  verifyConnector(): Promise<string> {
-    return this.enqueueMaintenance("connector verification", () => this.verifyConnectorExclusive());
+  verifyConnector(traceId = `verify_${randomUUID().replaceAll("-", "")}`): Promise<string> {
+    if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId)) {
+      return Promise.reject(new Error("ChatGPT connector verification trace id is invalid"));
+    }
+    return this.enqueueMaintenance("connector verification", () => this.verifyConnectorExclusive(traceId));
   }
 
   inspectSession(detectCapabilities: boolean): Promise<{
@@ -2985,12 +2988,15 @@ export class ChatGptBrowserWorker {
             signal: personalizationSignal,
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
           });
+          await capture("personalization-proof-mention-triggered");
           try {
             await appResult.waitFor({ state: "visible", timeout: 2_500, signal: personalizationSignal });
             proofResult = true;
+            await capture("personalization-proof-menu-visible");
           } catch (error) {
             if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
             proofResult = false;
+            await capture("personalization-proof-menu-missing");
           }
         } catch (error) {
           proofError = error;
@@ -3497,14 +3503,28 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async verifyConnectorExclusive(): Promise<string> {
+  private async verifyConnectorExclusive(
+    traceId = `verify_${randomUUID().replaceAll("-", "")}`,
+  ): Promise<string> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
-    // The launcher refreshes its owned ChatGPT document before starting this helper. A second
-    // reload here can discard the first catalog's exact mismatch evidence and report a generic
-    // menu failure instead of identifying the connector the account actually exposes.
-    await this.selectConnector(page);
-    return this.config.appName;
+    const diagnostics = new ChatGptBrowserDiagnostics(
+      traceId,
+      this.config.browserDiagnosticsPath ?? join(getConfigDir(), "diagnostics", "browser-turns"),
+    );
+    const captureDiagnostic = (checkpoint: string): Promise<void> => diagnostics.capture(page, checkpoint);
+    try {
+      await captureDiagnostic("connector-verification-started");
+      await this.prepareTemporaryChatSurface(page, captureDiagnostic);
+      // The launcher refreshes its owned ChatGPT document before starting this helper. A second
+      // reload here can discard the first catalog's exact mismatch evidence and report a generic
+      // menu failure instead of identifying the connector the account actually exposes.
+      await this.selectConnector(page, captureDiagnostic);
+      await captureDiagnostic("connector-verification-succeeded");
+      return this.config.appName;
+    } catch (error) {
+      await diagnostics.capture(page, "connector-verification-failed", error);
+      throw error;
+    }
   }
 
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
