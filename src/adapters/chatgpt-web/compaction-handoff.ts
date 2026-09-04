@@ -367,26 +367,73 @@ interface CachedCompactionRun {
   createdAt: number;
   ownerKey: string;
   traceIds: ReadonlySet<string>;
+  nativeThreadId?: string;
+  nativeTurnId?: string;
   abort: AbortController;
   active: boolean;
   promise: Promise<string>;
+}
+
+interface StructuredCompactionInterruption {
+  createdAt: number;
+  reason: Error;
 }
 
 export interface StructuredCompactionOwner {
   ownerKey: string;
   /** Every externally addressable browser trace owned by this structured compaction. */
   traceIds: readonly string[];
+  /** Exact native Codex owner, when supplied by the current Responses request. */
+  nativeThreadId?: string;
+  nativeTurnId?: string;
 }
 
 const structuredCompactionRuns = new Map<string, CachedCompactionRun>();
 const structuredCompactionOwners = new Map<string, Promise<void>>();
+const structuredCompactionInterruptions = new Map<string, StructuredCompactionInterruption>();
 const STRUCTURED_COMPACTION_RUN_TTL_MS = 30 * 60_000;
 
+function nativeTurnIdentityKey(threadId: string, turnId: string): string {
+  if (!threadId.trim() || !turnId.trim()) {
+    throw new Error("Structured compaction requires non-empty native thread and turn ids");
+  }
+  return JSON.stringify([threadId, turnId]);
+}
+
+function rememberStructuredCompactionInterruption(threadId: string, turnId: string, reason: Error): void {
+  const identity = nativeTurnIdentityKey(threadId, turnId);
+  const now = Date.now();
+  pruneStructuredCompactionInterruptions(now);
+  const existing = structuredCompactionInterruptions.get(identity);
+  if (existing) {
+    existing.createdAt = now;
+    return;
+  }
+  structuredCompactionInterruptions.set(identity, { createdAt: now, reason });
+}
+
+function structuredCompactionInterruption(owner: StructuredCompactionOwner): Error | undefined {
+  if (owner.nativeThreadId === undefined && owner.nativeTurnId === undefined) return undefined;
+  pruneStructuredCompactionInterruptions();
+  return structuredCompactionInterruptions.get(
+    nativeTurnIdentityKey(owner.nativeThreadId ?? "", owner.nativeTurnId ?? ""),
+  )?.reason;
+}
+
+function pruneStructuredCompactionInterruptions(now = Date.now()): void {
+  const cutoff = now - STRUCTURED_COMPACTION_RUN_TTL_MS;
+  for (const [identity, interruption] of structuredCompactionInterruptions) {
+    if (interruption.createdAt < cutoff) structuredCompactionInterruptions.delete(identity);
+  }
+}
+
 function pruneStructuredCompactionRuns(): void {
-  const cutoff = Date.now() - STRUCTURED_COMPACTION_RUN_TTL_MS;
+  const now = Date.now();
+  const cutoff = now - STRUCTURED_COMPACTION_RUN_TTL_MS;
   for (const [candidate, run] of structuredCompactionRuns) {
     if (run.createdAt < cutoff) structuredCompactionRuns.delete(candidate);
   }
+  pruneStructuredCompactionInterruptions(now);
 }
 
 /** Return the canonical result of an exact compact request, even after its source was retired. */
@@ -403,6 +450,8 @@ export function runStructuredCompactionOnce(
   pruneStructuredCompactionRuns();
   const existing = structuredCompactionRuns.get(key);
   if (existing) return existing.promise;
+  const interrupted = structuredCompactionInterruption(owner);
+  if (interrupted) return Promise.reject(interrupted);
   const abort = new AbortController();
   const previousOwner = structuredCompactionOwners.get(owner.ownerKey);
   const promise = Promise.resolve().then(async () => {
@@ -414,6 +463,8 @@ export function runStructuredCompactionOnce(
     createdAt: Date.now(),
     ownerKey: owner.ownerKey,
     traceIds: new Set(owner.traceIds),
+    ...(owner.nativeThreadId ? { nativeThreadId: owner.nativeThreadId } : {}),
+    ...(owner.nativeTurnId ? { nativeTurnId: owner.nativeTurnId } : {}),
     abort,
     active: true,
     promise,
@@ -445,6 +496,30 @@ async function cancelStructuredCompactionRuns(
   }
   await Promise.allSettled(runs.map(run => run.promise));
   return runs.length;
+}
+
+/** Begin cancelling the structured compaction owned by one exact native Codex turn. */
+export function cancelStructuredCompactionNativeTurn(
+  threadId: string,
+  turnId: string,
+  reason: Error,
+): { cancelled: number; settlement: Promise<void> } {
+  // Record before scanning active owners. Registration and cancellation share this synchronous
+  // boundary, so either registration wins and is aborted below, or interruption wins and the later
+  // registration rejects without invoking its detached work.
+  rememberStructuredCompactionInterruption(threadId, turnId, reason);
+  const runs = [...structuredCompactionRuns.values()].filter(run => (
+    run.active
+    && run.nativeThreadId === threadId
+    && run.nativeTurnId === turnId
+  ));
+  for (const run of runs) {
+    if (!run.abort.signal.aborted) run.abort.abort(reason);
+  }
+  return {
+    cancelled: runs.length,
+    settlement: Promise.allSettled(runs.map(run => run.promise)).then(() => undefined),
+  };
 }
 
 /** Cancel a user-requested compaction without treating an HTTP observer disconnect as terminal. */

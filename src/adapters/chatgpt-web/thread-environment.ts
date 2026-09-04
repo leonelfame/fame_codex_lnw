@@ -1,15 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { atomicWriteFile } from "../../config";
+import { getCodexHome } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
 import {
   extractChatGptTurnEnvironment,
   extractChatGptTurnIdentity,
   extractChatGptThreadSpawnLineage,
+  hasRawChatGptEnvironmentContext,
   MissingTrustedCodexEnvironmentError,
   type ChatGptSandboxPolicy,
   type ChatGptTurnEnvironment,
 } from "./environment";
+import { resolveCurrentCodexChildRolloutEnvironment } from "./codex-rollout-environment";
 
 interface StoredThreadEnvironment {
   cwd: string;
@@ -120,6 +123,8 @@ export class ChatGptThreadEnvironmentStore {
   constructor(
     private readonly path?: string,
     private readonly now: () => number = Date.now,
+    private readonly codexHome: string = getCodexHome(),
+    private readonly sqliteHome?: string,
   ) {}
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
@@ -130,6 +135,21 @@ export class ChatGptThreadEnvironmentStore {
       return environment;
     } catch (error) {
       if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
+      if (hasRawChatGptEnvironmentContext(parsed)) throw error;
+      const lineage = extractChatGptThreadSpawnLineage(parsed);
+      if (lineage && identity.turnId) {
+        const rolloutEnvironment = resolveCurrentCodexChildRolloutEnvironment({
+          codexHome: this.codexHome,
+          ...(this.sqliteHome ? { sqliteHome: this.sqliteHome } : {}),
+          lineage,
+          turnId: identity.turnId,
+          tools: parsed.context.tools,
+        });
+        if (rolloutEnvironment) {
+          this.set(lineage.threadId, rolloutEnvironment);
+          return rolloutEnvironment;
+        }
+      }
       const sameThread = this.get(identity.threadId);
       if (sameThread) return {
         cwd: sameThread.cwd,
@@ -139,7 +159,6 @@ export class ChatGptThreadEnvironmentStore {
         tools: parsed.context.tools ?? [],
       };
 
-      const lineage = extractChatGptThreadSpawnLineage(parsed);
       if (!lineage) throw error;
       const parent = this.get(lineage.parentThreadId);
       if (!parent) throw error;

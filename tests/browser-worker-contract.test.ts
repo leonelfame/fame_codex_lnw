@@ -75,10 +75,19 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   const promptAttached = runBrowserTurn.indexOf('await diagnostics.capture(page, "prompt-attachment-complete")');
   const finalEffortSelected = runBrowserTurn.indexOf('"final_part_effort_selection"');
   const finalSend = runBrowserTurn.indexOf("const finalSubmissionEvidence");
+  const multipartSend = runBrowserTurn.indexOf("const evidence = await this.runStage(");
+  const multipartAccepted = runBrowserTurn.indexOf("multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}", multipartSend);
+  const multipartResponse = runBrowserTurn.indexOf("const responseTurn = await this.waitForNewAssistantTurn(", multipartSend);
+  const finalAccepted = runBrowserTurn.indexOf("submission accepted evidence=${finalSubmissionEvidence}", finalSend);
+  const finalResponse = runBrowserTurn.indexOf("let responseTurn = await this.waitForNewAssistantTurn(", finalSend);
   expect(promptAttached).toBeGreaterThan(-1);
   expect(finalEffortSelected).toBeGreaterThan(-1);
   expect(promptAttached).toBeGreaterThan(finalEffortSelected);
   expect(finalSend).toBeGreaterThan(promptAttached);
+  expect(multipartAccepted).toBeGreaterThan(multipartSend);
+  expect(multipartAccepted).toBeLessThan(multipartResponse);
+  expect(finalAccepted).toBeGreaterThan(finalSend);
+  expect(finalAccepted).toBeLessThan(finalResponse);
   expect(runBrowserTurn.slice(finalEffortSelected, promptAttached)).toContain(
     "this.selectModelAndEffort(",
   );
@@ -2194,6 +2203,26 @@ test("the known ChatGPT rate-limit dialog is acknowledged and returns a structur
   expect(fixture.pressed).toEqual(["Enter"]);
 });
 
+test("submission acceptance reports a rate-limit dialog that appears after Enter", async () => {
+  const fixture = dialogPage("Too many requests. You're making requests too quickly.");
+  const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
+    waitForSubmissionAccepted(page: Page, baseline: unknown): Promise<unknown>;
+  }).waitForSubmissionAccepted;
+
+  await expect(waitForSubmissionAccepted.call(
+    {},
+    fixture.page,
+    {},
+  )).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_exceeded",
+    retryable: true,
+  });
+  expect(fixture.pressed).toEqual(["Enter"]);
+});
+
 test("the Traditional Chinese ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
   const fixture = dialogPage("太多要求。你提出要求的頻率過於頻繁。", "知道了");
 
@@ -2685,9 +2714,20 @@ test("browser preflight separates model context from one-message transport limit
 });
 
 test("Bigger Context preflight expands only the total context ceiling and keeps each message boundary", () => {
-  const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
+  const plus = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    proAvailable: false,
+    experimentalBiggerContext: true,
+  };
+  const pro = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    proAvailable: true,
+    experimentalBiggerContext: true,
+  };
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    280_000,
+    333_578,
     95_000,
     "gpt-5.6-sol",
     "high",
@@ -2705,6 +2745,15 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     3,
   )).toThrow("three-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
+    222_385,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    900_000,
+    2,
+  )).not.toThrow();
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
     222_386,
     95_000,
     "gpt-5.6-sol",
@@ -2713,6 +2762,33 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     900_000,
     2,
   )).toThrow("two-part ceiling");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    269_999,
+    80_000,
+    "gpt-5.6-sol",
+    "high",
+    plus,
+    900_000,
+    3,
+  )).not.toThrow();
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    270_000,
+    80_000,
+    "gpt-5.6-sol",
+    "high",
+    plus,
+    900_000,
+    3,
+  )).toThrow("270,000-token three-part ceiling");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    180_000,
+    80_000,
+    "gpt-5.6-sol",
+    "high",
+    plus,
+    900_000,
+    2,
+  )).toThrow("180,000-token two-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     280_000,
     103_001,

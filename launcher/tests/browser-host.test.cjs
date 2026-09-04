@@ -1383,6 +1383,7 @@ test("a live helper retains exclusive ownership of its running turn", async () =
     traceId: "trace_live_owner",
     helperPid: process.pid,
     status: "running",
+    interactionMode: "automatic",
   };
   await assert.rejects(
     BrowserHost.prototype.beginTurn.call({
@@ -1402,6 +1403,7 @@ test("a replacement helper takes over only after the previous owner exited", asy
     traceId: "trace_dead_owner",
     helperPid: deadPid,
     status: "running",
+    interactionMode: "automatic",
     loading: true,
     message: "ChatGPT is working",
     view: {
@@ -2003,6 +2005,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
     conversationKey,
     connectorIdentity: "Codex Native2",
     connectorBound: true,
+    interactionMode: "automatic",
     helperPid: 111,
     status: "ready",
     loading: false,
@@ -2063,6 +2066,7 @@ test("a retained conversation is not reused for a different connector identity",
     conversationKey,
     connectorIdentity: "Codex Native2",
     connectorBound: true,
+    interactionMode: "automatic",
   };
   const created = { id: "fresh", surfaceId: "surface-fresh" };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
@@ -2097,6 +2101,58 @@ test("a retained conversation is not reused for a different connector identity",
   assert.equal(retained.status, "ready");
 });
 
+test("an Automatic turn never reuses a retained Zero Risk conversation", async () => {
+  const conversationKey = "m".repeat(64);
+  const retained = {
+    id: "manual-retained",
+    traceId: "trace_manual",
+    status: "ready",
+    interactionMode: "manual",
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: true,
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[retained.id, retained]]),
+    userCancelledTurnOwners: new Map(),
+    createTurnTab: () => ({ id: "automatic-fresh", surfaceId: "surface-fresh" }),
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    logger: { info() {} },
+  });
+
+  assert.deepEqual(
+    await BrowserHost.prototype.beginTurn.call(
+      fixture,
+      "trace_automatic",
+      false,
+      222,
+      conversationKey,
+      "Codex Native2",
+    ),
+    {
+      surfaceId: "surface-fresh",
+      tabId: "automatic-fresh",
+      reused: false,
+      connectorBound: false,
+    },
+  );
+  assert.equal(retained.status, "ready");
+  await assert.rejects(
+    BrowserHost.prototype.beginTurn.call(
+      fixture,
+      "trace_manual",
+      false,
+      222,
+      conversationKey,
+      "Codex Native2",
+    ),
+    /already belongs to Zero Risk interaction/,
+  );
+});
+
 test("a connector conversation is not reused until its connector was bound", async () => {
   const conversationKey = "c".repeat(64);
   const retained = {
@@ -2106,6 +2162,7 @@ test("a connector conversation is not reused until its connector was bound", asy
     conversationKey,
     connectorIdentity: "Codex Native2",
     connectorBound: false,
+    interactionMode: "automatic",
   };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: null,
@@ -2706,10 +2763,10 @@ test("manual browser snapshots never read or expose page-controlled titles", () 
   assert.equal(pageTitleReads, 0);
 });
 
-test("interaction-mode changes preserve retained tabs on failure and isolate them after commit", async () => {
+test("interaction-mode changes preserve mode-bound retained tabs on failure and after commit", async () => {
   const retainedAutomatic = { id: "automatic-ready", status: "ready" };
   const retainedManual = { id: "manual-ready", status: "ready", interactionMode: "manual" };
-  const removed = [];
+  let ownershipMarks = 0;
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     getBrowserInteractionMode: () => "manual",
     interactionModeOverride: null,
@@ -2719,11 +2776,7 @@ test("interaction-mode changes preserve retained tabs on failure and isolate the
       [retainedManual.id, retainedManual],
     ]),
     selectedTabId: retainedAutomatic.id,
-    removeTurnTab(tab, abortRunning) {
-      assert.equal(abortRunning, false);
-      removed.push(tab.id);
-      this.turnTabs.delete(tab.id);
-    },
+    markOwnedSurface: async () => { ownershipMarks += 1; },
     snapshot: () => ({ activeTabId: "home" }),
   });
 
@@ -2735,16 +2788,20 @@ test("interaction-mode changes preserve retained tabs on failure and isolate the
     }),
     /runtime setup failed/,
   );
-  assert.deepEqual(removed, []);
   assert.equal(fixture.turnTabs.size, 2);
   assert.equal(fixture.currentOperation(), null);
   assert.equal(fixture.browserInteractionMode(), "manual");
+  assert.equal(ownershipMarks, 0);
 
-  const result = await fixture.withInteractionModeChange("automatic", async () => "configured");
+  const result = await fixture.withInteractionModeChange("automatic", async commit => {
+    await commit();
+    return "configured";
+  });
   assert.equal(result, "configured");
-  assert.deepEqual(removed, [retainedAutomatic.id, retainedManual.id]);
-  assert.equal(fixture.selectedTabId, "home");
+  assert.deepEqual([...fixture.turnTabs.keys()], [retainedAutomatic.id, retainedManual.id]);
+  assert.equal(fixture.selectedTabId, retainedAutomatic.id);
   assert.equal(fixture.currentOperation(), null);
+  assert.equal(ownershipMarks, 1);
 
   const live = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([["running", { id: "running", status: "running" }]]),
@@ -2754,6 +2811,59 @@ test("interaction-mode changes preserve retained tabs on failure and isolate the
     () => live.assertTurnTabsCanResetForInteractionModeChange(),
     /Finish or cancel active ChatGPT turns/,
   );
+});
+
+test("switching from Zero Risk to Automatic marks the already-loaded primary surface", async () => {
+  const scripts = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    getBrowserInteractionMode: () => "manual",
+    interactionModeOverride: null,
+    manualOperation: null,
+    turnTabs: new Map(),
+    selectedTabId: "home",
+    surfaceId: "automatic-primary-surface",
+    view: { webContents: {
+      executeJavaScript: async script => { scripts.push(script); },
+    } },
+    snapshot: () => ({ activeTabId: "home" }),
+  });
+
+  assert.equal(await fixture.withInteractionModeChange("automatic", async commit => {
+    await commit();
+    return "configured";
+  }), "configured");
+  assert.equal(scripts.length, 1);
+  assert.match(scripts[0], /__CODEX_WEB_GPT_SURFACE_ID__/);
+  assert.match(scripts[0], /automatic-primary-surface/);
+});
+
+test("a failed Automatic ownership proof stays inside the runtime rollback boundary", async () => {
+  const retained = { id: "retained-before-failed-switch", status: "ready" };
+  let rollbackBoundaryObserved = false;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    getBrowserInteractionMode: () => "manual",
+    interactionModeOverride: null,
+    manualOperation: null,
+    turnTabs: new Map([[retained.id, retained]]),
+    selectedTabId: retained.id,
+    markOwnedSurface: async () => { throw new Error("surface ownership failed"); },
+  });
+
+  await assert.rejects(
+    fixture.withInteractionModeChange("automatic", async commit => {
+      try {
+        await commit();
+      } catch (error) {
+        // RuntimeHost executes this callback before leaving runSetup's rollback-protected try.
+        rollbackBoundaryObserved = true;
+        throw error;
+      }
+    }),
+    /surface ownership failed/,
+  );
+  assert.equal(rollbackBoundaryObserved, true);
+  assert.deepEqual([...fixture.turnTabs.keys()], [retained.id]);
+  assert.equal(fixture.browserInteractionMode(), "manual");
 });
 
 test("Zero Risk reveal navigates without inspecting the ChatGPT DOM", async () => {

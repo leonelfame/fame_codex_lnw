@@ -715,12 +715,12 @@ function registerIpc({ logger, stateStore }) {
     const setup = IS_DEV_PROFILE
       ? runtimeHost.setupDevMcp.bind(runtimeHost)
       : runtimeHost.setupMcp.bind(runtimeHost);
-    const runSetup = () => setup({
+    const runSetup = afterRuntimeReady => setup({
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
       replace: input?.replace === true,
       interactionMode,
-    });
+    }, afterRuntimeReady);
     if (!interactionModeChange && interactionMode === "automatic") await browserHost.reveal();
     const result = interactionModeChange
       ? await browserHost.withInteractionModeChange(interactionMode, runSetup)
@@ -804,7 +804,7 @@ function registerIpc({ logger, stateStore }) {
     }
     const result = await browserHost.withInteractionModeChange(
       mode,
-      () => runtimeHost.setBrowserInteractionMode(mode),
+      afterRuntimeReady => runtimeHost.setBrowserInteractionMode(mode, afterRuntimeReady),
     );
     const state = stateStore.update({
       browserInteractionMode: mode,

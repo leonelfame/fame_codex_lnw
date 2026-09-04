@@ -455,7 +455,11 @@ function setAgentMaxDepth(document: CodexConfigDocument, value: number): void {
     insertDocumentLine(document, document.lines.length, "[agents]");
     table = findTomlTable(document.lines, "agents")!;
   }
-  insertDocumentLine(document, table.endIndex, managedLine);
+  let insertionIndex = table.endIndex;
+  while (insertionIndex > table.headerIndex + 1 && document.lines[insertionIndex - 1]?.trim() === "") {
+    insertionIndex -= 1;
+  }
+  insertDocumentLine(document, insertionIndex, managedLine);
 }
 
 export function findFeatureAssignment(lines: string[], key: string): PreviousFeatureAssignment {
@@ -515,7 +519,13 @@ export function installCompatibilityV1Features(text: string): {
   installedAgentMaxDepth: number;
 } {
   const document = parseDocument(text);
-  const previousMultiAgent = findFeatureAssignment(document.lines, "multi_agent");
+  const foundMultiAgent = findFeatureAssignment(document.lines, "multi_agent");
+  const featureSeparatorInserted = !foundMultiAgent.tablePresent
+    && document.lines.length > 0
+    && Boolean(document.lines.at(-1)?.trim());
+  const previousMultiAgent: PreviousFeatureAssignment = featureSeparatorInserted
+    ? { ...foundMultiAgent, separatorInserted: true }
+    : foundMultiAgent;
   const previousMultiAgentV2 = findMultiAgentV2Assignment(document.lines);
   const foundAgentMaxDepth = findAgentMaxDepthAssignment(document.lines);
   const previousAgentMaxDepth: PreviousAgentAssignment = !foundAgentMaxDepth.tablePresent
@@ -637,7 +647,13 @@ export function restoreBooleanFeature(
       const remaining = document.lines
         .slice(table.headerIndex + 1, table.endIndex)
         .filter(line => line.trim().length > 0);
-      if (remaining.length === 0) removeDocumentLine(document, table.headerIndex);
+      if (remaining.length === 0) {
+        const headerIndex = table.headerIndex;
+        removeDocumentLine(document, headerIndex);
+        if (previous.separatorInserted && document.lines[headerIndex - 1] === "") {
+          removeDocumentLine(document, headerIndex - 1);
+        }
+      }
     }
   }
   return renderDocument(document);

@@ -270,6 +270,34 @@ test("a stopped Responses observer revokes its Zero Risk binding and releases th
   }
 });
 
+test("a Zero Risk launcher failure remains failed when its own capability cleanup retires the broker", async () => {
+  const config = provider("failed-cleanup");
+  const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
+  let exactBinding: ReturnType<typeof binding> | undefined;
+  const ended: string[] = [];
+  const control: ChatGptZeroRiskManualControl = {
+    async start(_path, activity) { exactBinding = binding(activity.prompt); },
+    async waitSent() { throw new Error("synthetic launcher observation failure"); },
+    waitTerminal: noManualTerminal,
+    async markStarted() {},
+    async end(_path, activity) { ended.push(activity.status); },
+    async cancel() {},
+  };
+  try {
+    await expect(createChatGptWebAdapter(config, { broker, zeroRiskManualControl: control }).runTurn!(
+      request("turn_safe_failed_cleanup"),
+      { headers: new Headers() },
+      () => {},
+    )).rejects.toThrow("synthetic launcher observation failure");
+    expect(ended).toEqual(["failed"]);
+    expect(() => broker.startSafeTurn(exactBinding!.request_id))
+      .toThrow("invalid, expired, or revoked");
+  } finally {
+    chatGptTurnSessions.clear();
+    await broker.close();
+  }
+});
+
 test("Zero Risk offers only the new Codex suffix when the launcher reuses its retained ChatGPT chat", async () => {
   const config = provider("incremental-resume");
   const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
@@ -278,16 +306,24 @@ test("Zero Risk offers only the new Codex suffix when the launcher reuses its re
     { role: "assistant", content: [{ type: "text", text: "Earlier answer already visible in ChatGPT." }], timestamp: 3 },
     { role: "user", content: "Continue with only this new request.", timestamp: 4 },
   );
-  (input._rawBody as { input: unknown[] }).input.push(
+  const rawInput = (input._rawBody as { input: Array<Record<string, unknown>> }).input;
+  const historicalTurnId = "turn_safe_incremental_previous";
+  for (const item of rawInput) {
+    item.internal_chat_message_metadata_passthrough = { turn_id: historicalTurnId };
+  }
+  rawInput.push(
     {
       type: "message",
+      id: "msg_safe_incremental_previous_answer",
       role: "assistant",
       content: [{ type: "output_text", text: "Earlier answer already visible in ChatGPT." }],
     },
     {
       type: "message",
+      id: "msg_safe_incremental_current_prompt",
       role: "user",
       content: [{ type: "input_text", text: "Continue with only this new request." }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_safe_incremental" },
     },
   );
   let exactBinding: ReturnType<typeof binding> | undefined;

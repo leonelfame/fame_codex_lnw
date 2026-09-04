@@ -279,6 +279,7 @@ export class ChatGptTurnSession {
     readonly traceId?: string,
     readonly ownerKey?: string,
     readonly nativeTurnId?: string,
+    readonly nativeThreadId?: string,
   ) {
     this.attachedConversationKey = runtime.conversationKey;
     this.physicalSettlement = runtime.physicalSettlement.then(
@@ -492,6 +493,7 @@ export class ChatGptTurnSessions {
     traceId?: string,
     ownerKey?: string,
     nativeTurnId?: string,
+    nativeThreadId?: string,
   ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
@@ -506,7 +508,7 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId);
+    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId);
     this.entries.set(key, session);
     const conversationKey = session.conversationKey();
     if (conversationKey) this.conversationHeads.set(conversationKey, session);
@@ -520,6 +522,7 @@ export class ChatGptTurnSessions {
     traceId?: string,
     signal?: AbortSignal,
     nativeTurnId?: string,
+    nativeThreadId?: string,
   ): Promise<ChatGptTurnSession> {
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -546,7 +549,7 @@ export class ChatGptTurnSessions {
         continue;
       }
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId);
+      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId);
     }
   }
 
@@ -706,6 +709,34 @@ export class ChatGptTurnSessions {
     return sessions.length;
   }
 
+  /**
+   * Begin retiring only the browser execution owned by the exact native Codex turn.
+   *
+   * Codex runs Interrupt hooks synchronously with a short deadline. Ownership is removed and the
+   * abort is delivered before this method returns; physical helper cleanup remains represented by
+   * `settlement`, so replacement turns still serialize behind the real teardown without blocking
+   * the hook acknowledgement itself.
+   */
+  cancelNativeTurn(
+    threadId: string,
+    turnId: string,
+    reason: Error,
+  ): { cancelled: number; settlement: Promise<void> } {
+    const matches = [...this.entries].filter(([, session]) => (
+      session.nativeThreadId === threadId
+      && session.nativeTurnId === turnId
+    ));
+    for (const [key, session] of matches) {
+      if (this.entries.get(key) !== session) continue;
+      this.entries.delete(key);
+      this.forgetConversationHead(session);
+    }
+    const settlement = Promise.all(
+      matches.map(([key, session]) => this.beginRetirement(key, session, reason)),
+    ).then(() => undefined);
+    return { cancelled: matches.length, settlement };
+  }
+
   cancelledError(traceId: string): Error | undefined {
     for (const session of this.entries.values()) {
       if (session.traceId !== traceId) continue;
@@ -740,11 +771,11 @@ export class ChatGptTurnSessions {
     }
   }
 
-  private beginRetirement(key: string, session: ChatGptTurnSession): Promise<void> {
+  private beginRetirement(key: string, session: ChatGptTurnSession, reason?: Error): Promise<void> {
     const existing = this.retirements.get(key);
     if (existing) return existing;
     const conversationKey = session.conversationKey();
-    session.cancel();
+    session.cancel(reason);
     const retirement = session.physicalSettlement;
     this.retirements.set(key, retirement);
     void retirement.then(() => {

@@ -881,7 +881,11 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
-  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
+  const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
+    modelId,
+    effort,
+    { ...capabilities, experimentalBiggerContext: false },
+  );
   const assertMessageBoundary = (
     label: "stage" | "final part",
     messageTokens: number,
@@ -922,7 +926,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
-  const experimentalContextWindow = contextWindow * partCount;
+  const experimentalContextWindow = baseContextWindow * partCount;
   if (estimatedInputTokens < experimentalContextWindow) return;
   const partLabel = partCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
@@ -2514,6 +2518,7 @@ export class ChatGptBrowserWorker {
       }
       if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       await throwIfChatGptSessionFailureAlert(page);
+      await throwIfChatGptRateLimitDialog(page);
       await throwIfChatGptTerminalErrorAlert(baseline.responseTurns.last());
       let evidence: ChatGptSubmissionEvidence | undefined;
       if (externalProgress) {
@@ -4384,6 +4389,9 @@ export class ChatGptBrowserWorker {
                 : undefined,
             ),
           );
+          console.info(
+            `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
+          );
           const responseTurn = await this.waitForNewAssistantTurn(
             page,
             stageBaseline,
@@ -4401,9 +4409,6 @@ export class ChatGptBrowserWorker {
                 return recovered;
               }
               : undefined,
-          );
-          console.info(
-            `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
           );
           await this.waitForMultipartAcknowledgement(
             page,
@@ -4520,6 +4525,7 @@ export class ChatGptBrowserWorker {
             : undefined,
         ),
       );
+      console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -4536,7 +4542,6 @@ export class ChatGptBrowserWorker {
           }
           : undefined,
       );
-      console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
       await diagnostics.capture(page, "send-accepted");
 
       let lastHeartbeat = 0;

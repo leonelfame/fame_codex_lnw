@@ -560,14 +560,17 @@ export async function runChatGptMcpServer(options: {
       // A cancelled/timed-out MCP request no longer has a consumer for the native result. Revoke
       // the whole turn capability so the broker drops the pending invocation and every later call
       // from that abandoned ChatGPT response fails explicitly against its retired binding.
-      await callTurnBroker(options.brokerSocketPath, {
-        method: "release",
-        bindingId,
-      }).catch(releaseError => {
-        console.error(
-          `[chatgpt-web-mcp] failed to retire abandoned binding: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+      try {
+        await callTurnBroker(options.brokerSocketPath, {
+          method: "release",
+          bindingId,
+        });
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          "Codex Native invocation failed and its abandoned broker binding could not be retired",
         );
-      });
+      }
       if (error instanceof TurnBrokerTimeoutError) {
         const toolName = wireName(tool);
         console.error(

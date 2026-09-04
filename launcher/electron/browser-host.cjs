@@ -461,23 +461,24 @@ class BrowserHost {
     this.interactionModeOverride = mode;
     this.manualOperation = INTERACTION_MODE_CHANGE_OPERATION;
     try {
-      const result = await action();
-      this.resetTurnTabsForInteractionModeChange();
+      let browserCommitted = false;
+      const commitBrowserChange = async () => {
+        if (browserCommitted) throw new Error("Browser interaction mode change was committed more than once");
+        // The runtime setup invokes this callback inside its own rollback boundary. Existing tabs
+        // are mode-bound and remain valid history, so the browser commit has no irreversible tab
+        // mutation that could survive a runtime rollback.
+        if (mode === "automatic") await this.markOwnedSurface();
+        browserCommitted = true;
+      };
+      const result = await action(commitBrowserChange);
+      if (!browserCommitted) {
+        throw new Error("Runtime setup returned before committing the browser interaction mode");
+      }
       return result;
     } finally {
       this.manualOperation = null;
       this.interactionModeOverride = null;
     }
-  }
-
-  resetTurnTabsForInteractionModeChange() {
-    this.assertTurnTabsCanResetForInteractionModeChange();
-    for (const tab of [...this.turnTabs.values()]) this.removeTurnTab(tab, false);
-    if (this.turnTabs.size !== 0) {
-      throw new Error("Browser tabs could not be isolated for the interaction-mode change");
-    }
-    this.selectedTabId = "home";
-    return this.snapshot();
   }
 
   browserInteractionMode() {
@@ -556,6 +557,7 @@ class BrowserHost {
       url: IDLE_BROWSER_URL,
       loading: true,
       message: "ChatGPT is working",
+      interactionMode: "automatic",
       initializingSurface: true,
       bootstrapReady: false,
       rendererReady: false,
@@ -2176,12 +2178,16 @@ class BrowserHost {
       throw new BrowserTurnCancelledError(traceId);
     }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    if (sameTrace && sameTrace.interactionMode !== "automatic") {
+      throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
+    }
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
       || sameTrace.connectorIdentity !== connectorIdentity)) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
     }
     const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
-      tab.status === "ready"
+      tab.interactionMode === "automatic"
+      && tab.status === "ready"
       && tab.conversationKey === conversationKey
       && tab.connectorIdentity === connectorIdentity
       && (!connectorIdentity || tab.connectorBound === true)

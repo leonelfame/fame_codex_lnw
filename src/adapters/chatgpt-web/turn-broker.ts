@@ -82,6 +82,7 @@ interface TurnChannel {
   activityRevision: number;
   completionCommitted: boolean;
   completionRevision?: number;
+  retirementWaiters: Set<SafeWaiter<void>>;
   batchTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -101,6 +102,7 @@ interface BrokerRequest {
     | "owner_complete"
     | "owner_completion_fence_begin"
     | "owner_completion_fence_commit"
+    | "owner_wait_retirement"
     | "owner_revoke"
     | "owner_safe_wait_start"
     | "owner_safe_wait_completion"
@@ -225,6 +227,7 @@ export interface TurnBrokerOwner {
   compactionDeliveryCount(token: string): number | Promise<number>;
   beginCompletionFence(token: string): number | undefined | Promise<number | undefined>;
   commitCompletionFence(token: string, revision: number): boolean | Promise<boolean>;
+  waitForRetirement(token: string, signal?: AbortSignal): Promise<void>;
   revoke(token: string, reason?: Error): void | Promise<void>;
 }
 
@@ -303,6 +306,7 @@ export class TurnBroker implements TurnBrokerOwner {
       completedActivities: new Set(),
       activityRevision: 0,
       completionCommitted: false,
+      retirementWaiters: new Set(),
     };
     this.channels.set(token, channel);
     this.pending.set(token, channel);
@@ -457,6 +461,13 @@ export class TurnBroker implements TurnBrokerOwner {
     return true;
   }
 
+  waitForRetirement(token: string, signal?: AbortSignal): Promise<void> {
+    this.prune();
+    const channel = this.channels.get(token);
+    if (!channel) return Promise.resolve();
+    return this.waitForSafeState(channel.retirementWaiters, signal, "turn retirement wait aborted");
+  }
+
   requestCompaction(token: string, queuedResult: BrokerToolResult): number {
     this.prune();
     const channel = this.channels.get(token);
@@ -607,6 +618,7 @@ export class TurnBroker implements TurnBrokerOwner {
       this.rejectSafeWaiters(channel.safe.completionWaiters, reason);
     }
     this.retire(this.retiredTokens, token, channel.traceId);
+    this.resolveSafeWaiters(channel.retirementWaiters, undefined);
     this.rejectChannel(channel, reason);
   }
 
@@ -865,7 +877,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
@@ -901,7 +913,7 @@ export class TurnBroker implements TurnBrokerOwner {
       return { submitted: true };
     }
     if (request.method === "owner_status") {
-      return { protocolVersion: 4, acceptingExternalOwners: this.acceptingExternalOwners };
+      return { protocolVersion: 5, acceptingExternalOwners: this.acceptingExternalOwners };
     }
     if (request.method === "owner_register") {
       const environment = ownerEnvironment(request.environment);
@@ -957,6 +969,10 @@ export class TurnBroker implements TurnBrokerOwner {
         throw new Error("turn completion fence revision is invalid");
       }
       return { committed: this.commitCompletionFence(request.token, request.revision!) };
+    }
+    if (request.method === "owner_wait_retirement") {
+      if (!request.token) throw new Error("turn owner token is required");
+      return this.waitForRetirement(request.token, socketSignal).then(() => ({ retired: true }));
     }
     if (request.method === "owner_revoke") {
       if (!request.token) throw new Error("turn owner token is required");
@@ -1069,6 +1085,9 @@ export class TurnBroker implements TurnBrokerOwner {
     const binding = this.bindings.get(bindingId);
     if (!binding) {
       const retiredTurn = this.retiredBindings.get(bindingId);
+      if (request.method === "release" && retiredTurn !== undefined) {
+        return { released: true, duplicate: true };
+      }
       console.error(
         `[chatgpt-web] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
         + ` retiredTurn=${retiredTurn ?? "unknown"})`,
@@ -1288,7 +1307,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
         + ` (${error instanceof Error ? error.message : String(error)})`,
       );
     }
-    if (status.protocolVersion !== 4) {
+    if (status.protocolVersion !== 5) {
       throw new Error(`Unsupported DEV turn-owner protocol version: ${String(status.protocolVersion)}`);
     }
     if (status.acceptingExternalOwners !== true) {
@@ -1444,6 +1463,16 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
       throw new Error("DEV turn owner received an invalid completion fence result");
     }
     return response.committed;
+  }
+
+  async waitForRetirement(token: string, signal?: AbortSignal): Promise<void> {
+    const response = await callTurnBroker<{ retired?: unknown }>(
+      this.socketPath,
+      { method: "owner_wait_retirement", token },
+      null,
+      signal,
+    );
+    if (response.retired !== true) throw new Error("DEV turn owner received an invalid retirement result");
   }
 
   async revoke(token: string, _reason?: Error): Promise<void> {

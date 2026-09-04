@@ -5,10 +5,15 @@ import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
   cancelAllStructuredCompactions,
+  cancelStructuredCompactionNativeTurn,
   cancelStructuredCompactionTrace,
 } from "./adapters/chatgpt-web/compaction-handoff";
 import { chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
-import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE } from "./adapters/chatgpt-web/environment";
+import {
+  CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
+  extractChatGptTurnIdentity,
+  extractCodexTurnIdentityFromBody,
+} from "./adapters/chatgpt-web/environment";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -43,6 +48,11 @@ import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified";
+
+export interface NativeCodexTurnIdentity {
+  threadId: string;
+  turnId: string;
+}
 
 export interface HttpStreamFailureEvidence {
   httpTurnId: number;
@@ -108,8 +118,25 @@ export class HttpTurnCounter {
     abort: AbortController;
     done: Promise<void>;
     finish: () => void;
+    identity?: NativeCodexTurnIdentity;
   }>();
+  private readonly interrupted = new Map<string, unknown>();
   private nextId = 1;
+
+  private identityKey(identity: NativeCodexTurnIdentity): string {
+    return `${identity.threadId}\u0000${identity.turnId}`;
+  }
+
+  private rememberInterrupted(identity: NativeCodexTurnIdentity, reason: unknown): void {
+    const key = this.identityKey(identity);
+    this.interrupted.delete(key);
+    this.interrupted.set(key, reason);
+    while (this.interrupted.size > 1_024) {
+      const oldest = this.interrupted.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.interrupted.delete(oldest);
+    }
+  }
 
   constructor(private readonly reportStreamFailure: HttpStreamFailureReporter = reportHttpStreamFailure) {}
 
@@ -126,8 +153,37 @@ export class HttpTurnCounter {
     return turns.length;
   }
 
+  async cancelTurn(
+    identity: NativeCodexTurnIdentity,
+    reason: unknown = new DOMException("Codex turn interrupted", "AbortError"),
+  ): Promise<number> {
+    const cancellation = this.beginCancelTurn(identity, reason);
+    await cancellation.settlement;
+    return cancellation.cancelled;
+  }
+
+  beginCancelTurn(
+    identity: NativeCodexTurnIdentity,
+    reason: unknown = new DOMException("Codex turn interrupted", "AbortError"),
+  ): { cancelled: number; settlement: Promise<void> } {
+    this.rememberInterrupted(identity, reason);
+    const turns = [...this.active.values()].filter(turn => (
+      turn.identity?.threadId === identity.threadId && turn.identity.turnId === identity.turnId
+    ));
+    for (const turn of turns) {
+      if (!turn.abort.signal.aborted) turn.abort.abort(reason);
+    }
+    return {
+      cancelled: turns.length,
+      settlement: Promise.all(turns.map(turn => turn.done)).then(() => undefined),
+    };
+  }
+
   async track(
-    run: (signal: AbortSignal) => Promise<Response>,
+    run: (
+      signal: AbortSignal,
+      bindIdentity: (identity: NativeCodexTurnIdentity) => void,
+    ) => Promise<Response>,
     clientSignal?: AbortSignal,
     platform: NodeJS.Platform = process.platform,
     endpoint: HttpTrackedEndpoint = "unspecified",
@@ -136,7 +192,13 @@ export class HttpTurnCounter {
     const abort = new AbortController();
     let finish!: () => void;
     const done = new Promise<void>(resolve => { finish = resolve; });
-    this.active.set(id, { abort, done, finish });
+    const tracked: {
+      abort: AbortController;
+      done: Promise<void>;
+      finish: () => void;
+      identity?: NativeCodexTurnIdentity;
+    } = { abort, done, finish };
+    this.active.set(id, tracked);
     let released = false;
     let clientAbortListener: (() => void) | undefined;
     let streamAbortListener: (() => void) | undefined;
@@ -156,7 +218,18 @@ export class HttpTurnCounter {
     else clientSignal?.addEventListener("abort", clientAbortListener, { once: true });
 
     try {
-      const response = await run(abort.signal);
+      const response = await run(abort.signal, identity => {
+        if (!identity.threadId.trim() || !identity.turnId.trim()) {
+          throw new Error("Native Codex turn identity must contain a threadId and turnId");
+        }
+        if (tracked.identity
+          && (tracked.identity.threadId !== identity.threadId || tracked.identity.turnId !== identity.turnId)) {
+          throw new Error("An HTTP request cannot change its native Codex turn identity");
+        }
+        tracked.identity = identity;
+        const interruptedReason = this.interrupted.get(this.identityKey(identity));
+        if (interruptedReason !== undefined && !abort.signal.aborted) abort.abort(interruptedReason);
+      });
       if (!response.body) {
         release();
         return response;
@@ -282,6 +355,8 @@ export interface ResponseRequestOptions {
   rememberState?: boolean;
   /** Observe the exact production adapter stream when invoking the handler in-process. */
   onAdapterEvent?: (event: AdapterEvent) => void;
+  /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
+  onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -370,6 +445,14 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  try {
+    const identity = extractCodexTurnIdentityFromBody(raw);
+    if (identity.threadId && identity.turnId) {
+      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
+    }
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
@@ -386,6 +469,10 @@ export async function responseRequest(
   try {
     parsed = parseRequest(expanded);
     route = routeChatGptWebRequest(parsed, config);
+    const identity = extractChatGptTurnIdentity(parsed);
+    if (identity.threadId && identity.turnId) {
+      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
+    }
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -532,6 +619,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
+  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -561,6 +649,14 @@ export async function compactRequest(
         "x-codex-turn-metadata": headerTurnMetadata,
       },
     };
+  }
+  try {
+    const identity = extractCodexTurnIdentityFromBody(raw);
+    if (identity.threadId && identity.turnId) {
+      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
+    }
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
@@ -594,7 +690,7 @@ export async function compactRequest(
     body: JSON.stringify({ ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] }),
     signal: req.signal,
   });
-  const response = await responseRequest(internal, config, adapterFactory);
+  const response = await responseRequest(internal, config, adapterFactory, options);
   if (!response.ok) return response;
   let body: {
     output?: unknown[];
@@ -638,7 +734,7 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch } = {},
+  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -726,6 +822,56 @@ export function startServer(
           ...activity(),
         });
       }
+      if (req.method === "POST" && url.pathname === "/admin/interrupt-turn") {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        let identity: NativeCodexTurnIdentity;
+        try {
+          const body = await req.json() as { threadId?: unknown; turnId?: unknown };
+          const threadId = typeof body?.threadId === "string" ? body.threadId.trim() : "";
+          const turnId = typeof body?.turnId === "string" ? body.turnId.trim() : "";
+          if (!/^[A-Za-z0-9_-]{6,128}$/.test(threadId) || !/^[A-Za-z0-9_-]{6,128}$/.test(turnId)) {
+            throw new Error("native Codex threadId or turnId is invalid");
+          }
+          identity = { threadId, turnId };
+        } catch (error) {
+          return Response.json(
+            { status: "error", error: error instanceof Error ? error.message : String(error) },
+            { status: 400 },
+          );
+        }
+        const reason = new DOMException("Codex turn interrupted", "AbortError");
+        const browserCancellation = chatGptTurnSessions.cancelNativeTurn(
+          identity.threadId,
+          identity.turnId,
+          reason,
+        );
+        const compactionCancellation = cancelStructuredCompactionNativeTurn(
+          identity.threadId,
+          identity.turnId,
+          reason,
+        );
+        const httpCancellation = httpTurns.beginCancelTurn(identity, reason);
+        const settlement = Promise.allSettled([
+          browserCancellation.settlement,
+          compactionCancellation.settlement,
+          httpCancellation.settlement,
+        ]);
+        void settlement.then(results => {
+          for (const result of results) {
+            if (result.status === "rejected") {
+              console.error(
+                `[chatgpt-web] interrupted turn cleanup failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+              );
+            }
+          }
+        });
+        return Response.json({
+          status: "ok",
+          cancelled_http_turns: httpCancellation.cancelled,
+          cancelled_browser_turns: browserCancellation.cancelled,
+          cancelled_compaction_runs: compactionCancellation.cancelled,
+        });
+      }
       if (req.method === "POST" && url.pathname === "/admin/cancel-turns") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         const reason = new Error("Active turn cancelled by launcher");
@@ -806,7 +952,12 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
-          signal => responseRequest(new Request(req, { signal }), config),
+          (signal, bindIdentity) => responseRequest(
+            new Request(req, { signal }),
+            config,
+            dependencies.adapterFactory,
+            { onTurnIdentity: bindIdentity },
+          ),
           req.signal,
           process.platform,
           "responses",
@@ -815,7 +966,12 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
-          signal => compactRequest(new Request(req, { signal }), config),
+          (signal, bindIdentity) => compactRequest(
+            new Request(req, { signal }),
+            config,
+            dependencies.adapterFactory,
+            { onTurnIdentity: bindIdentity },
+          ),
           req.signal,
           process.platform,
           "compact",

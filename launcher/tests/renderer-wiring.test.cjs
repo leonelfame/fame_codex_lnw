@@ -178,7 +178,7 @@ test("Zero Risk is selectable during onboarding and later switches transactional
     electronMain.indexOf('handle("launcher:set-preference"'),
   );
   const modeTransaction = modeSwitchHandler.indexOf("await browserHost.withInteractionModeChange(");
-  const runtimeModeCommit = modeSwitchHandler.indexOf("runtimeHost.setBrowserInteractionMode(mode)");
+  const runtimeModeCommit = modeSwitchHandler.indexOf("runtimeHost.setBrowserInteractionMode(mode, afterRuntimeReady)");
   const stateModeCommit = modeSwitchHandler.indexOf("const state = stateStore.update({");
   assert.ok(modeTransaction >= 0 && modeTransaction < runtimeModeCommit);
   assert.ok(runtimeModeCommit < stateModeCommit);
@@ -187,7 +187,7 @@ test("Zero Risk is selectable during onboarding and later switches transactional
     electronMain.indexOf('handle("launcher:setup-mcp"'),
     electronMain.indexOf('handle("launcher:set-mcp-step"'),
   );
-  const runtimeMcpCommit = mcpSetupHandler.indexOf("const runSetup = () => setup({");
+  const runtimeMcpCommit = mcpSetupHandler.indexOf("const runSetup = afterRuntimeReady => setup({");
   const mcpTransaction = mcpSetupHandler.indexOf("await browserHost.withInteractionModeChange(interactionMode, runSetup)");
   const stateMcpCommit = mcpSetupHandler.indexOf("const state = stateStore.update({");
   assert.ok(runtimeMcpCommit >= 0 && runtimeMcpCommit < mcpTransaction);

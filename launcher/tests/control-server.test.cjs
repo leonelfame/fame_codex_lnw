@@ -314,6 +314,7 @@ test("manual-to-automatic transaction exposes capability inspection and preserve
   const retained = { id: "manual-ready", status: "ready", interactionMode: "manual" };
   const removed = [];
   let inspections = 0;
+  let ownershipMarks = 0;
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     getBrowserInteractionMode: () => "manual",
     interactionModeOverride: null,
@@ -331,6 +332,7 @@ test("manual-to-automatic transaction exposes capability inspection and preserve
       removed.push(tab.id);
       this.turnTabs.delete(tab.id);
     },
+    markOwnedSurface: async () => { ownershipMarks += 1; },
     snapshot: () => ({ activeTabId: "home" }),
   });
   const server = await new BrowserControlServer({
@@ -358,16 +360,18 @@ test("manual-to-automatic transaction exposes capability inspection and preserve
     assert.deepEqual([...host.turnTabs.keys()], [retained.id]);
     assert.deepEqual(removed, []);
 
-    const result = await host.withInteractionModeChange("automatic", async () => {
+    const result = await host.withInteractionModeChange("automatic", async commit => {
       const response = await inspect();
       assert.equal(response.status, 200);
+      await commit();
       return "configured";
     });
     assert.equal(result, "configured");
     assert.equal(host.browserInteractionMode(), "manual");
-    assert.equal(host.turnTabs.size, 0);
-    assert.deepEqual(removed, [retained.id]);
+    assert.equal(host.turnTabs.size, 1);
+    assert.deepEqual(removed, []);
     assert.equal(inspections, 2);
+    assert.equal(ownershipMarks, 1);
   } finally {
     await server.close();
   }

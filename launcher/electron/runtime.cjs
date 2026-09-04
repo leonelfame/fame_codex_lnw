@@ -1178,7 +1178,7 @@ class RuntimeHost {
     };
   }
 
-  setupMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}) {
+  setupMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}, afterRuntimeReady) {
     this.assertProductionProfile("Native Codex MCP setup");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const targetMode = interactionMode ?? this.browserInteractionMode();
@@ -1205,6 +1205,7 @@ class RuntimeHost {
         message: "Reconnecting the native Codex harness with saved tunnel credentials",
         successMessage: "Local MCP tools are ready",
         timeoutMs: MCP_SETUP_TIMEOUT_MS,
+        afterRuntimeReady,
       });
     }
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
@@ -1224,10 +1225,11 @@ class RuntimeHost {
       message: "Connecting the native Codex harness",
       successMessage: "Local MCP tools are ready",
       timeoutMs: MCP_SETUP_TIMEOUT_MS,
+      afterRuntimeReady,
     }).finally(() => fs.rmSync(keyPath, { force: true }));
   }
 
-  setupDevMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}) {
+  setupDevMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}, afterRuntimeReady) {
     if (this.launcherProfile !== "development") {
       throw new Error("DEV MCP setup requires the isolated DEV launcher");
     }
@@ -1256,6 +1258,7 @@ class RuntimeHost {
         message: "Validating saved DEV tunnel credentials",
         successMessage: "DEV Full harness is configured",
         timeoutMs: MCP_SETUP_TIMEOUT_MS,
+        afterRuntimeReady,
       });
     }
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
@@ -1268,10 +1271,11 @@ class RuntimeHost {
       message: "Configuring the isolated DEV Full harness",
       successMessage: "DEV Full harness is configured",
       timeoutMs: MCP_SETUP_TIMEOUT_MS,
+      afterRuntimeReady,
     }).finally(() => fs.rmSync(keyPath, { force: true }));
   }
 
-  async setBrowserInteractionMode(mode) {
+  async setBrowserInteractionMode(mode, afterRuntimeReady) {
     if (mode !== "automatic" && mode !== "manual") {
       throw new Error("Browser interaction mode must be automatic or manual");
     }
@@ -1304,6 +1308,7 @@ class RuntimeHost {
         ? `Zero Risk enabled${this.launcherProfile === "production" ? "; restart Codex" : ""}`
         : `Automatic browser interaction enabled${this.launcherProfile === "production" ? "; restart Codex" : ""}`,
       timeoutMs: current.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+      afterRuntimeReady,
     };
     const result = this.launcherProfile === "development"
       ? await this.runDevSetup("browser-interaction-mode", args, options)
@@ -1347,6 +1352,7 @@ class RuntimeHost {
       if (runtime.status !== "ready") {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
       }
+      await options.afterRuntimeReady?.();
       return result;
     } catch (error) {
       const primary = error instanceof Error ? error.message : String(error);
