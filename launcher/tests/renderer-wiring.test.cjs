@@ -289,7 +289,6 @@ test("MCP verification proves runtime health before checking the connector", () 
     /Checking local runtime[\s\S]*?await runtimeHost\.doctor\(\)[\s\S]*?if \(!report\.ok\)[\s\S]*?return report;[\s\S]*?Checking ChatGPT connector[\s\S]*?await browserHost\.verifyConnector/,
   );
   assert.match(handler, /publishOperation\(\{ name: operationName, status: "completed"/);
-  assert.match(appSource, /onClick=\{\(\) => void \(doctor\?\.ok \? onDone\(\) : verify\(\)\)\}/);
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
 });
 

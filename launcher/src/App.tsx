@@ -1255,6 +1255,7 @@ function McpSurface({
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
   const manualInteraction = interactionMode === "manual";
   const steps = useMemo(() => [
     { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
@@ -1344,7 +1345,7 @@ function McpSurface({
             onClick={() => void safeMove(index)}
             type="button"
           >
-            <span>{index < step ? <Icon name="check" /> : index + 1}</span>
+            <span>{index < step || (index === 2 && verified) ? <Icon name="check" /> : index + 1}</span>
             <em>{item.title}</em>
           </button>
         ))}
@@ -1502,16 +1503,23 @@ function McpSurface({
           </PrimaryButton>
         ) : null}
         {step === 2 ? (
-          <PrimaryButton
-            disabled={busy}
-            onClick={() => void (doctor?.ok ? onDone() : verify())}
-          >
-            {busy
-              ? operation?.name === "mcp-verification" && operation.status === "running"
-                ? operation.message
-                : copy.running
-              : doctor?.ok ? copy.done : copy.verifyRuntime}
-          </PrimaryButton>
+          <>
+            {verified ? (
+              <SecondaryButton disabled={busy} onClick={() => void verify()}>
+                {copy.verifyRuntime}
+              </SecondaryButton>
+            ) : null}
+            <PrimaryButton
+              disabled={busy}
+              onClick={() => void (verified ? onDone() : verify())}
+            >
+              {busy
+                ? operation?.name === "mcp-verification" && operation.status === "running"
+                  ? operation.message
+                  : copy.running
+                : verified ? copy.done : copy.verifyRuntime}
+            </PrimaryButton>
+          </>
         ) : null}
       </div>
     </ContentSurface>

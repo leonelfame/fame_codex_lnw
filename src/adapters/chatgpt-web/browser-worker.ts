@@ -2312,137 +2312,83 @@ export class ChatGptBrowserWorker {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
     }
     await captureDiagnostic?.("effort-menu-open-requested");
-    const effortMenu = activation.menu;
     const effortSlider = activation.slider;
-    const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    const effortChoice = effortChoices.nth(uiEffortIndex);
+    const sliderContainer = activation.sliderContainer;
     const waitAbort = new AbortController();
-    let ready: "effort" | "slider" | "rate-limit" | "session-expired";
     try {
-      ready = await Promise.race([
-        effortChoice.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "effort" as const),
-        effortSlider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "slider" as const),
+      const ready = await Promise.race([
+        sliderContainer.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
+          .then(() => effortSlider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }))
+          .then(() => "slider" as const),
         chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
         chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "session-expired" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
       if (ready === "session-expired") await throwIfChatGptSessionFailureAlert(page);
-      // The current picker exposes model rows as menuitemradio alongside the effort slider.
-      // Those rows can win the locator race even though they are not effort choices.
-      if (ready !== "slider" && await effortSlider.isVisible().catch(() => false)) ready = "slider";
-      await captureDiagnostic?.(ready === "slider" ? "effort-slider-visible" : "effort-choice-visible");
+      await captureDiagnostic?.("effort-slider-visible");
     } catch (error) {
       if (error instanceof ChatGptWebAdapterError) throw error;
       await throwIfChatGptRateLimitDialog(page);
       await throwIfChatGptSessionFailureAlert(page);
       throw chatGptModelControlUnavailableAdapterError(
-        `ChatGPT effort menu did not expose item index ${uiEffortIndex}`
-        + `; item count: ${await effortChoices.count().catch(() => 0)}`,
+        `ChatGPT effort slider did not become ready for item index ${uiEffortIndex}`,
       );
     } finally {
       waitAbort.abort();
     }
-    if (ready === "slider") {
-      let sliderState = parseChatGptEffortSliderState(
-        await effortSlider.getAttribute("aria-valuemin"),
-        await effortSlider.getAttribute("aria-valuemax"),
-        await effortSlider.getAttribute("aria-valuenow"),
-      );
-      if (!sliderState) {
-        throw chatGptModelControlUnavailableAdapterError(
-          "ChatGPT effort slider exposed an invalid ARIA range",
-        );
-      }
-      const targetValue = sliderState.min + uiEffortIndex;
-      if (targetValue > sliderState.max) {
-        const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
-          ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
-          : "";
-        throw chatGptModelControlUnavailableAdapterError(
-          `ChatGPT effort slider does not expose item index ${uiEffortIndex}`
-          + ` (min=${sliderState.min}; max=${sliderState.max})`
-          + proUsageLimitHint,
-        );
-      }
-      const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
-      while (sliderState.value !== targetValue) {
-        await throwIfChatGptRateLimitDialog(page);
-        const direction = targetValue > sliderState.value ? 1 : -1;
-        const key = direction > 0 ? "ArrowRight" : "ArrowLeft";
-        const previousValue = sliderState.value;
-        await sliderControl.press(key);
-        const changeDeadline = Date.now() + 5_000;
-        do {
-          sliderState = parseChatGptEffortSliderState(
-            await effortSlider.getAttribute("aria-valuemin"),
-            await effortSlider.getAttribute("aria-valuemax"),
-            await effortSlider.getAttribute("aria-valuenow"),
-          );
-          if (!sliderState) {
-            throw chatGptModelControlUnavailableError(
-              "ChatGPT effort slider lost its semantic ARIA state",
-            );
-          }
-          if (sliderState.value !== previousValue) break;
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
-        } while (Date.now() < changeDeadline);
-        if (sliderState.value !== previousValue + direction) {
-          throw chatGptModelControlUnavailableError(
-            `ChatGPT effort slider did not move exactly one step with ${key}`
-            + ` (before=${previousValue}; after=${sliderState.value})`,
-          );
-        }
-      }
-      await captureDiagnostic?.("effort-selected");
-      await page.keyboard.press("Escape");
-      return mode;
-    }
-    const selected = await effortChoice.getAttribute("aria-checked");
-    if (selected !== "true" && selected !== "false") {
-      throw chatGptModelControlUnavailableError(
-        `ChatGPT effort item index ${uiEffortIndex} has no semantic checked state`,
-      );
-    }
-    if (selected === "true") {
-      await captureDiagnostic?.("effort-selected");
-      await page.keyboard.press("Escape");
-      return mode;
-    }
-    await throwIfChatGptRateLimitDialog(page);
-    await effortChoice.press("Enter");
-    await captureDiagnostic?.("effort-choice-activated");
-
-    const deadline = Date.now() + 40_000;
-    let confirmed: string | null = null;
-    while (Date.now() < deadline) {
-      if (!await effortMenu.isVisible().catch(() => false)) {
-        const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
-        if (expanded !== "true") {
-          await throwIfChatGptRateLimitDialog(page);
-          await currentEffort.click({ force: true });
-        }
-        await effortChoice.waitFor({
-          state: "visible",
-          timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),
-        });
-      }
-      confirmed = await effortChoice.getAttribute("aria-checked");
-      if (confirmed === "true") {
-        await captureDiagnostic?.("effort-selected");
-        await page.keyboard.press("Escape");
-        return mode;
-      }
-      if (confirmed !== "false") {
-        throw chatGptModelControlUnavailableError(
-          `ChatGPT effort item index ${uiEffortIndex} lost its semantic checked state`,
-        );
-      }
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
-    }
-    throw chatGptModelControlUnavailableError(
-      `ChatGPT did not confirm effort item index ${uiEffortIndex}`
-      + ` (aria-checked=${JSON.stringify(confirmed)})`,
+    let sliderState = parseChatGptEffortSliderState(
+      await effortSlider.getAttribute("aria-valuemin"),
+      await effortSlider.getAttribute("aria-valuemax"),
+      await effortSlider.getAttribute("aria-valuenow"),
     );
+    if (!sliderState) {
+      throw chatGptModelControlUnavailableAdapterError(
+        "ChatGPT effort slider exposed an invalid ARIA range",
+      );
+    }
+    const targetValue = sliderState.min + uiEffortIndex;
+    if (targetValue > sliderState.max) {
+      const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
+        ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
+        : "";
+      throw chatGptModelControlUnavailableAdapterError(
+        `ChatGPT effort slider does not expose item index ${uiEffortIndex}`
+        + ` (min=${sliderState.min}; max=${sliderState.max})`
+        + proUsageLimitHint,
+      );
+    }
+    const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+    while (sliderState.value !== targetValue) {
+      await throwIfChatGptRateLimitDialog(page);
+      const direction = targetValue > sliderState.value ? 1 : -1;
+      const key = direction > 0 ? "ArrowRight" : "ArrowLeft";
+      const previousValue = sliderState.value;
+      await sliderControl.press(key);
+      const changeDeadline = Date.now() + 5_000;
+      do {
+        sliderState = parseChatGptEffortSliderState(
+          await effortSlider.getAttribute("aria-valuemin"),
+          await effortSlider.getAttribute("aria-valuemax"),
+          await effortSlider.getAttribute("aria-valuenow"),
+        );
+        if (!sliderState) {
+          throw chatGptModelControlUnavailableError(
+            "ChatGPT effort slider lost its semantic ARIA state",
+          );
+        }
+        if (sliderState.value !== previousValue) break;
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+      } while (Date.now() < changeDeadline);
+      if (sliderState.value !== previousValue + direction) {
+        throw chatGptModelControlUnavailableError(
+          `ChatGPT effort slider did not move exactly one step with ${key}`
+          + ` (before=${previousValue}; after=${sliderState.value})`,
+        );
+      }
+    }
+    await captureDiagnostic?.("effort-selected");
+    await page.keyboard.press("Escape");
+    return mode;
   }
 
   private async activeComposer(
@@ -4414,7 +4360,10 @@ export class ChatGptBrowserWorker {
         "assistant-page-rebound",
         abortSignal,
       );
-      const toolTurnObservationRecovery = turn.externalProgress !== undefined;
+      // Rebinding the exact leased page is a browser-ownership operation. Read-only
+      // compaction needs it too; acquiring MCP tools is not a prerequisite.
+      const launcherObservationRecovery = launcherSurfaceId !== undefined
+        && this.config.browserHostDescriptorPath !== undefined;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.multipart ? `multipart-${prepared.multipart.parts.length}` : "inline"}, maxMessageChars=${maxMessageChars}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length}, compactionTrimmedMessages=${prepared.trimmedCompactionMessages ?? 0})`,
@@ -4486,7 +4435,7 @@ export class ChatGptBrowserWorker {
               undefined,
               undefined,
               undefined,
-              toolTurnObservationRecovery
+              launcherObservationRecovery
                 ? async (...args) => {
                   const recovered = await recoverSubmissionObservation(...args);
                   stageBaseline = recovered.baseline;
@@ -4516,7 +4465,7 @@ export class ChatGptBrowserWorker {
                 undefined,
                 CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
                 undefined,
-                toolTurnObservationRecovery
+                launcherObservationRecovery
                   ? async (...args) => {
                     const recovered = await recoverAssistantObservation(...args);
                     stageBaseline = recovered.baseline;
@@ -4634,7 +4583,7 @@ export class ChatGptBrowserWorker {
           turn.externalProgress,
           turn,
           completionTracker,
-          toolTurnObservationRecovery
+          launcherObservationRecovery
             ? async (...args) => {
               const recovered = await recoverSubmissionObservation(...args);
               submissionBaseline = recovered.baseline;
@@ -4652,7 +4601,7 @@ export class ChatGptBrowserWorker {
         turn.externalProgress,
         CHATGPT_RESPONSE_DOM_GRACE_MS,
         completionTracker,
-        toolTurnObservationRecovery
+        launcherObservationRecovery
           ? async (...args) => {
             const recovered = await recoverAssistantObservation(...args);
             submissionBaseline = recovered.baseline;

@@ -541,9 +541,9 @@ test("a submission probe stall rebinds the same tab without sending the prompt t
   expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"submission-page-rebound"');
   expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"assistant-page-rebound"');
   expect(runBrowserTurn).toContain(
-    "const toolTurnObservationRecovery = turn.externalProgress !== undefined;",
+    "const launcherObservationRecovery = launcherSurfaceId !== undefined",
   );
-  expect((runBrowserTurn.match(/toolTurnObservationRecovery\s*\? async/g) ?? []).length).toBe(4);
+  expect((runBrowserTurn.match(/launcherObservationRecovery\s*\? async/g) ?? []).length).toBe(4);
   expect(runBrowserTurn).toContain("stageBaseline = recovered.baseline");
   expect(runBrowserTurn).toContain("submissionBaseline = recovered.baseline");
   expect((runBrowserTurn.match(/recoverAssistantObservation\(\.\.\.args\)/g) ?? []).length).toBe(2);
@@ -2187,7 +2187,6 @@ test("effort selection uses structural menu and slider indices instead of locali
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(sessionSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
-  expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
   expect(workerSource).toContain('timeout: 70_000');
   expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
   expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
@@ -2195,11 +2194,10 @@ test("effort selection uses structural menu and slider indices instead of locali
   expect(sessionSource).toContain('[data-model-reasoning-effort-slider] [role="slider"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
-  expect(workerSource).toContain('getAttribute("aria-checked")');
   expect(workerSource).toContain('getAttribute("aria-expanded")');
   expect(workerSource).toContain('getAttribute("aria-valuenow")');
   expect(workerSource).toContain("sliderControl.press(key)");
-  expect(workerSource).toContain('if (ready !== "slider" && await effortSlider.isVisible().catch(() => false)) ready = "slider";');
+  expect(workerSource).not.toContain("const effortChoice = effortChoices.nth(uiEffortIndex)");
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
@@ -2310,7 +2308,6 @@ test("effort selection handles the known ChatGPT rate-limit dialog before backgr
   expect(selectionSource).not.toContain('currentEffort.press("Enter")');
   expect(selectionSource).not.toContain("currentEffort.evaluate(");
   expect(sessionSource).toContain('dispatchEvent("pointerdown"');
-  expect(selectionSource).toContain('effortChoice.press("Enter")');
   expect(selectionSource).not.toContain("effortChoice.click(");
   expect(selectionSource).not.toContain("is unavailable");
 });
@@ -2598,6 +2595,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
   const effortSlider = {
     filter() { return this; },
     last() { return this; },
+    locator() { return this; },
     waitFor: async () => await neverVisible,
   };
   const sessionAlert = {
@@ -2609,6 +2607,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
   const hiddenDialog = {
     filter() { return this; },
     last() { return this; },
+    locator() { return this; },
     waitFor: async () => await neverVisible,
     isVisible: async () => false,
   };
@@ -2710,7 +2709,7 @@ test("a proven current-turn MCP call accepts only the final browser submission",
   expect(finalSend).toContain("turn.externalProgress");
   expect(stagingSend).not.toMatch(/turn,\s*\n\s*\)/);
   expect(finalSend).toMatch(
-    /turn,\s*\n\s*completionTracker,\s*\n\s*toolTurnObservationRecovery\s*\n\s*\? async \(\.\.\.args\)/,
+    /turn,\s*\n\s*completionTracker,\s*\n\s*launcherObservationRecovery\s*\n\s*\? async \(\.\.\.args\)/,
   );
   expect(finalSend).toContain("submissionBaseline = recovered.baseline");
 });

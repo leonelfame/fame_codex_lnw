@@ -17,6 +17,7 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
 ].join(", ");
 export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
+export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
 export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
@@ -41,7 +42,15 @@ export interface ChatGptEffortSliderState {
 export interface ChatGptEffortActivation {
   method: "already-open" | "click" | "pointerdown";
   menu: Locator;
+  sliderContainer: Locator;
   slider: Locator;
+}
+
+export function chatGptEffortSlider(page: Page): { sliderContainer: Locator; slider: Locator } {
+  const sliderContainer = page.locator(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true }).last();
+  // The current picker keeps ARIA values on a zero-width, aria-hidden semantic input.
+  // Its visible container proves the active surface; the input proves the effort range.
+  return { sliderContainer, slider: sliderContainer.locator('[role="slider"]') };
 }
 
 function effortMenuSelectorForId(menuId: string): string {
@@ -57,11 +66,11 @@ export async function chatGptEffortMenuForControl(page: Page, control: Locator):
 async function visibleEffortSurface(
   page: Page,
   control: Locator,
-): Promise<{ menu: Locator; slider: Locator } | undefined> {
+): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
   const menu = await chatGptEffortMenuForControl(page, control);
-  const slider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
-  if (await menu.isVisible().catch(() => false) || await slider.isVisible().catch(() => false)) {
-    return { menu, slider };
+  const surface = chatGptEffortSlider(page);
+  if (await menu.isVisible().catch(() => false) || await surface.sliderContainer.isVisible().catch(() => false)) {
+    return { menu, ...surface };
   }
   return undefined;
 }
@@ -70,7 +79,7 @@ async function waitForEffortSurface(
   page: Page,
   control: Locator,
   timeoutMs: number,
-): Promise<{ menu: Locator; slider: Locator } | undefined> {
+): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
   const deadline = Date.now() + timeoutMs;
   do {
     const surface = await visibleEffortSurface(page, control);
@@ -205,35 +214,24 @@ export async function detectChatGptAccountCapabilities(
   const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
   if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
   try {
-    const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    const slider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
-    const waitAbort = new AbortController();
-    try {
-      const ready = await Promise.race([
-        efforts.first().waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => "items" as const),
-        slider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => "slider" as const),
-      ]);
-      const sliderVisible = ready === "slider" || await slider.isVisible().catch(() => false);
-      if (!sliderVisible) {
-        return { solAvailable: true, proAvailable: await efforts.count() >= 5 };
-      }
-      const state = parseChatGptEffortSliderState(
-        await slider.getAttribute("aria-valuemin"),
-        await slider.getAttribute("aria-valuemax"),
-        await slider.getAttribute("aria-valuenow"),
+    const { sliderContainer, slider } = chatGptEffortSlider(page);
+    const timeout = options.selectorTimeoutMs ?? 70_000;
+    // Model radio rows can hydrate before the effort control. They carry no evidence
+    // of the account's reasoning range, so an absent slider must fail, not cache false.
+    await sliderContainer.waitFor({ state: "visible", timeout });
+    await slider.waitFor({ state: "attached", timeout });
+    const state = parseChatGptEffortSliderState(
+      await slider.getAttribute("aria-valuemin"),
+      await slider.getAttribute("aria-valuemax"),
+      await slider.getAttribute("aria-valuenow"),
+    );
+    if (!state) {
+      throw new Error(
+        "ChatGPT model controls are unavailable. Reload ChatGPT and run Repair again.",
+        { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
-      if (!state) {
-        throw new Error(
-          "ChatGPT model controls are unavailable. Reload ChatGPT and run Repair again.",
-          { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
-        );
-      }
-      return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 };
-    } finally {
-      waitAbort.abort();
     }
+    return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }
