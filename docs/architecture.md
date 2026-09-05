@@ -110,7 +110,9 @@ For a new ChatGPT chat the adapter provides the complete compiled prompt; for an
 chat it also provides an incremental prompt containing only the Codex suffix after the last assistant
 reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes
 the selected text to the system clipboard. The user has thirty seconds to paste, select the visible
-ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent.
+ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent; a manual compaction handoff
+allows two minutes. Sent ends that confirmation deadline. Waiting for the first MCP bind is part of
+the live turn, which remains subject to explicit cancellation and runtime-owner cleanup.
 The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion
 sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the
 per-tab nonce used to validate the Launcher confirmation never leaves the local runtime.

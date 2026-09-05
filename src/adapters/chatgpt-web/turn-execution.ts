@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError } from "./adapter-error";
+import { chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
 import {
+  chatGptTurnUserRevisionHistory,
   extractChatGptCompactionSourceRevision,
   extractChatGptTurnIdentity,
   extractChatGptTurnUserRevision,
@@ -193,7 +194,21 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
     revision: parsed._compactionRequest
       ? compactionInputRevision(parsed)
       : extractChatGptTurnUserRevision(parsed),
+    ...(!parsed._compactionRequest ? { instructionId: chatGptTurnUserRevisionHistory(parsed).at(-1)?.itemId } : {}),
   });
+}
+
+export interface ChatGptInstructionLineage {
+  current: string;
+  predecessors: ReadonlySet<string>;
+}
+
+export function chatGptInstructionLineage(parsed: CodexParsedRequest): ChatGptInstructionLineage {
+  const revisions = chatGptTurnUserRevisionHistory(parsed).map(revision => createHash("sha256")
+    .update(JSON.stringify([revision.itemId ?? null, revision.content])).digest("hex"));
+  const current = revisions.pop();
+  if (!current) throw new Error("ChatGPT web requires a canonical user instruction");
+  return { current, predecessors: new Set(revisions) };
 }
 
 /** Exact canonical Responses request identity inside one long-lived browser execution. */
@@ -248,10 +263,12 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
     turnId: source.turnId ?? identity.turnId,
     purpose: "response",
     revision: source.content,
+    instructionId: source.itemId,
   });
 }
 
 export class ChatGptTurnSession {
+  supersededError?: Error;
   readonly createdAt = Date.now();
   private lastTouchedAt = this.createdAt;
   readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
@@ -280,6 +297,7 @@ export class ChatGptTurnSession {
     readonly ownerKey?: string,
     readonly nativeTurnId?: string,
     readonly nativeThreadId?: string,
+    readonly instruction?: string,
   ) {
     this.attachedConversationKey = runtime.conversationKey;
     this.physicalSettlement = runtime.physicalSettlement.then(
@@ -494,10 +512,12 @@ export class ChatGptTurnSessions {
     ownerKey?: string,
     nativeTurnId?: string,
     nativeThreadId?: string,
+    instruction?: string,
   ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
     if (existing) {
+      if (existing.supersededError) throw existing.supersededError;
       existing.touch();
       return existing;
     }
@@ -508,7 +528,7 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId);
+    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId, instruction);
     this.entries.set(key, session);
     const conversationKey = session.conversationKey();
     if (conversationKey) this.conversationHeads.set(conversationKey, session);
@@ -523,11 +543,13 @@ export class ChatGptTurnSessions {
     signal?: AbortSignal,
     nativeTurnId?: string,
     nativeThreadId?: string,
+    instruction?: ChatGptInstructionLineage,
   ): Promise<ChatGptTurnSession> {
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const existing = this.entries.get(key);
       if (existing) {
+        if (existing.supersededError) throw existing.supersededError;
         existing.touch();
         return existing;
       }
@@ -540,16 +562,27 @@ export class ChatGptTurnSessions {
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [, ownedSession] = activeOwner;
-        // A different native message for the same thread is sequential work, not permission to
-        // kill the response already using that retained conversation. Wait for its complete
-        // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
-        // only paths that preempt an active owner.
+        const [ownedKey, ownedSession] = activeOwner;
+        if (ownedSession.isActive() && instruction && ownedSession.instruction
+          && instruction.current !== ownedSession.instruction) {
+          if (!instruction.predecessors.has(ownedSession.instruction)) throw chatGptTurnSupersededError();
+          // Native steering can return the old tool result and a new instruction in one request.
+          // Waiting for the old browser here deadlocks before that result can be consumed. Retire
+          // its capability and rebuild from the complete canonical history, including that result.
+          // Keep the old entry terminal so a delayed replay cannot restart superseded work.
+          const reason = chatGptTurnSupersededError();
+          ownedSession.supersededError = reason;
+          this.forgetConversationHead(ownedSession);
+          await awaitWithAbort(this.beginRetirement(ownedKey, ownedSession, reason), signal);
+          continue;
+        }
+        // A completed response may still be releasing its browser surface. Sequential work
+        // waits for that cleanup; preemption requires a proven newer canonical instruction.
         await awaitWithAbort(ownedSession.physicalSettlement, signal);
         continue;
       }
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId);
+      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId, instruction?.current);
     }
   }
 
@@ -740,6 +773,7 @@ export class ChatGptTurnSessions {
   cancelledError(traceId: string): Error | undefined {
     for (const session of this.entries.values()) {
       if (session.traceId !== traceId) continue;
+      if (session.supersededError) return session.supersededError;
       const outcome = session.settledOutcome();
       if (outcome?.type !== "error") continue;
       if ("code" in outcome.error && outcome.error.code === "client_cancelled") return outcome.error;

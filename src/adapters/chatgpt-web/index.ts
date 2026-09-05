@@ -28,7 +28,7 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
@@ -718,11 +718,6 @@ export function createChatGptWebAdapter(
         traceId,
       );
       activeToken = turnToken;
-      observeCapabilityRetirement(turnToken, externalProgress);
-      if (!tokenSettled) {
-        tokenSettled = true;
-        token.resolve(turnToken);
-      }
       try {
         const compiled = compileChatGptWebPrompt(
           input,
@@ -730,6 +725,13 @@ export function createChatGptWebAdapter(
           turnToken,
           compileOptionsFor(input),
         );
+        // Publish only after preparation succeeds: otherwise its failure revokes the token
+        // before the response observer uses it and masks the cause as an expired capability.
+        observeCapabilityRetirement(turnToken, externalProgress);
+        if (!tokenSettled) {
+          tokenSettled = true;
+          token.resolve(turnToken);
+        }
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);
@@ -1123,6 +1125,7 @@ export function createChatGptWebAdapter(
           incoming.abortSignal,
           nativeTurnId,
           nativeIdentity.threadId,
+          chatGptInstructionLineage(parsed),
         );
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {

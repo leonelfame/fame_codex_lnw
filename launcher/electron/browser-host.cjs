@@ -1856,25 +1856,22 @@ class BrowserHost {
 
   armManualTurnDeadline(tab) {
     if (tab.interactionMode !== "manual"
-      || !["awaiting-user", "sent"].includes(tab.manualState)
+      || tab.manualState !== "awaiting-user"
       || !tab.manualDeadlineAt) return;
     if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
     const delay = Math.max(0, tab.manualDeadlineAt - Date.now());
     tab.manualDeadlineTimer = setTimeout(() => {
       if (this.turnTabs.get(tab.id) !== tab
-        || !["awaiting-user", "sent"].includes(tab.manualState)) return;
-      const waitingForConnector = tab.manualState === "sent";
+        || tab.manualState !== "awaiting-user") return;
       const timeoutSeconds = Math.round(tab.manualSubmitTimeoutMs / 1_000);
       tab.status = "error";
-      tab.message = waitingForConnector
-        ? `ChatGPT did not start through the Codex harness within ${timeoutSeconds} seconds`
-        : `Prompt submission was not confirmed within ${timeoutSeconds} seconds`;
+      tab.message = `Prompt submission was not confirmed within ${timeoutSeconds} seconds`;
       this.signalManualTerminal(tab, "timeout");
       this.publishState?.(this.snapshot());
       this.logger.warn("browser.manual_turn_timed_out", {
         tabId: tab.id,
         traceId: tab.traceId,
-        phase: waitingForConnector ? "connector-start" : "sent-confirmation",
+        phase: "sent-confirmation",
       });
     }, delay);
     tab.manualDeadlineTimer.unref?.();
@@ -2091,12 +2088,14 @@ class BrowserHost {
       throw new Error("Zero Risk turn can no longer be marked as sent");
     }
     if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
+    tab.manualDeadlineTimer = null;
     tab.manualState = "sent";
-    tab.manualDeadlineAt = Date.now() + tab.manualSubmitTimeoutMs;
+    // Sent ends the human handoff deadline. Model thinking is owned by the live turn and
+    // remains cancellable through its helper or tab, including before the first MCP bind.
+    tab.manualDeadlineAt = null;
     tab.sentAt = new Date().toISOString();
     tab.prompt = null;
     tab.message = "Prompt sent; waiting for ChatGPT to start through the Codex harness";
-    this.armManualTurnDeadline(tab);
     for (const resolve of tab.manualWaiters) resolve({ status: "sent", sentAt: tab.sentAt });
     tab.manualWaiters.clear();
     this.publishState?.(this.snapshot());

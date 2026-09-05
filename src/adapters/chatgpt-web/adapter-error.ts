@@ -34,6 +34,13 @@ export function chatGptBrowserTabClosedError(): ChatGptWebAdapterError {
   );
 }
 
+export function chatGptTurnSupersededError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "A newer Codex instruction superseded this ChatGPT response.",
+    { status: 499, errorType: "client_closed_request", code: "client_cancelled", retryable: false },
+  );
+}
+
 export function chatGptStoppedThinkingError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     "ChatGPT remained in 'Stopped thinking' for 5 seconds, so the Codex turn was cancelled.",

@@ -1260,14 +1260,6 @@ export function chatGptConnectorAttachmentMode(
   return reuseConversation ? "retained" : "mention";
 }
 
-export function chatGptEffortSelectionRequired(
-  reuseConversation: boolean,
-  requestedEffort: string,
-  stagingEffort: string,
-): boolean {
-  return !reuseConversation || requestedEffort !== stagingEffort;
-}
-
 export async function setChatGptThinkMode(
   composerForm: Locator,
   enabled: boolean,
@@ -1779,7 +1771,9 @@ class ChatGptBrowserDiagnostics {
           );
           const composers = [...document.querySelectorAll(composerSelector)].filter(rendered);
           const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered);
-          const selectedConnectors = [...document.querySelectorAll('[data-id^="plugin:"][data-keyword]')]
+          const selectedConnectors = composers.flatMap(composer => (
+            [...composer.querySelectorAll('[data-id^="plugin:"][data-keyword]')]
+          ))
             .filter(rendered);
           const exactConnectorRows = [...document.querySelectorAll('.__menu-item[tabindex="0"]')]
             .filter(element => rendered(element) && exactText(element, appName));
@@ -4308,6 +4302,10 @@ export class ChatGptBrowserWorker {
                   launcherSurfaceId,
                   signal,
                 );
+                // Own the connection before validating its page: viewport failure still needs
+                // the outer diagnostic capture and finally block to release this exact transport.
+                turnConnection = rebound.browser;
+                diagnosticPage = rebound.page;
                 await waitForOperationalChatGptViewport(rebound.page, signal);
                 return rebound;
               },
@@ -4387,22 +4385,17 @@ export class ChatGptBrowserWorker {
           ),
         );
       }
-      let mode = requestedMode;
-      if (chatGptEffortSelectionRequired(
-        reuseConversation,
-        requestedMode.effort,
-        stagingMode.effort,
-      )) {
-        mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
-          this.selectModelAndEffort(
-            page,
-            turn.modelId,
-            stagingMode.effort,
-            browserCapabilities,
-            checkpoint => diagnostics.capture(page, checkpoint),
-          )
-        ));
-      }
+      // A retained lease proves the connector binding, not the current model selection.
+      // Reconcile the live control before every submission, including retained continuations.
+      let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
+        this.selectModelAndEffort(
+          page,
+          turn.modelId,
+          stagingMode.effort,
+          browserCapabilities,
+          checkpoint => diagnostics.capture(page, checkpoint),
+        )
+      ));
       await diagnostics.capture(page, "effort-selection-complete");
 
       let finalPrompt = prepared.text;
@@ -4630,6 +4623,11 @@ export class ChatGptBrowserWorker {
       };
       const throwMarkdownConsistencyError = (error: unknown): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
+        if (error.diagnostic) {
+          console.error(
+            `[chatgpt-web] browser turn ${turn.traceId} Markdown conflict: ${JSON.stringify(error.diagnostic)}`,
+          );
+        }
         throw new ChatGptWebAdapterError(error.message, {
           status: 502,
           errorType: "server_error",

@@ -43,6 +43,7 @@ export interface ChatGptRootThreadMetadata {
 export interface ChatGptTurnUserRevision {
   content: unknown;
   turnId?: string;
+  itemId?: string;
 }
 
 export const CHATGPT_TURN_REVISION_CONFLICT_MESSAGE =
@@ -191,22 +192,34 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
   for (let index = input.length - 1; index >= 0; index -= 1) {
-    const item = record(input[index]);
-    if (item?.type !== "message" || item.role !== "user") continue;
-    const messageTurnId = itemTurnId(item);
-    // Codex appends an abort report as a user-shaped item carrying the interrupted turn's id. Only
-    // suppress that synthetic notice when its metadata proves it belongs to a different turn; a
-    // human is still allowed to submit the same XML-looking text as their current instruction.
-    if (isTurnAbortedNotice(item)
-      && expectedTurnId !== undefined
-      && messageTurnId !== undefined
-      && messageTurnId !== expectedTurnId) continue;
-    if (contextualUserMessage(item)) continue;
-    const serverOwnedId = typeof item.id === "string" && item.id.length > 0;
-    if (messageTurnId === undefined && !serverOwnedId) continue;
-    return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
+    const revision = userRevision(input[index], expectedTurnId);
+    if (revision) return revision;
   }
   return undefined;
+}
+
+function userRevision(value: unknown, expectedTurnId?: string): ChatGptTurnUserRevision | undefined {
+  const item = record(value);
+  if (item?.type !== "message" || item.role !== "user") return undefined;
+  const messageTurnId = itemTurnId(item);
+  // An abort notice is contextual only when native metadata identifies its earlier turn.
+  if (isTurnAbortedNotice(item) && expectedTurnId !== undefined
+    && messageTurnId !== undefined && messageTurnId !== expectedTurnId) return undefined;
+  if (contextualUserMessage(item)) return undefined;
+  const itemId = typeof item.id === "string" && item.id.length > 0 ? item.id : undefined;
+  if (messageTurnId === undefined && itemId === undefined) return undefined;
+  return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}),
+    ...(itemId ? { itemId } : {}) };
+}
+
+/** Canonical instruction order distinguishes new steering from a delayed older request. */
+export function chatGptTurnUserRevisionHistory(parsed: CodexParsedRequest): ChatGptTurnUserRevision[] {
+  const body = record(parsed._rawBody);
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  return (Array.isArray(body?.input) ? body.input : []).flatMap(value => {
+    const revision = userRevision(value, turnId);
+    return revision ? [revision] : [];
+  });
 }
 
 /** The human instruction summarized by a remote compaction request belongs to an earlier turn. */

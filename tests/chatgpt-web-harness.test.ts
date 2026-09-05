@@ -19,7 +19,7 @@ import {
 } from "../src/adapters/chatgpt-web/native-compaction-control";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/chatgpt-web/prompt";
 import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-policy";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
@@ -853,21 +853,23 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(second.outstanding()).toEqual([{ callId: "call_1", wireName: "exec_command", freeform: false, arguments: { cmd: "pwd" } }]);
   });
 
-  test("waits for the previous browser owner without preempting it before another turn starts", async () => {
+  test("waits for completed browser cleanup before starting the next canonical instruction", async () => {
     const sessions = new ChatGptTurnSessions();
     let finishBrowser!: (answer: string) => void;
     const browser = new Promise<string>(resolve => { finishBrowser = resolve; });
     let settlePhysical!: () => void;
     const physicalSettlement = new Promise<void>(resolve => { settlePhysical = resolve; });
     let cancellations = 0;
-    sessions.getOrCreate("old-turn", () => ({
+    const first = sessions.getOrCreate("old-turn", () => ({
       mode: "read-only",
       browser,
       physicalSettlement,
       trace: new ChatGptTraceFeed(),
       text: new ChatGptTextFeed(),
       cancel: () => { cancellations += 1; },
-    }), "old-trace", "shared-thread");
+    }), "old-trace", "shared-thread", "old-native-turn", "native-thread", "old-instruction");
+    finishBrowser("retired");
+    await first.browserOutcome;
 
     let replacements = 0;
     const replacement = sessions.getOrCreateAfterOwnerRetirement(
@@ -885,18 +887,72 @@ describe("ChatGPT outer-native harness v4", () => {
         };
       },
       "new-trace",
+      undefined,
+      "new-native-turn",
+      "native-thread",
+      { current: "new-instruction", predecessors: new Set(["old-instruction"]) },
     );
     await Bun.sleep(0);
 
     expect(cancellations).toBe(0);
     expect(replacements).toBe(0);
-    finishBrowser("retired");
-    await Bun.sleep(0);
-    expect(replacements).toBe(0);
     settlePhysical();
     expect((await replacement).traceId).toBe("new-trace");
     expect(replacements).toBe(1);
     expect(cancellations).toBe(0);
+    sessions.clear();
+  });
+
+  test("steering retires a browser waiting for an old tool result and rejects late older requests", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const original = rawWireRequest(environmentXml);
+    const originalInput = (original._rawBody as { input: Array<Record<string, unknown>> }).input;
+    originalInput.at(-1)!.id = "msg_original";
+    const steered = structuredClone(original);
+    const steeredInput = (steered._rawBody as { input: Array<Record<string, unknown>> }).input;
+    steeredInput.push({ type: "function_call_output", call_id: "pending", output: "actual command result" });
+    // Identical text still represents a new native instruction when Codex assigns a new item id.
+    steeredInput.push({ ...structuredClone(originalInput.at(-1)!), id: "msg_steered" });
+    const oldKey = chatGptTurnExecutionKey(original);
+    const newKey = chatGptTurnExecutionKey(steered);
+    expect(newKey).not.toBe(oldKey);
+    let rejectOld!: (reason: Error) => void;
+    let cleanup!: () => void;
+    const cancellations: Error[] = [];
+    sessions.getOrCreate(oldKey, () => ({
+      mode: "read-only",
+      browser: new Promise<string>((_, reject) => { rejectOld = reject; }),
+      physicalSettlement: new Promise<void>(resolve => { cleanup = resolve; }),
+      trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      cancel: reason => { if (reason) { cancellations.push(reason); rejectOld(reason); } },
+    }), "old-trace", "thread", "native-turn", "native-thread", chatGptInstructionLineage(original).current);
+    let starts = 0;
+    let finishNew!: (text: string) => void;
+    const replacement = () => {
+      starts += 1;
+      return { mode: "read-only" as const,
+        browser: new Promise<string>(resolve => { finishNew = resolve; }),
+        physicalSettlement: new Promise<void>(() => {}),
+        trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {} };
+    };
+    const next = sessions.getOrCreateAfterOwnerRetirement(newKey, "thread", replacement,
+      "new-trace", undefined, "native-turn", "native-thread", chatGptInstructionLineage(steered));
+    expect(cancellations).toHaveLength(1);
+    expect(starts).toBe(0);
+    expect(sessions.cancelledError("old-trace")).toMatchObject({ code: "client_cancelled" });
+    cleanup();
+    const current = await next;
+    expect(starts).toBe(1);
+    expect(await sessions.getOrCreateAfterOwnerRetirement(newKey, "thread", replacement)).toBe(current);
+    await expect(sessions.getOrCreateAfterOwnerRetirement(oldKey, "thread", replacement))
+      .rejects.toMatchObject({ code: "client_cancelled" });
+    // An older request without a retained entry must not preempt the newer instruction either.
+    await expect(sessions.getOrCreateAfterOwnerRetirement("late-unknown-round", "thread", replacement,
+      "late-trace", undefined, "native-turn", "native-thread", chatGptInstructionLineage(original)))
+      .rejects.toMatchObject({ code: "client_cancelled" });
+    expect(starts).toBe(1);
+    finishNew("done");
+    await current.browserOutcome;
     sessions.clear();
   });
 
@@ -1181,6 +1237,41 @@ describe("ChatGPT outer-native harness v4", () => {
         }
       }
       expect(browserStarts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("prompt preparation preserves its error instead of exposing a revoked MCP token", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-prepare-error-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://prepare-error-${Date.now()}`,
+      chatgptWeb: {
+        brokerSocketPath: socketPath,
+        localToolsEnabled: true,
+        experimentalBiggerContext: true,
+        solAvailable: false,
+        threadEnvironmentStatePath: join(tempRoot, "prepare-error-environment.json"),
+        lunaCheckpointStatePath: join(tempRoot, "prepare-error-checkpoint.json"),
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      await turn.prepare();
+      throw new Error("Invalid Luna multipart preparation unexpectedly succeeded");
+    };
+    try {
+      const request = rawWireRequest(environmentXml);
+      request.modelId = "gpt-5.6-luna";
+      request.options.reasoning = "low";
+      const events: AdapterEvent[] = [];
+      await expect(createChatGptWebAdapter(provider).runTurn!(
+        request, { headers: new Headers() }, event => events.push(event),
+      )).rejects.toThrow("Bigger Context is unavailable for Luna");
+      expect(events.some(event => event.type === "tool_call_start")).toBeFalse();
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
@@ -1739,6 +1830,16 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(buffer.observe([rewritten, tail], 200)).toBe("");
     expect(buffer.currentSnapshotIsConsistent()).toBe(false);
     expect(() => buffer.finish()).toThrow("changed a completed text block");
+    try {
+      buffer.finish();
+    } catch (error) {
+      const diagnostic = (error as { diagnostic: unknown }).diagnostic;
+      expect(diagnostic).toEqual({
+        reason: "text_changed", observedStart: 0, observedEnd: 6,
+        committedStart: 0, committedEnd: 6, observedTextChars: 7, committedTextChars: 6,
+      });
+      expect(JSON.stringify(diagnostic)).not.toMatch(/Stable|Changed|<p/);
+    }
   });
 
   test("distinguishes repeated paragraphs by source range after the first copy is virtualized", () => {
