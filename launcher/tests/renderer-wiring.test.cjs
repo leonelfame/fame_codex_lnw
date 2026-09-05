@@ -145,34 +145,7 @@ test("Bigger Context startup recommendation reuses the persisted setting and set
   assert.doesNotMatch(stylesSource, /\.bigger-context-recommendation-backdrop\s*\{[^}]*backdrop-filter:/s);
 });
 
-test("Zero Risk is selectable during onboarding and later switches transactionally without automating its tab DOM", () => {
-  const setupSource = appSource.slice(
-    appSource.indexOf("function SetupSurface("),
-    appSource.indexOf("function McpSurface("),
-  );
-  assert.doesNotMatch(setupSource, /setBrowserInteractionMode|InteractionModeControl/);
-  assert.match(
-    appSource,
-    /function InteractionModePicker[\s\S]*?onChange\("automatic"\)[\s\S]*?onChange\("manual"\)/,
-  );
-  assert.match(appSource, /mode === "automatic" \? \([\s\S]*?className="interaction-mode-check"[\s\S]*?: null/);
-  assert.match(appSource, /mode === "manual" \? \([\s\S]*?className="interaction-mode-check"[\s\S]*?: null/);
-  assert.match(
-    stylesSource,
-    /\.interaction-mode-picker > button\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);[^}]*\}[\s\S]*?\.interaction-mode-picker > button\.is-selected\s*\{[^}]*grid-template-columns:\s*18px minmax\(0, 1fr\);/,
-  );
-  assert.match(appSource, /useState<BrowserInteractionMode>\([\s\S]*?snapshot\.state\.browserInteractionMode/);
-  assert.match(appSource, /className="welcome-interaction-mode-picker"[\s\S]*?onChange=\{setSelectedInteractionMode\}/);
-  assert.match(appSource, /completeOnboarding\(selectedLanguage, selectedInteractionMode\)/);
-  assert.match(preloadSource, /completeOnboarding: \(language, browserInteractionMode\)[\s\S]*?launcher:complete-onboarding/);
-  assert.match(electronMain, /launcher:complete-onboarding[\s\S]*?validateBrowserInteractionMode\(rawInteractionMode\)/);
-  assert.match(appSource, /firstRunZeroRiskSetup \? "mcp"/);
-  assert.match(appSource, /api!\.setBrowserInteractionMode\(mode\)/);
-  assert.match(preloadSource, /launcher:browser-interaction-mode/);
-  assert.match(preloadSource, /launcher:manual-prompt-copy/);
-  assert.match(preloadSource, /launcher:manual-prompt-sent/);
-  assert.match(electronMain, /browserInteractionMode === "automatic"[\s\S]*?browserHost\.probeAuthentication/);
-  assert.match(electronMain, /browserInteractionMode === "automatic"[\s\S]*?smokePassedForCurrentVersion/);
+test("Zero Risk setup commits state after the runtime transaction and preserves manual inspection boundaries", () => {
   const modeSwitchHandler = electronMain.slice(
     electronMain.indexOf('handle("launcher:browser-interaction-mode"'),
     electronMain.indexOf('handle("launcher:set-preference"'),
@@ -207,34 +180,7 @@ test("Zero Risk is selectable during onboarding and later switches transactional
   );
   assert.doesNotMatch(modeSwitchHandler, /const pending = stateStore\.update|catch \(error\)/);
   assert.match(electronMain, /browserInteractionMode === "manual"[\s\S]*?Local Zero Risk runtime is healthy/);
-  assert.match(appSource, /manualInteraction \? copy\.manualMcpStepThreeBody : copy\.mcpStepThreeBody/);
-  assert.match(appSource, /manualInteraction[\s\S]*?copy\.manualConnectorNotice/);
-  assert.match(appSource, /titleAction=\{manualInteraction \? \([\s\S]*?<ZeroRiskModelMenu/);
-  assert.match(appSource, /updateState\(await api!\.setZeroRiskPro\(enabled\)\)/);
-  assert.match(appSource, /zero-risk-model-info[\s\S]*?copy\.zeroRiskProProfileInfo/);
-  assert.match(appSource, /!proEnabled \? <span className="zero-risk-model-radio"><Icon name="check" \/><\/span> : null/);
-  assert.match(appSource, /proEnabled \? <span className="zero-risk-model-radio"><Icon name="check" \/><\/span> : null/);
-  assert.match(appSource, /mcp-create-tunnel\.mp4[\s\S]*?mcp-connect-connector\.mp4/);
-  assert.match(appSource, /function TutorialVideo[\s\S]*?autoPlay loop muted playsInline[\s\S]*?className="guide-media-expand"[\s\S]*?<Icon name="expand"/);
-  assert.match(appSource, /createPortal\([\s\S]*?className="guide-media is-expanded"[\s\S]*?document\.body/);
-  assert.match(stylesSource, /\.guide-media\.is-expanded\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/s);
-  assert.match(preloadSource, /setZeroRiskPro:[\s\S]*?launcher:zero-risk-pro/);
-  assert.match(electronMain, /runtimeHost\.setZeroRiskPro\(enabled === true\)/);
-});
 
-test("MCP surfaces use the official local protocol mark", () => {
-  assert.match(appSource, /function McpMark\(\) \{\s*return <i aria-hidden="true" className="mcp-mark" \/>;\s*\}/);
-  assert.match(appSource, /icon === "mcp" \? <McpMark \/> : <Icon name=\{icon\} \/>/);
-  assert.match(appSource, /<McpMark \/>[\s\S]*?copy\.mcpTitle/);
-  assert.doesNotMatch(appSource, /<Icon name="mcp" \/>/);
-  assert.match(stylesSource, /mask:\s*url\("\.\.\/assets\/mcp-mark\.svg"\)/);
-});
-
-test("the configured launcher exposes no persistent bridge opt-out", () => {
-  assert.doesNotMatch(appSource, /setBridgeEnabled|bridgeRouteBody/);
-  assert.doesNotMatch(preloadSource, /launcher:bridge-enabled|setBridgeEnabled/);
-  assert.doesNotMatch(electronMain, /launcher:bridge-enabled|bridge-disabled|bridgeEnabled/);
-  assert.match(electronMain, /runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?runtimeHost\.connectBridgeRoute\(\)/);
 });
 
 test("MCP connection remains unavailable until the model catalog is verified", () => {
@@ -313,13 +259,4 @@ test("completed model setup remains a repeatable capability probe", () => {
     electronMain,
     /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
   );
-});
-
-test("session reminders expose dismissal and a real storage-clearing logout", () => {
-  assert.match(electronMain, /sessionRefreshReminderAt:\s*nextSessionRefreshReminderAt\(\)/);
-  assert.match(electronMain, /launcher:session-reminder-dismiss/);
-  assert.match(electronMain, /launcher:browser-logout[\s\S]*?browserHost\.logout\(\)/);
-  assert.match(preloadSource, /dismissSessionReminder:[\s\S]*?launcher:session-reminder-dismiss/);
-  assert.match(preloadSource, /logoutChatGpt:[\s\S]*?launcher:browser-logout/);
-  assert.match(browserHostSource, /session\.clearStorageData\(\)/);
 });

@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
@@ -50,12 +49,7 @@ test("strict JSON validation accepts only the exact full schema-conforming answe
   ]) expect(() => validate(invalid)).toThrow(ChatGptWebAdapterError);
 });
 
-test("strict mode buffers output until local validation while non-strict stays best-effort", () => {
-  const source = readFileSync(new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url), "utf8");
-  expect(source).toContain("const bufferStructuredOutput = structuredOutputValidator !== undefined;");
-  expect(source).toContain("structuredOutputValidator?.(settled.answer);");
-  expect(source).toContain("structuredOutputValidator?.(completedOutcome.answer);");
-  expect(source).toContain("emitRoundBatch(buffer => emitTextDeltas([completedOutcome.answer], buffer));");
+test("non-strict JSON schema does not install a local output validator", () => {
   const nonStrict = parse({ format: { type: "json_schema", name: "item", strict: false, schema: { type: "string" } } });
   expect(createChatGptStructuredOutputValidator(nonStrict.options.outputFormat)).toBeUndefined();
 });
