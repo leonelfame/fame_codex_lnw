@@ -894,7 +894,7 @@ export function createChatGptWebAdapter(
                     ? { nativeTurnId: compactionNativeIdentity.turnId }
                     : {}),
                 },
-                async operatorSignal => {
+                async (operatorSignal, retainOwnershipUntil) => {
                   const handoffTimeoutMs = Math.min(
                     timeoutMs ?? MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
                     MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
@@ -935,19 +935,15 @@ export function createChatGptWebAdapter(
                       turnCapabilities,
                       { onCompactionProgress: armHandoffDeadline },
                     );
+                    retainOwnershipUntil(fallbackRuntime.physicalSettlement);
                     try {
                       const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
                       await withAbort(fallbackRuntime.physicalSettlement, operationSignal);
                       return canonicalizeCompactionHandoff(parsed, rawSummary);
                     } catch (error) {
                       fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
-                      await withAbort(
-                        fallbackRuntime.physicalSettlement,
-                        // Operator cancellation must still honor the physical fallback owner.
-                        // The handoff deadline is independent, so cancel-all cannot acknowledge
-                        // before the Launcher/worker cleanup handshake has completed.
-                        handoffDeadline.signal,
-                      ).catch(() => {});
+                      // The shared owner retains physical settlement independently of this error.
+                      // Neither a timeout nor operator cancellation can open a competing trace.
                       throw error;
                     }
                   };

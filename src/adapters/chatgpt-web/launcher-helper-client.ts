@@ -20,12 +20,14 @@ interface PendingTurn {
   prepared?: CompiledChatGptWebPrompt & { release: () => void };
   localFailure?: Error;
   progressForwarding?: AbortController;
+  acknowledgedMultipartStage?: number;
 }
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
+  | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
@@ -61,6 +63,12 @@ function parseHelperMessage(line: string): HelperMessage {
   }
   if (message.type === "event") {
     const event = message.event;
+    if (event === "multipart_stage_acknowledged") {
+      if (!Number.isSafeInteger(message.stageIndex) || (message.stageIndex as number) <= 0) {
+        throw new Error("Launcher browser helper multipart stage index is invalid");
+      }
+      return { type: "event", id: message.id, event, stageIndex: message.stageIndex as number };
+    }
     if (event === "tool_batch_observed") {
       if (!Number.isSafeInteger(message.revision) || (message.revision as number) <= 0) {
         throw new Error("Launcher browser helper tool-boundary revision is invalid");
@@ -204,6 +212,11 @@ export class LauncherBrowserHelperClient {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await this.ensureChild();
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (turn.onMultipartStageAcknowledged && !this.helperFeatures.has("multipart-stage-ack")) {
+      throw new Error(
+        "Launcher browser helper does not support multipart acknowledgement forwarding; update or restart the launcher",
+      );
+    }
     if (turn.externalProgress && !this.helperFeatures.has("tool-boundary-ack")) {
       throw new Error(
         "Launcher browser helper does not support causal Codex tool-boundary acknowledgement; update or restart the launcher",
@@ -470,6 +483,26 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "multipart_stage_acknowledged") {
+        const multipart = pending.prepared?.multipart;
+        if (!multipart
+          || message.stageIndex >= multipart.parts.length
+          || message.stageIndex !== (pending.acknowledgedMultipartStage ?? 0) + 1) {
+          this.abortWithLocalFailure(
+            message.id,
+            new Error("Launcher browser helper acknowledged an unexpected multipart stage"),
+            pending,
+          );
+          return;
+        }
+        pending.acknowledgedMultipartStage = message.stageIndex;
+        void Promise.resolve().then(() => pending.turn.onMultipartStageAcknowledged?.(message.stageIndex))
+          .catch(error => this.abortWithLocalFailure(
+            message.id,
+            error instanceof Error ? error : new Error(String(error)),
+            pending,
+          ));
+      }
       else if (message.event === "prepared_selected") {
         const prepare = message.reused ? pending.turn.prepareResume : pending.turn.prepare;
         void Promise.resolve().then(() => prepare?.()).then(prepared => {

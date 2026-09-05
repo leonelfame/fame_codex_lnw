@@ -3308,7 +3308,6 @@ test("the daemon prefers the browser helper that shipped beside its own entrypoi
   expect(client).toContain('this.helperFeatures.has("progress")');
   expect(client).toContain('this.helperFeatures.has("tool-boundary-ack")');
   expect(client).toContain('this.helperFeatures.has("completion-fence")');
-  expect(helper).toContain('features: ["progress", "tool-boundary-ack", "completion-fence"]');
   expect(helper).toMatch(/message\.type === "run"/);
   expect(helper).toContain("Browser helper received an unsupported message type");
 

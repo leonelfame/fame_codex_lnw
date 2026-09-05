@@ -12,36 +12,25 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-test("Bun daemon streams a prepared browser turn through the persistent Node helper", async () => {
+test("daemon streams browser lifecycle through the real helper process", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));
   roots.push(root);
-  const helper = join(root, "helper.cjs");
+  const helper = join(root, "helper.ts");
   writeFileSync(helper, `
-    const readline = require("node:readline").createInterface({ input: process.stdin });
-    const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
-    let active;
-    send({ type: "ready" });
-    readline.on("line", line => {
-      const message = JSON.parse(line);
-      if (message.type === "shutdown") process.exit(0);
-      if (message.type === "run") {
-        active = message;
-        send({ type: "event", id: message.id, event: "prepared_selected", reused: false });
-        return;
-      }
-      if (message.type === "prepared_selected_ack") {
-        send({ type: "event", id: message.id, event: "send_activated" });
-        return;
-      }
-      if (message.type !== "send_activation_ack") return;
-      send({ type: "event", id: message.id, event: "submitted" });
-      send({ type: "event", id: message.id, event: "reasoning", text: "Reading project" });
-      send({ type: "event", id: message.id, event: "reasoning", text: " files", continuation: true });
-      send({ type: "event", id: message.id, event: "text", text: "done" });
-      if (active.turn.captureLunaCheckpoint) send({
-        type: "event",
-        id: message.id,
-        event: "luna_checkpoint",
+    import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
+    // Substitute only the browser. Both sides of the production IPC protocol run unchanged.
+    ChatGptBrowserWorker.prototype.run = async turn => {
+      await turn.onPreparedSelected(false);
+      const prepared = await turn.prepare();
+      if (prepared.multipart.parts.length !== 3) throw new Error("Multipart context was lost");
+      await turn.onMultipartStageAcknowledged?.(1);
+      await turn.onMultipartStageAcknowledged?.(2);
+      await turn.onSendActivated();
+      turn.onSubmitted();
+      turn.onReasoningSummary("Reading project");
+      turn.onReasoningSummary(" files", true);
+      turn.onTextDelta("done");
+      if (turn.captureLunaCheckpoint) turn.onLunaCheckpoint({
         answerHash: "a".repeat(64),
         checkpoint: {
           version: 1,
@@ -52,8 +41,9 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
           pending: [],
         },
       });
-      send({ type: "result", id: message.id, text: "done" });
-    });
+      return "done";
+    };
+    await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
   `, { mode: 0o700 });
   const descriptorHelper = join(root, "descriptor-helper.cjs");
   writeFileSync(descriptorHelper, "process.exit(99);\n", { mode: 0o700 });
@@ -75,7 +65,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
   const config: ResolvedBrowserConfig = {
-    appName: "Codex Native",
+    appName: "Codex Native2",
     browserHost: "launcher",
     browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper,
@@ -88,6 +78,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
+  const acknowledgedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
   let released = false;
@@ -98,7 +89,12 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
       modelId: "gpt-5.6-sol",
       reasoning: "high",
       capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
-      prepare: async () => ({ text: "inspect", images: [], release: () => { released = true; } }),
+      prepare: async () => ({
+        text: "inspect", images: [],
+        multipart: { parts: ["part one", "part two", "part three"], commit: "inspect" },
+        release: () => { released = true; },
+      }),
+      onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
@@ -114,6 +110,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
+    expect(acknowledgedStages).toEqual([1, 2]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {

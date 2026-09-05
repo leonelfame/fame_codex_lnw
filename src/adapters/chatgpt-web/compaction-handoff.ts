@@ -372,6 +372,7 @@ interface CachedCompactionRun {
   abort: AbortController;
   active: boolean;
   promise: Promise<string>;
+  settlement: Promise<void>;
 }
 
 interface StructuredCompactionInterruption {
@@ -431,7 +432,7 @@ function pruneStructuredCompactionRuns(): void {
   const now = Date.now();
   const cutoff = now - STRUCTURED_COMPACTION_RUN_TTL_MS;
   for (const [candidate, run] of structuredCompactionRuns) {
-    if (run.createdAt < cutoff) structuredCompactionRuns.delete(candidate);
+    if (!run.active && run.createdAt < cutoff) structuredCompactionRuns.delete(candidate);
   }
   pruneStructuredCompactionInterruptions(now);
 }
@@ -445,7 +446,7 @@ export function existingStructuredCompactionRun(key: string): Promise<string> | 
 export function runStructuredCompactionOnce(
   key: string,
   owner: StructuredCompactionOwner,
-  start: (operatorSignal: AbortSignal) => Promise<string>,
+  start: (operatorSignal: AbortSignal, retainOwnershipUntil: (settlement: Promise<void>) => void) => Promise<string>,
 ): Promise<string> {
   pruneStructuredCompactionRuns();
   const existing = structuredCompactionRuns.get(key);
@@ -454,10 +455,21 @@ export function runStructuredCompactionOnce(
   if (interrupted) return Promise.reject(interrupted);
   const abort = new AbortController();
   const previousOwner = structuredCompactionOwners.get(owner.ownerKey);
+  const physicalSettlements: Promise<void>[] = previousOwner ? [previousOwner] : [];
   const promise = Promise.resolve().then(async () => {
     if (previousOwner) await withCompactionAbort(previousOwner, abort.signal);
     if (abort.signal.aborted) throw abortReason(abort.signal);
-    return start(abort.signal);
+    return start(abort.signal, settlement => { physicalSettlements.push(settlement); });
+  });
+  // Return a deadline failure promptly, while its physical browser owner still blocks retries
+  // and cancel-all completion. A cancelled queued run must also retain its predecessor's gate.
+  const ownerSettlement = promise.then(() => false, () => true).then(async failed => {
+    await Promise.allSettled(physicalSettlements);
+    run.active = false;
+    if (structuredCompactionOwners.get(owner.ownerKey) === ownerSettlement) {
+      structuredCompactionOwners.delete(owner.ownerKey);
+    }
+    if (failed && structuredCompactionRuns.get(key) === run) structuredCompactionRuns.delete(key);
   });
   const run: CachedCompactionRun = {
     createdAt: Date.now(),
@@ -468,21 +480,10 @@ export function runStructuredCompactionOnce(
     abort,
     active: true,
     promise,
+    settlement: ownerSettlement,
   };
   structuredCompactionRuns.set(key, run);
-  const ownerSettlement = promise.then(() => undefined, () => undefined);
   structuredCompactionOwners.set(owner.ownerKey, ownerSettlement);
-  void ownerSettlement.then(() => {
-    run.active = false;
-    if (structuredCompactionOwners.get(owner.ownerKey) === ownerSettlement) {
-      structuredCompactionOwners.delete(owner.ownerKey);
-    }
-  });
-  void promise.catch(() => {
-    if (structuredCompactionRuns.get(key)?.promise === promise) {
-      structuredCompactionRuns.delete(key);
-    }
-  });
   return promise;
 }
 
@@ -494,7 +495,7 @@ async function cancelStructuredCompactionRuns(
   for (const run of runs) {
     if (!run.abort.signal.aborted) run.abort.abort(reason);
   }
-  await Promise.allSettled(runs.map(run => run.promise));
+  await Promise.allSettled(runs.map(run => run.settlement));
   return runs.length;
 }
 
@@ -518,7 +519,7 @@ export function cancelStructuredCompactionNativeTurn(
   }
   return {
     cancelled: runs.length,
-    settlement: Promise.allSettled(runs.map(run => run.promise)).then(() => undefined),
+    settlement: Promise.allSettled(runs.map(run => run.settlement)).then(() => undefined),
   };
 }
 
