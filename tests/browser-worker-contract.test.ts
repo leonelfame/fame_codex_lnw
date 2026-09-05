@@ -765,6 +765,69 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
   }
 });
 
+test("missing-assistant expiry checks fresh DOM after a delayed wake while preserving the turn deadline", async () => {
+  type Baseline = { initialResponseTurnIdentities: string[]; domCache: Record<string, unknown> };
+  type State = { userIdentities: string[]; responseIdentities: string[] };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const assistantLocator = { id: "assistant" };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[data-testid=") ? assistantLocator : hiddenLocator,
+  } as unknown as Page;
+  const realDateNow = Date.now;
+  try {
+    for (const scenario of ["appeared", "missing", "turn-deadline"] as const) {
+      let now = 1_000;
+      Date.now = () => now;
+      const worker = ChatGptBrowserWorker.forProvider({
+        adapter: "chatgpt-web",
+        baseUrl: `browser://assistant-expiry-${scenario}-${Math.random()}`,
+        chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+      }) as unknown as {
+        waitForNewAssistantTurn(page: Page, baseline: Baseline, deadline: number | undefined): Promise<{
+          identity: string; locator: unknown;
+        }>;
+        submissionDomState(): Promise<State>;
+        waitForTurnDomOrExternalProgress(): Promise<void>;
+      };
+      let observations = 0;
+      let waits = 0;
+      worker.submissionDomState = async () => {
+        observations += 1;
+        return {
+          userIdentities: ["conversation-turn-user"],
+          responseIdentities: waits > 0 && scenario !== "missing" ? ["conversation-turn-assistant"] : [],
+        };
+      };
+      worker.waitForTurnDomOrExternalProgress = async () => {
+        if (++waits > 1) throw new Error("missing response was allowed to wait past its grace");
+        // Renderer or scheduler resumes after the response grace with a newly rendered turn.
+        now += CHATGPT_RESPONSE_DOM_GRACE_MS + 1;
+      };
+      const result = worker.waitForNewAssistantTurn(
+        page,
+        { initialResponseTurnIdentities: [], domCache: {} },
+        scenario === "turn-deadline" ? now + CHATGPT_RESPONSE_DOM_GRACE_MS : undefined,
+      );
+      if (scenario === "appeared") {
+        await expect(result).resolves.toMatchObject({ identity: "conversation-turn-assistant", locator: assistantLocator });
+      } else {
+        await expect(result).rejects.toThrow(scenario === "missing"
+          ? "ChatGPT accepted the message but did not expose its assistant turn in the DOM"
+          : "ChatGPT web turn timed out");
+      }
+      expect(observations).toBe(scenario === "turn-deadline" ? 1 : 2);
+      expect(waits).toBe(1);
+    }
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
 test("a failed stale-browser disconnect prevents the replacement connection", async () => {
   let replacementAttempts = 0;
   const disconnectFailure = new Error("stale CDP transport did not close");

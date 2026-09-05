@@ -2718,10 +2718,6 @@ export class ChatGptBrowserWorker {
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
       }
-      if (Date.now() >= responseDeadline
-        && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
-        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
-      }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await throwIfChatGptRateLimitDialog(observationPage);
       let state: ChatGptSubmissionDomState;
@@ -2786,6 +2782,12 @@ export class ChatGptBrowserWorker {
         locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
         acceptedUserTurnIdentities: state.userIdentities,
       };
+      // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
+      // observation can prove it is still missing; the explicit turn deadline remains above.
+      if (Date.now() >= responseDeadline
+        && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
+        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
+      }
       await this.waitForTurnDomOrExternalProgress(
         observationPage,
         progress?.revision ?? 0,
