@@ -1,7 +1,7 @@
 import type { Language } from "./types";
 
 const en = {
-  product: "Codex Web GPT",
+  product: "Fame Codex",
   devBadge: "DEV",
   devSetupTitle: "Set up the isolated DEV profile",
   devSetupSubtitle: "This browser, account, configuration, and runtime data stay separate from the normal launcher and Codex.",
@@ -21,15 +21,15 @@ const en = {
   biggerContextRecommendationTitle: "Use up to 3× more context",
   biggerContextRecommendationBody: "Bigger Context sends large tasks in multiple messages so ChatGPT Web can use up to three times more context. It remains experimental and can increase rate limits or temporary cooldowns.",
   biggerContextRecommendationToggleBody: "Stage large tasks across multiple messages and raise the model context and compaction limits.",
-  tagline: "ChatGPT Web inside the native Codex harness",
+  tagline: "Your focused workspace for the native Codex harness",
   chooseLanguage: "Choose your language",
   chooseLanguageHint: "You can change this later in Settings.",
   english: "English",
   chinese: "简体中文",
   japanese: "日本語",
   continue: "Continue",
-  supportTitle: "Before we start",
-  supportBody: "Star the repository and open my X profile to help more developers find Codex Web GPT.",
+  supportTitle: "Ready for launch",
+  supportBody: "Fame Codex keeps the original bridge behavior with a focused, personalized workspace.",
   star: "Star on GitHub",
   starred: "GitHub opened",
   follow: "Open my X",
@@ -63,7 +63,7 @@ const en = {
   browserReady: "Browser ready",
   showBrowser: "Show ChatGPT",
   hideBrowser: "Hide ChatGPT",
-  setupTitle: "Set up Codex Web GPT",
+  setupTitle: "Set up Fame Codex",
   setupSubtitle: "Three checks make ChatGPT Web available in the native Codex model picker.",
   coreSetup: "Core setup",
   interactionMode: "ChatGPT interaction",
@@ -186,7 +186,7 @@ const en = {
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Fame Codex",
   devBadge: "DEV",
   devSetupTitle: "设置隔离的 DEV 配置",
   devSetupSubtitle: "此浏览器、账户、配置和运行数据与普通启动器及 Codex 完全分离。",
@@ -214,7 +214,7 @@ const zh: Record<keyof typeof en, string> = {
   japanese: "日本語",
   continue: "继续",
   supportTitle: "开始之前",
-  supportBody: "请为仓库 Star，并打开我的 X 主页，帮助更多开发者发现 Codex Web GPT。",
+  supportBody: "Fame Codex 保留原有桥接功能，并提供专注的个性化工作区。",
   star: "在 GitHub 上 Star",
   starred: "已打开 GitHub",
   follow: "打开我的 X",
@@ -248,7 +248,7 @@ const zh: Record<keyof typeof en, string> = {
   browserReady: "浏览器已就绪",
   showBrowser: "显示 ChatGPT",
   hideBrowser: "隐藏 ChatGPT",
-  setupTitle: "设置 Codex Web GPT",
+  setupTitle: "设置 Fame Codex",
   setupSubtitle: "完成三个检查，即可在原生 Codex 模型列表中使用 ChatGPT Web。",
   coreSetup: "核心设置",
   interactionMode: "ChatGPT 交互方式",
@@ -371,7 +371,7 @@ const zh: Record<keyof typeof en, string> = {
 };
 
 const ja: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Fame Codex",
   devBadge: "DEV",
   devSetupTitle: "隔離された DEV プロファイルをセットアップ",
   devSetupSubtitle: "このブラウザー、アカウント、設定、ランタイムデータは、通常のランチャーおよび Codex から完全に分離されます。",
@@ -399,7 +399,7 @@ const ja: Record<keyof typeof en, string> = {
   japanese: "日本語",
   continue: "続ける",
   supportTitle: "開始する前に",
-  supportBody: "より多くの開発者に Codex Web GPT を知ってもらうため、リポジトリに Star を付け、私の X プロフィールを開いてください。",
+  supportBody: "Fame Codex は、元のブリッジ動作を保ちながら、集中できるパーソナライズされたワークスペースを提供します。",
   star: "GitHub で Star",
   starred: "GitHub を開きました",
   follow: "X を開く",
@@ -433,7 +433,7 @@ const ja: Record<keyof typeof en, string> = {
   browserReady: "ブラウザーの準備完了",
   showBrowser: "ChatGPT を表示",
   hideBrowser: "ChatGPT を隠す",
-  setupTitle: "Codex Web GPT をセットアップ",
+  setupTitle: "Fame Codex をセットアップ",
   setupSubtitle: "3 つの確認を完了すると、ネイティブ Codex のモデル選択画面で ChatGPT Web を使用できます。",
   coreSetup: "基本セットアップ",
   interactionMode: "ChatGPT の操作方法",
