@@ -1,9 +1,10 @@
 :root {
   color-scheme: dark;
 
-  --blue-100: #99ceff;
-  --blue-300: #339cff;
-  --blue-900: #00284d;
+  --blue-100: #c9c4ff;
+  --blue-200: #a99eff;
+  --blue-300: #8b7cff;
+  --blue-900: #251b5c;
   --gray-0: #ffffff;
   --gray-100: #ededed;
   --gray-300: #afafaf;
@@ -14,15 +15,15 @@
   --gray-800: #212121;
   --gray-900: #181818;
   --gray-1000: #0d0d0d;
-  --green-300: #40c977;
+  --green-300: #43e6c2;
   --orange-300: #ff8549;
   --red-300: #ff6764;
   --red-400: #fa423e;
 
-  --color-background-surface-under: #000000;
-  --color-background-surface: var(--gray-900);
-  --color-background-sidebar: var(--gray-800);
-  --color-background-elevated: var(--gray-750);
+  --color-background-surface-under: #070611;
+  --color-background-surface: #0d0b19;
+  --color-background-sidebar: #110e20;
+  --color-background-elevated: #18142a;
   --color-background-control: rgb(255 255 255 / 3%);
   --color-background-control-hover: rgb(255 255 255 / 7%);
   --color-background-control-active: rgb(255 255 255 / 10%);
@@ -47,9 +48,9 @@
   --color-border: rgb(255 255 255 / 8%);
   --color-border-light: rgb(255 255 255 / 4%);
   --color-border-heavy: rgb(255 255 255 / 16%);
-  --color-border-focus: rgb(51 156 255 / 70%);
+  --color-border-focus: rgb(139 124 255 / 78%);
 
-  --font-ui: "OpenAI Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Segoe UI", sans-serif;
+  --font-ui: "Aptos", "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
   --text-xs: 11px;
   --text-sm: 12px;

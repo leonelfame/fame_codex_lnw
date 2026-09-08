@@ -192,32 +192,32 @@ function trayImage() {
 
 const NATIVE_COPY = Object.freeze({
   en: Object.freeze({
-    openLauncher: "Open Codex Web GPT",
+    openLauncher: "Open Fame Codex",
     quit: "Quit",
     exportDiagnostics: "Export privacy-safe diagnostics",
     cancel: "Cancel",
     remove: "Remove",
-    removeTitle: "Remove Codex Web GPT",
+    removeTitle: "Remove Fame Codex",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
   }),
   "zh-CN": Object.freeze({
-    openLauncher: "打开 Codex Web GPT",
+    openLauncher: "打开 Fame Codex",
     quit: "退出",
     exportDiagnostics: "导出隐私安全诊断",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Fame Codex",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
   }),
   ja: Object.freeze({
-    openLauncher: "Codex Web GPT を開く",
+    openLauncher: "Fame Codex を開く",
     quit: "終了",
     exportDiagnostics: "プライバシー保護済みの診断情報をエクスポート",
     cancel: "キャンセル",
     remove: "削除",
-    removeTitle: "Codex Web GPT を削除",
+    removeTitle: "Fame Codex を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
   }),
@@ -873,7 +873,7 @@ async function requestQuit() {
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+      throw new Error(`Wait for ${activeOperation} to finish before quitting Fame Codex`);
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
@@ -1216,7 +1216,7 @@ async function start() {
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured Codex Web GPT runtime"
+          ? "Another process owns the configured Fame Codex runtime"
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
@@ -1259,7 +1259,7 @@ void start().catch((error) => {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
   try {
-    dialog.showErrorBox("Codex Web GPT could not start", message);
+    dialog.showErrorBox("Fame Codex could not start", message);
   } catch {}
   app.exit(1);
 });
