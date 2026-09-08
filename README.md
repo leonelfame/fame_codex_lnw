@@ -114,27 +114,3 @@ docs/                  architecture, security และ development notes
 FAME_CODEX_NOTICE.md   ข้อมูลการดัดแปลงและ attribution
 ```
 
-## Security
-
-- Browser profile มีข้อมูล session ที่ละเอียดอ่อน ห้ามนำไปแชร์หรือ commit
-- ใช้งานเฉพาะบนเครื่องที่เชื่อถือได้
-- Full Harness สามารถเข้าถึง tools ตามสิทธิ์ของ Codex task
-- ChatGPT UI อาจเปลี่ยนและทำให้ browser automation ใช้งานไม่ได้
-- Temporary Chat ไม่ได้หมายความว่าประมวลผลแบบ local
-- ห้าม hardcode API key หรือ credentials ลง source code
-
-ดูรายละเอียดเพิ่มเติมที่ [SECURITY.md](SECURITY.md) และ
-[docs/security-model.md](docs/security-model.md)
-
-## License และเครดิต
-
-Fame Codex พัฒนาต่อยอดจาก
-[codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web)
-ภายใต้ MIT License โดยยังคง copyright notice และ permission terms ของต้นฉบับไว้
-
-- License: [LICENSE](LICENSE)
-- Fame Codex notice: [FAME_CODEX_NOTICE.md](FAME_CODEX_NOTICE.md)
-- Third-party notices: [LICENSES](LICENSES/)
-
-Fame Codex เป็นโครงการอิสระ ไม่ได้เป็นพันธมิตรหรือได้รับการรับรองโดย OpenAI
-ผู้ใช้งานต้องปฏิบัติตามข้อกำหนดของ OpenAI, ChatGPT และนโยบายของ workspace ของตนเอง
