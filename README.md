@@ -13,9 +13,8 @@
 </p>
 
 > [!IMPORTANT]
-> Fame Codex เป็นโครงการ POC ที่พัฒนาต่อยอดจาก
-> [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web)
-> และไม่ใช่ผลิตภัณฑ์อย่างเป็นทางการของ OpenAI
+> Fame Codex
+> ทำตามหลักของ OPEN AI
 <p align="center">
   <img src="assets/fame-codex-ui.png" alt="Fame Codex desktop launcher" width="960">
 </p>
