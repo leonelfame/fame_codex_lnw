@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Personal Codex launcher with a focused violet/cyan interface.</strong><br>
-  ใช้ ChatGPT Web ผ่าน native Codex workflow พร้อม UI ที่ปรับแต่งสำหรับ Fame
+  ใช้ ChatGPT Web ผ่าน native Codex workflow
 </p>
 
 <p align="center">
