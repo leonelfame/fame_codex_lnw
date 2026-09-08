@@ -9,15 +9,11 @@
   <a href="TROUBLESHOOTING.md">Troubleshooting</a> ·
   <a href="SECURITY.md">Security</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
-  <a href="LICENSE">MIT License</a>
 </p>
 
 > [!IMPORTANT]
 > Fame Codex
 > ทำตามหลักของ OPEN AI
-<p align="center">
-  <img src="assets/fame-codex-ui.png" alt="Fame Codex desktop launcher" width="960">
-</p>
 
 ## ภาพรวม
 
