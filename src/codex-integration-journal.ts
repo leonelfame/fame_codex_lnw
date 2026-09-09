@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { atomicWriteFile, stripUtf8Bom } from "./config";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
@@ -147,7 +147,31 @@ function journalMatchesConfig(journal: AnyCodexIntegrationJournal): boolean {
   }
 }
 
-export function readJournal(): AnyCodexIntegrationJournal | undefined {
+function readVerifiedLegacyJournal(): AnyCodexIntegrationJournal | undefined {
+  const configured = process.env.CODEX_CHATGPT_WEB_LEGACY_HOME?.trim();
+  if (!configured) return undefined;
+  const legacyHome = resolve(configured);
+  if (legacyHome === resolve(getCodexJournalPath(), "..", "..")) return undefined;
+  const primaryPath = join(legacyHome, "codex", "integration-journal.json");
+  const recoveryPath = join(legacyHome, "codex", "integration-journal.recovery.json");
+  if (!existsSync(primaryPath) && !existsSync(recoveryPath)) return undefined;
+  if (!existsSync(primaryPath) || !existsSync(recoveryPath)) {
+    throw new Error("Legacy Codex integration journal is incomplete; refusing automatic migration");
+  }
+  const primary = parseJournal(primaryPath);
+  const recovery = parseJournal(recoveryPath);
+  if (serializeJournal(primary) !== serializeJournal(recovery)) {
+    throw new Error("Legacy Codex integration journal copies do not match; refusing automatic migration");
+  }
+  if (!journalMatchesConfig(primary)) {
+    throw new Error("Legacy Codex integration journal does not match the active config; refusing automatic migration");
+  }
+  return primary;
+}
+
+export function readJournal(
+  options: { includeLegacy?: boolean } = {},
+): AnyCodexIntegrationJournal | undefined {
   const primaryPath = getCodexJournalPath();
   const recoveryPath = getCodexJournalRecoveryPath();
   let primary: AnyCodexIntegrationJournal | undefined;
@@ -163,7 +187,7 @@ export function readJournal(): AnyCodexIntegrationJournal | undefined {
   if (!primary && !recovery) {
     if (primaryError) throw primaryError;
     if (recoveryError) throw recoveryError;
-    return undefined;
+    return options.includeLegacy ? readVerifiedLegacyJournal() : undefined;
   }
   if (primary && recovery && serializeJournal(primary) === serializeJournal(recovery)) return primary;
   if (primary && !recovery && !recoveryError) {
