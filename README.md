@@ -20,6 +20,8 @@
 
 ## ความต้องการระบบ
 
+Building from source requires Bun 1.4.0.
+
 - Windows 10 1809 ขึ้นไป
 - Codex และบัญชี ChatGPT ที่พร้อมใช้งาน
 - [Bun 1.4.0](https://bun.sh/docs/installation) สำหรับ Build จาก source
