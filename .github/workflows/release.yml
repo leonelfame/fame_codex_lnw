@@ -43,7 +43,13 @@ jobs:
       - name: Prepare owned AppImage toolset
         if: runner.os == 'Linux'
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
-      - run: bun run verify
+      - name: Verify release inputs
+        run: |
+          bun run check-version
+          bun run audit
+          bun run typecheck
+          bun run launcher:audit
+          bun run launcher:typecheck
       - run: bun run app:package
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux'
