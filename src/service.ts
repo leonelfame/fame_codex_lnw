@@ -5,7 +5,7 @@ import type { AppConfig } from "./config";
 import { assertDurableRuntimeCommand, atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
 
-const LABEL = "io.github.codex-chatgpt-web.daemon";
+const LABEL = "com.leonelfame.fame-codex.daemon";
 
 export interface ServiceStatus {
   supported: boolean;
@@ -95,7 +95,7 @@ function assertMacOs(): void {
   if (process.platform !== "darwin") {
     throw new Error(
       "Terminal-managed background services require macOS. "
-      + "Use the Codex Web GPT launcher on Windows or Linux.",
+      + "Use the Fame Codex launcher on Windows or Linux.",
     );
   }
 }

@@ -9,7 +9,7 @@ const { RuntimeHost } = require("../electron/runtime.cjs");
 function hostFor(existingConfig, interactionMode = "automatic") {
   const host = new RuntimeHost({
     app: {
-      getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-test"),
+      getPath: () => path.join(os.tmpdir(), "fame-codex-runtime-host-test"),
       getVersion: () => "1.1.3",
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -35,7 +35,7 @@ function hostFor(existingConfig, interactionMode = "automatic") {
 function devHostFor(existingConfig, interactionMode = "automatic") {
   const host = new RuntimeHost({
     app: {
-      getPath: () => path.join(os.tmpdir(), "codex-web-gpt-dev-runtime-host-test"),
+      getPath: () => path.join(os.tmpdir(), "fame-codex-dev-runtime-host-test"),
       getVersion: () => "1.1.3",
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -61,7 +61,7 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
 }
 
 test("core setup preserves an existing full-harness installation", async () => {
-  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  const fixture = hostFor({ mode: "full", appName: "Fame Codex Native2" });
   const result = await fixture.host.setupCore();
   assert.equal(result.mode, "full");
   assert.deepEqual(fixture.invocation().args, [
@@ -75,14 +75,14 @@ test("core setup preserves an existing full-harness installation", async () => {
     "--acknowledge-unofficial",
     "--restart-service",
     "--app-name",
-    "Codex Native2",
+    "Fame Codex Native2",
   ]);
 });
 
 test("core setup replaces the known legacy connector identity with the direct-turn identity", async () => {
   const fixture = hostFor({ mode: "full", appName: "Codex Native" });
   await fixture.host.setupCore();
-  assert.deepEqual(fixture.invocation().args.slice(-2), ["--app-name", "Codex Native2"]);
+  assert.deepEqual(fixture.invocation().args.slice(-2), ["--app-name", "Fame Codex Native2"]);
 });
 
 test("core setup starts in browser-only mode when no installation exists", async () => {
@@ -119,7 +119,7 @@ test("browser interaction mode changes reuse the transactional setup and refresh
   const config = {
     mode: "full",
     browserHost: "launcher",
-    appName: "Codex Native2",
+    appName: "Fame Codex Native2",
     experimentalBiggerContext: true,
   };
   const manual = hostFor(config);
@@ -141,17 +141,17 @@ test("switching back from Zero Risk preserves the saved automatic connector iden
   const fixture = hostFor({
     mode: "full",
     browserHost: "launcher",
-    appName: "Codex Zero Risk",
-    automaticAppName: "Codex Native2",
+    appName: "Fame Codex Zero Risk",
+    automaticAppName: "Fame Codex Native2",
     browserInteractionMode: "manual",
   }, "manual");
   await fixture.host.setBrowserInteractionMode("automatic");
   const args = fixture.invocation().args;
   assert.deepEqual(args.slice(args.indexOf("--app-name"), args.indexOf("--app-name") + 2), [
     "--app-name",
-    "Codex Native2",
+    "Fame Codex Native2",
   ]);
-  assert.equal(args.includes("Codex Zero Risk"), false);
+  assert.equal(args.includes("Fame Codex Zero Risk"), false);
 });
 
 test("DEV core setup configures only the isolated harness contract", async () => {
@@ -176,7 +176,7 @@ test("DEV core setup configures only the isolated harness contract", async () =>
 });
 
 test("Bigger Context uses the setup transaction and refreshes the production Codex catalog", async () => {
-  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  const fixture = hostFor({ mode: "full", appName: "Fame Codex Native2" });
   const result = await fixture.host.setBiggerContext(true);
   assert.equal(result.enabled, true);
   assert.deepEqual(fixture.invocation(), {
@@ -192,7 +192,7 @@ test("Bigger Context uses the setup transaction and refreshes the production Cod
       "--restart-service",
       "--bigger-context",
       "--app-name",
-      "Codex Native2",
+      "Fame Codex Native2",
     ],
   });
 });
@@ -221,8 +221,8 @@ test("Zero Risk Pro transaction installs or removes only its explicit model prof
     mode: "full",
     browserHost: "launcher",
     browserInteractionMode: "manual",
-    appName: "Codex Zero Risk",
-    automaticAppName: "Codex Native2",
+    appName: "Fame Codex Zero Risk",
+    automaticAppName: "Fame Codex Native2",
   };
   const enabled = hostFor(config, "manual");
   const result = await enabled.host.setZeroRiskPro(true);
@@ -236,7 +236,7 @@ test("Zero Risk Pro transaction installs or removes only its explicit model prof
       "/runtime/launcher-browser.json",
       "--zero-risk-browser-interaction",
       "--app-name",
-      "Codex Native2",
+      "Fame Codex Native2",
       "--acknowledge-unofficial",
       "--standard-context",
       "--zero-risk-pro",
@@ -281,14 +281,14 @@ test("DEV setup child environment removes launcher-rebound production aliases", 
 });
 
 test("DEV MCP setup reuses only DEV-home credentials and targets its distinct connector", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-mcp-host-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-dev-mcp-host-"));
   const runtimeKeyFile = path.join(root, "runtime.key");
   fs.writeFileSync(runtimeKeyFile, "private key\n", { mode: 0o600 });
   const fixture = devHostFor({
     purpose: "dev-harness",
     mode: "full",
     browserHost: "launcher",
-    appName: "Codex Native2",
+    appName: "Fame Codex Native2",
     tunnel: {
       tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
       runtimeKeyFile,
@@ -306,7 +306,7 @@ test("DEV MCP setup reuses only DEV-home credentials and targets its distinct co
         "/dev/runtime/launcher-browser.json",
         "--automatic-browser-interaction",
         "--app-name",
-        "Codex Native2 DEV",
+        "Fame Codex Native2 DEV",
         "--acknowledge-unofficial",
       ],
     });
@@ -316,13 +316,13 @@ test("DEV MCP setup reuses only DEV-home credentials and targets its distinct co
 });
 
 test("DEV doctor requires live tunnel readiness without probing a Responses listener", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-doctor-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-dev-doctor-"));
   const runtimeKeyFile = path.join(root, "runtime.key");
   fs.writeFileSync(runtimeKeyFile, "private key\n", { mode: 0o600 });
   const fixture = devHostFor({
     purpose: "dev-harness",
     mode: "full",
-    appName: "Codex Native2 DEV",
+    appName: "Fame Codex Native2 DEV",
     tunnel: { runtimeKeyFile },
   });
   fixture.host.supervisor.readTunnelHealth = async () => ({
@@ -376,7 +376,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
   const fixture = hostFor({
     mode: "full",
     browserHost: "launcher",
-    appName: "Codex Native2",
+    appName: "Fame Codex Native2",
     releaseVersion: "1.1.1",
     solAvailable: true,
     proAvailable: false,
@@ -395,7 +395,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     "--acknowledge-unofficial",
     "--restart-service",
     "--app-name",
-    "Codex Native2",
+    "Fame Codex Native2",
   ]);
   assert.deepEqual(result, {
     updated: true,
@@ -428,7 +428,7 @@ test("launcher migrates the legacy connector identity even when the release vers
     "--acknowledge-unofficial",
     "--restart-service",
     "--app-name",
-    "Codex Native2",
+    "Fame Codex Native2",
   ]);
   assert.equal(result.updated, true);
   assert.equal(result.connectorMigrated, true);
@@ -455,7 +455,7 @@ test("launcher update preserves Zero Risk and never probes its account capabilit
     mode: "full",
     browserHost: "launcher",
     browserInteractionMode: "manual",
-    appName: "Codex Zero Risk",
+    appName: "Fame Codex Zero Risk",
     releaseVersion: "1.1.1",
   });
 
@@ -470,7 +470,7 @@ test("launcher update transaction leaves current and externally owned runtimes u
   const currentFull = hostFor({
     mode: "full",
     browserHost: "launcher",
-    appName: "Codex Native2",
+    appName: "Fame Codex Native2",
     releaseVersion: "1.1.3",
   });
   const external = hostFor({ mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "1.1.1" });
@@ -484,12 +484,12 @@ test("launcher update transaction leaves current and externally owned runtimes u
 });
 
 test("MCP setup reuses valid private credentials without exposing or rewriting them", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-saved-mcp-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-saved-mcp-"));
   const keyPath = path.join(root, "tunnel-runtime.key");
   fs.writeFileSync(keyPath, "saved-private-runtime-key\n", { mode: 0o600 });
   const fixture = hostFor({
     mode: "full",
-    appName: "Codex Native2",
+    appName: "Fame Codex Native2",
     tunnel: {
       tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
       runtimeKeyFile: keyPath,
@@ -505,7 +505,7 @@ test("MCP setup reuses valid private credentials without exposing or rewriting t
       "/runtime/launcher-browser.json",
       "--automatic-browser-interaction",
       "--app-name",
-      "Codex Native2",
+      "Fame Codex Native2",
       "--replace-codex-route",
       "--acknowledge-unofficial",
       "--restart-service",
@@ -532,7 +532,7 @@ test("new MCP setup uses the explicit default connector name", async () => {
     "/runtime/launcher-browser.json",
     "--automatic-browser-interaction",
     "--app-name",
-    "Codex Native2",
+    "Fame Codex Native2",
   ]);
 });
 
@@ -574,7 +574,7 @@ function bridgeFixture({ active }) {
     },
   };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-bridge-test") },
+    app: { getPath: () => path.join(os.tmpdir(), "fame-codex-bridge-test") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -638,7 +638,7 @@ test("failed runtime cleanup during removal still restores the previous Codex ro
   const calls = [];
   const config = { mode: "full", browserHost: "launcher", releaseVersion: "1.1.2" };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-uninstall-fail-safe") },
+    app: { getPath: () => path.join(os.tmpdir(), "fame-codex-uninstall-fail-safe") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -676,7 +676,7 @@ test("integration removal is accepted only after a new status process observes i
   const calls = [];
   const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "2.1.8" };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-uninstall-success") },
+    app: { getPath: () => path.join(os.tmpdir(), "fame-codex-uninstall-success") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -711,7 +711,7 @@ test("integration removal rejects a command that leaves an inactive journal behi
   const calls = [];
   const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "2.1.8" };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-uninstall-stale") },
+    app: { getPath: () => path.join(os.tmpdir(), "fame-codex-uninstall-stale") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -747,13 +747,13 @@ test("integration removal rejects a command that leaves an inactive journal behi
 });
 
 test("connector verification uses the current identity and rejects a legacy local runtime", () => {
-  const full = hostFor({ mode: "full", appName: "Codex Native2" });
-  assert.equal(full.host.mcpConnectorName(), "Codex Native2");
-  assert.equal(full.host.browserConnectorName(), "Codex Native2");
+  const full = hostFor({ mode: "full", appName: "Fame Codex Native2" });
+  assert.equal(full.host.mcpConnectorName(), "Fame Codex Native2");
+  assert.equal(full.host.browserConnectorName(), "Fame Codex Native2");
   const defaultName = hostFor(null);
   assert.equal(defaultName.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
   const legacyFull = hostFor({ mode: "full", appName: "Codex Native" });
-  assert.equal(legacyFull.host.browserConnectorName(), "Codex Native2");
+  assert.equal(legacyFull.host.browserConnectorName(), "Fame Codex Native2");
   assert.throws(
     () => legacyFull.host.mcpConnectorName(),
     /still targets legacy ChatGPT connector.*create that connector as a new ChatGPT plugin/,
@@ -762,15 +762,15 @@ test("connector verification uses the current identity and rejects a legacy loca
   assert.throws(() => invalidFull.host.mcpConnectorName(), /Connector name is invalid/);
   assert.throws(() => invalidFull.host.browserConnectorName(), /Connector name is invalid/);
   const browserOnly = hostFor({ mode: "browser-only", appName: "Codex Native" });
-  assert.equal(browserOnly.host.browserConnectorName(), "Codex Native2");
+  assert.equal(browserOnly.host.browserConnectorName(), "Fame Codex Native2");
   assert.throws(() => browserOnly.host.mcpConnectorName(), /MCP runtime is not configured/);
-  const dev = devHostFor({ mode: "full", appName: "Codex Native2" });
+  const dev = devHostFor({ mode: "full", appName: "Fame Codex Native2" });
   assert.equal(dev.host.browserConnectorName(), DEV_CONNECTOR_NAME);
   assert.equal(dev.host.mcpConnectorName(), DEV_CONNECTOR_NAME);
 });
 
 test("launcher-controlled CLI operations use the live descriptor token", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-control-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-control-"));
   const descriptorPath = path.join(root, "launcher-browser.json");
   fs.writeFileSync(descriptorPath, `${JSON.stringify({
     pid: process.pid,
@@ -793,7 +793,7 @@ test("launcher-controlled CLI operations use the live descriptor token", () => {
 });
 
 test("failed first-time setup removes its route before restoring the unconfigured state", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-first-setup-rollback-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-first-setup-rollback-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
   const journalPath = path.join(coreHome, "codex", "integration-journal.json");
@@ -860,7 +860,7 @@ test("failed first-time setup removes its route before restoring the unconfigure
 });
 
 test("a failed setup preflight leaves the previous runtime running and untouched", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-preflight-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-setup-preflight-"));
   const configPath = path.join(root, "config.json");
   const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "4.0.7" };
   fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`);
@@ -910,7 +910,7 @@ test("a browser-mode commit failure restores the previous runtime inside setup",
   let runtimeRestores = 0;
   const host = new RuntimeHost({
     app: {
-      getPath: () => path.join(os.tmpdir(), "codex-web-gpt-browser-commit-rollback"),
+      getPath: () => path.join(os.tmpdir(), "fame-codex-browser-commit-rollback"),
       getVersion: () => "1.1.3",
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -945,7 +945,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
   let config = { mode: "full", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
   let prepared = 0;
   let launcherStops = 0;
-  const coreHome = path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration-core");
+  const coreHome = path.join(os.tmpdir(), "fame-codex-runtime-host-migration-core");
   const supervisor = {
     coreHome,
     configPath: path.join(coreHome, "config.json"),
@@ -959,7 +959,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
     startIfConfigured: async () => ({ status: "ready" }),
   };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration") },
+    app: { getPath: () => path.join(os.tmpdir(), "fame-codex-runtime-host-migration") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -981,9 +981,9 @@ test("launcher delegates an existing terminal-managed installation to the migrat
 test("failed terminal migration verifies the unchanged previous runtime instead of claiming recovery", async () => {
   const config = { mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
   const calls = [];
-  const coreHome = path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration-failure-core");
+  const coreHome = path.join(os.tmpdir(), "fame-codex-runtime-host-migration-failure-core");
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-migration-failure") },
+    app: { getPath: () => path.join(os.tmpdir(), "fame-codex-runtime-host-migration-failure") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -1016,7 +1016,7 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
 });
 
 test("failed launcher update restores every mutable setup file before restarting the previous runtime", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-checkpoint-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-setup-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
   const configPath = path.join(coreHome, "config.json");
@@ -1116,13 +1116,13 @@ test("failed launcher update restores every mutable setup file before restarting
 });
 
 test("failed terminal migration restores removed launchd ownership before verifying the old runtime", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-terminal-checkpoint-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-terminal-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
   const launchAgentsDir = path.join(root, "LaunchAgents");
   const configPath = path.join(coreHome, "config.json");
-  const daemonPlist = path.join(launchAgentsDir, "io.github.codex-chatgpt-web.daemon.plist");
-  const tunnelPlist = path.join(launchAgentsDir, "io.github.codex-chatgpt-web.tunnel.plist");
+  const daemonPlist = path.join(launchAgentsDir, "com.leonelfame.fame-codex.daemon.plist");
+  const tunnelPlist = path.join(launchAgentsDir, "com.leonelfame.fame-codex.tunnel.plist");
   const oldConfig = {
     mode: "full",
     browserHost: "managed-chrome",
@@ -1196,7 +1196,7 @@ test("failed terminal migration restores removed launchd ownership before verify
 });
 
 test("macOS passkey capture uses an isolated launcher-controlled transfer", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-passkey-runtime-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-passkey-runtime-"));
   const chrome = path.join(root, "Google Chrome");
   fs.writeFileSync(chrome, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   const host = new RuntimeHost({

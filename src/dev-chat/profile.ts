@@ -21,7 +21,7 @@ export interface DevProfilePaths {
   configPath: string;
 }
 
-const WINDOWS_LAUNCHER_GUID = "d1a6026a-6210-588e-9a2b-da3936f94e02";
+const WINDOWS_LAUNCHER_GUID = "91e4f617-5ac8-4e1d-bf72-75e8e25b2f61";
 
 function registeredWindowsLauncherInstallLocation(): string | undefined {
   try {
@@ -45,13 +45,13 @@ export function resolveDevProfilePaths({
   homeDirectory?: string;
 } = {}): DevProfilePaths {
   const home = resolve(expandUserPath(
-    environment.CODEX_WEB_GPT_DEV_HOME?.trim() || join(homeDirectory, ".codex-chatgpt-web-dev"),
+    environment.FAME_CODEX_DEV_HOME?.trim() || join(homeDirectory, ".fame-codex-dev"),
   ));
   const productionHome = resolve(expandUserPath(
-    environment.CODEX_CHATGPT_WEB_HOME?.trim() || join(homeDirectory, ".codex-chatgpt-web"),
+    environment.FAME_CODEX_HOME?.trim() || join(homeDirectory, ".fame-codex"),
   ));
   if (home === productionHome) {
-    throw new Error("DEV profile home must differ from the production codex-chatgpt-web home");
+    throw new Error("DEV profile home must differ from the production Fame Codex home");
   }
   const launcherUserData = join(home, "launcher");
   return {
@@ -94,7 +94,7 @@ export function readDevChatExperimentalFeatures(
 }
 
 export function activateDevProfileEnvironment(paths = resolveDevProfilePaths()): DevProfilePaths {
-  process.env.CODEX_WEB_GPT_DEV_HOME = paths.home;
+  process.env.FAME_CODEX_DEV_HOME = paths.home;
   process.env.CODEX_CHATGPT_WEB_HOME = paths.home;
   process.env.CODEX_HOME = paths.codexHome;
   if (getConfigPath() !== paths.configPath) {
@@ -123,23 +123,23 @@ export function installedLauncherCandidates({
   platform?: NodeJS.Platform;
   windowsInstallLocation?: string;
 } = {}): string[] {
-  const override = environment.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
+  const override = environment.FAME_CODEX_LAUNCHER_EXECUTABLE?.trim();
   const candidates = override ? [expandUserPath(override)] : [];
   const targetPath = platform === "win32" ? win32 : posix;
   if (platform === "darwin") {
     candidates.push(
-      "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT",
-      posix.join(homeDirectory, "Applications", "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT"),
+      "/Applications/Fame Codex.app/Contents/MacOS/Codex Web GPT",
+      posix.join(homeDirectory, "Applications", "Fame Codex.app", "Contents", "MacOS", "Fame Codex"),
     );
   } else if (platform === "win32") {
     const registeredLocation = windowsInstallLocation?.trim()
       || (process.platform === "win32" ? registeredWindowsLauncherInstallLocation() : undefined);
     if (registeredLocation && win32.isAbsolute(registeredLocation)) {
-      candidates.push(win32.join(registeredLocation, "Codex Web GPT.exe"));
+      candidates.push(win32.join(registeredLocation, "Fame Codex.exe"));
     } else {
       const localAppData = environment.LOCALAPPDATA?.trim();
       if (localAppData) {
-        candidates.push(win32.join(localAppData, "Programs", "Codex Web GPT", "Codex Web GPT.exe"));
+        candidates.push(win32.join(localAppData, "Programs", "Fame Codex", "Fame Codex.exe"));
       }
     }
   } else if (platform === "linux") {
@@ -156,7 +156,7 @@ export function findInstalledLauncherExecutable(options: Parameters<typeof insta
   const executable = candidates.find(executableFile);
   if (executable) return executable;
   throw new Error(
-    "Installed Codex Web GPT launcher was not found. Install it first or set CODEX_WEB_GPT_LAUNCHER_EXECUTABLE to its absolute executable path."
+    "Installed Fame Codex launcher was not found. Install it first or set FAME_CODEX_LAUNCHER_EXECUTABLE to its absolute executable path."
       + ` Checked: ${candidates.join(", ") || "no platform candidates"}`,
   );
 }
@@ -169,7 +169,7 @@ export function devLauncherEnvironment(
   delete childEnvironment.CODEX_CHATGPT_WEB_HOME;
   delete childEnvironment.CODEX_HOME;
   delete childEnvironment.CODEX_WEB_GPT_LAUNCHER_DATA_DIR;
-  childEnvironment.CODEX_WEB_GPT_DEV_HOME = paths.home;
+  childEnvironment.FAME_CODEX_DEV_HOME = paths.home;
   return childEnvironment;
 }
 

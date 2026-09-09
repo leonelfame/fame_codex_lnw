@@ -26,7 +26,7 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3EFame%20Codex%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#fame-codex-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
@@ -311,7 +311,7 @@ class BrowserHost {
     helper,
     logger,
     loginWithPasskey,
-    partition = "persist:codex-web-gpt-chatgpt",
+    partition = "persist:fame-codex-chatgpt",
     profile = "production",
     publishState,
     showWindow = () => {},
@@ -337,8 +337,8 @@ class BrowserHost {
       throw new Error("Browser host profile is invalid");
     }
     const expectedPartition = profile === "development"
-      ? "persist:codex-web-gpt-dev-chatgpt"
-      : "persist:codex-web-gpt-chatgpt";
+      ? "persist:fame-codex-dev-chatgpt"
+      : "persist:fame-codex-chatgpt";
     if (partition !== expectedPartition) throw new Error("Browser host partition does not match its profile");
     this.partition = partition;
     this.profile = profile;
@@ -2843,7 +2843,7 @@ class BrowserHost {
   writeDescriptor() {
     const descriptor = {
       version: 2,
-      kind: "codex-web-gpt-launcher",
+      kind: "fame-codex-launcher",
       profile: this.profile,
       pid: process.pid,
       endpoint: `http://127.0.0.1:${this.cdpPort}`,

@@ -27,11 +27,11 @@ function Test-IsFullyQualifiedWindowsPath {
   return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))'
 }
 
-$Repository = if ($env:CODEX_WEB_GPT_REPOSITORY) { $env:CODEX_WEB_GPT_REPOSITORY } else { "miuuyy/codex-chatgpt-web" }
+$Repository = if ($env:FAME_CODEX_REPOSITORY) { $env:FAME_CODEX_REPOSITORY } else { "leonelfame/fame_codex_lnw" }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw "Invalid GitHub repository: $Repository"
 }
-$Version = $env:CODEX_WEB_GPT_VERSION
+$Version = $env:FAME_CODEX_VERSION
 if (-not $Version) {
   $Release = Invoke-WithRetry -Label "Resolving the latest release" -Operation {
     Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 60
@@ -39,7 +39,7 @@ if (-not $Version) {
   $Version = [string]$Release.tag_name
 }
 if ($Version -and $Version.StartsWith("v")) { $Version = $Version.Substring(1) }
-if (-not $Version) { throw "Could not resolve the latest Codex Web GPT release" }
+if (-not $Version) { throw "Could not resolve the latest Fame Codex release" }
 if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Invalid release version: $Version" }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
@@ -47,13 +47,13 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 }
 $Arch = "x64"
 
-$Asset = "codex-web-gpt-$Version-win-$Arch.exe"
+$Asset = "fame-codex-$Version-win-$Arch.exe"
 $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
-$Temp = Join-Path ([System.IO.Path]::GetTempPath()) "codex-web-gpt-$([guid]::NewGuid().ToString('N'))"
+$Temp = Join-Path ([System.IO.Path]::GetTempPath()) "fame-codex-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $Temp | Out-Null
 try {
-  if (Get-Process -Name "Codex Web GPT" -ErrorAction SilentlyContinue) {
-    throw "Quit Codex Web GPT before updating it"
+  if (Get-Process -Name "Fame Codex" -ErrorAction SilentlyContinue) {
+    throw "Quit Fame Codex before updating it"
   }
   $Installer = Join-Path $Temp $Asset
   $Checksums = Join-Path $Temp "checksums.txt"
@@ -72,12 +72,12 @@ try {
   if ($Actual -ne $Expected) { throw "SHA-256 verification failed for $Asset" }
   $Process = Start-Process -FilePath $Installer -ArgumentList "/S", "/currentuser" -Wait -PassThru
   if ($Process.ExitCode -ne 0) { throw "Installer exited with code $($Process.ExitCode)" }
-  $InstallRegistry = "HKCU:\Software\d1a6026a-6210-588e-9a2b-da3936f94e02"
+  $InstallRegistry = "HKCU:\Software\91e4f617-5ac8-4e1d-bf72-75e8e25b2f61"
   $InstallLocation = [string](Get-ItemPropertyValue -LiteralPath $InstallRegistry -Name "InstallLocation")
   if (-not (Test-IsFullyQualifiedWindowsPath $InstallLocation)) {
     throw "Installer recorded an invalid InstallLocation: $InstallLocation"
   }
-  $Executable = Join-Path $InstallLocation "Codex Web GPT.exe"
+  $Executable = Join-Path $InstallLocation "Fame Codex.exe"
   if (-not (Test-Path $Executable)) { throw "Installed launcher was not found at $Executable" }
   Start-Process $Executable
   Write-Host "Installed $Executable"

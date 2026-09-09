@@ -478,14 +478,14 @@ class RuntimeHost {
       path.join(coreHome, "secrets", "tunnel-runtime.key"),
       path.join(coreHome, "secrets", "tunnel-runtime-automatic.key"),
       path.join(coreHome, "secrets", "tunnel-runtime-zero-risk.key"),
-      path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web.yaml"),
-      path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web-zero-risk.yaml"),
-      path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web-dev.yaml"),
-      path.join(coreHome, "tunnel", "profiles", "codex-chatgpt-web-dev-zero-risk.yaml"),
+      path.join(coreHome, "tunnel", "profiles", "fame-codex.yaml"),
+      path.join(coreHome, "tunnel", "profiles", "fame-codex-zero-risk.yaml"),
+      path.join(coreHome, "tunnel", "profiles", "fame-codex-dev.yaml"),
+      path.join(coreHome, "tunnel", "profiles", "fame-codex-dev-zero-risk.yaml"),
     ]);
     if (snapshot.owner === "external" && this.platform === "darwin") {
-      paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.daemon.plist"));
-      paths.add(path.join(this.launchAgentsDir, "io.github.codex-chatgpt-web.tunnel.plist"));
+      paths.add(path.join(this.launchAgentsDir, "com.leonelfame.fame-codex.daemon.plist"));
+      paths.add(path.join(this.launchAgentsDir, "com.leonelfame.fame-codex.tunnel.plist"));
     }
     const tunnels = [
       snapshot.config?.tunnel,
@@ -1148,8 +1148,8 @@ class RuntimeHost {
       && isLegacyConnectorName(validateConnectorName(existing.config?.appName));
     const interactionMode = existing.config?.browserInteractionMode ?? "automatic";
     const expectedTunnelProfile = interactionMode === "manual"
-      ? "codex-chatgpt-web-zero-risk"
-      : "codex-chatgpt-web";
+      ? "fame-codex-zero-risk"
+      : "fame-codex";
     const expectedKeyFile = interactionMode === "manual"
       ? "tunnel-runtime-zero-risk.key"
       : "tunnel-runtime-automatic.key";

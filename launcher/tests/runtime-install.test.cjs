@@ -97,7 +97,7 @@ function runtimeFixture(root, version = "0.2.0") {
 }
 
 test("packaged runtime is installed once into a durable versioned directory", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-install-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-install-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
@@ -122,7 +122,7 @@ test("packaged runtime is installed once into a durable versioned directory", ()
 });
 
 test("packaged runtime installation rejects a platform or version mismatch", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-mismatch-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-mismatch-"));
   const resourcesPath = runtimeFixture(root, "0.1.0");
   try {
     assert.throws(
@@ -139,7 +139,7 @@ test("packaged runtime installation rejects a platform or version mismatch", () 
 });
 
 test("packaged runtime rejects a missing executable before creating durable state", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-missing-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-missing-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const executable = path.join(
@@ -169,7 +169,7 @@ for (const relativePath of [
   ["app", "node_modules", "nested-dependency", "dist", "runtime", "worker.js"],
 ]) {
   test(`packaged runtime rejects a missing nested dependency: ${relativePath.join("/")}`, () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-dependency-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-dependency-"));
     const resourcesPath = runtimeFixture(root);
     const coreHome = path.join(root, "core-home");
     fs.rmSync(path.join(resourcesPath, "runtime", ...relativePath));
@@ -190,7 +190,7 @@ for (const relativePath of [
 }
 
 test("packaged runtime rejects same-count content corruption", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-corrupt-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-corrupt-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const dependency = path.join(resourcesPath, "runtime", "app", "node_modules", "zod", "v4", "index.js");
@@ -211,7 +211,7 @@ test("packaged runtime rejects same-count content corruption", () => {
 });
 
 test("packaged runtime source wait accepts a delayed final dependency within its bound", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-delayed-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-delayed-"));
   const resourcesPath = runtimeFixture(root);
   const delayed = path.join(
     resourcesPath,
@@ -243,7 +243,7 @@ test("packaged runtime source wait accepts a delayed final dependency within its
 });
 
 test("packaged runtime source wait fails closed when materialization exceeds its bound", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-timeout-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-timeout-"));
   const resourcesPath = runtimeFixture(root);
   fs.rmSync(path.join(resourcesPath, "runtime", "app", "node_modules", "zod", "v4", "index.js"));
   try {
@@ -262,7 +262,7 @@ test("packaged runtime source wait fails closed when materialization exceeds its
 });
 
 test("packaged runtime transactionally repairs an incomplete installed bundle", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-repair-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-repair-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
@@ -293,7 +293,7 @@ test("packaged runtime transactionally repairs an incomplete installed bundle", 
 });
 
 test("failed candidate validation preserves the previous validated runtime", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-preserve-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-preserve-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
@@ -332,7 +332,7 @@ test("failed candidate validation preserves the previous validated runtime", () 
 });
 
 test("packaged runtime replaces stale files when a release is refreshed under the same version", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-refresh-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-runtime-refresh-"));
   const resourcesPath = runtimeFixture(root, "0.2.0");
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
