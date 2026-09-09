@@ -1,5 +1,7 @@
 <h1 align="center">ChatGPT Web for Codex</h1>
 
+Building from source requires Bun 1.4.0.
+
 <p align="center">
   <strong>将 ChatGPT Web（包括 Pro）作为 Codex 原生模型使用。</strong><br>
   切换模型档位，保留原有工作流。
