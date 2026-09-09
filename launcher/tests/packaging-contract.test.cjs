@@ -31,13 +31,13 @@ test("launcher publishes native packages for all supported desktop operating sys
     ["[/\\\\]Contents[/\\\\]Resources[/\\\\]runtime[/\\\\]runtime[/\\\\]bun$"],
   );
   assert.deepEqual(manifest.build.win.target, ["nsis"]);
-  assert.equal(manifest.build.win.icon, "assets/icon.ico");
+  assert.equal(manifest.build.win.icon, "assets/icon.png");
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
   assert.ok(manifest.build.files.includes("assets/linux-appimage-runner.sh"));
   assert.ok(manifest.build.asarUnpack.includes("assets/linux-appimage-runner.sh"));
   assert.equal(manifest.build.afterPack, undefined);
-  assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
+  assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.png")));
   assert.equal(manifest.build.nsis.oneClick, false);
   assert.equal(manifest.build.nsis.perMachine, false);
   assert.equal(manifest.build.nsis.allowElevation, false);
