@@ -461,7 +461,6 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
-    if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({
       language: validateLanguage(language),
