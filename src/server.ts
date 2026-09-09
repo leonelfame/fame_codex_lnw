@@ -807,7 +807,7 @@ export function startServer(
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
-          service: "codex-chatgpt-web",
+          service: "fame-codex",
           version: VERSION,
           mode: config.mode,
           pid: process.pid,

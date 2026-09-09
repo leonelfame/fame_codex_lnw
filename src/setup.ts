@@ -203,7 +203,7 @@ export function setupProxyIsReady(
   health: Record<string, unknown>,
   config: Pick<AppConfig, "mode" | "releaseVersion">,
 ): boolean {
-  return health.service === "codex-chatgpt-web"
+  return health.service === "fame-codex"
     && health.status === "ok"
     && health.mode === config.mode
     && health.version === config.releaseVersion
@@ -354,8 +354,8 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
   }
   const installedBinary = await installTunnelClient();
   const productionProfileName = interactionMode === "manual"
-    ? "codex-chatgpt-web-zero-risk"
-    : "codex-chatgpt-web";
+    ? "fame-codex-zero-risk"
+    : "fame-codex";
   const profileName = config.purpose === DEV_CONFIG_PURPOSE
     ? interactionMode === "manual" ? `${DEV_TUNNEL_BASE_NAME}-zero-risk` : DEV_TUNNEL_BASE_NAME
     : productionProfileName;
@@ -419,7 +419,7 @@ function prepareSetup(options: SetupOptions): PreparedSetup {
   if (!launcherOwned && process.platform !== "darwin") {
     throw new Error(
       "Terminal-only managed Chrome setup currently requires macOS. "
-      + "Use the Codex Web GPT launcher on Windows or Linux.",
+      + "Use the Fame Codex launcher on Windows or Linux.",
     );
   }
   return { existing, config, launcherOwned };

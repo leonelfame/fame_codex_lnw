@@ -49,7 +49,7 @@ test("failed launcher IPC calls are written to runtime activity", async () => {
 });
 
 test("launcher activity restores valid records from the previous process", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-logging-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-logging-"));
   const filePath = path.join(root, "launcher.jsonl");
   try {
     fs.writeFileSync(filePath, [
@@ -65,7 +65,7 @@ test("launcher activity restores valid records from the previous process", () =>
 });
 
 test("exported launcher logs remove local usernames, private ChatGPT titles, and URL paths", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-export-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-export-"));
   const filePath = path.join(root, "launcher.jsonl");
   const destinationPath = path.join(root, "shared", "diagnostics.jsonl");
   try {
@@ -84,7 +84,7 @@ test("exported launcher logs remove local usernames, private ChatGPT titles, and
       detail: {
         line: "config loaded from /Users/local-person/.codex/config.toml",
         prompt: "private prompt",
-        connector: "Codex Native2",
+        connector: "Fame Codex Native2",
         url: "https://chatgpt.com/c/private-conversation?state=oauth-secret&email=private@example.com",
         message: "failed while loading 'https://accounts.google.com/o/oauth2/v2/auth?state=oauth-secret&login_hint=private@example.com'",
       },
@@ -95,7 +95,7 @@ test("exported launcher logs remove local usernames, private ChatGPT titles, and
     assert.doesNotMatch(exported, /private\.user|local-person|Private roadmap|Health notes|private prompt|private-conversation|oauth-secret|private@example\.com/);
     assert.match(exported, /\[user-home\]/);
     assert.match(exported, /visible rows: \[redacted\]/);
-    assert.match(exported, /Codex Native2/);
+    assert.match(exported, /Fame Codex Native2/);
     assert.match(exported, /"prompt":"\[redacted\]"/);
     assert.match(exported, /https:\/\/chatgpt\.com/);
     assert.match(exported, /https:\/\/accounts\.google\.com/);
@@ -109,7 +109,7 @@ test("exported launcher logs remove local usernames, private ChatGPT titles, and
 });
 
 test("a closed Windows diagnostic pipe is recorded without becoming an uncaught process error", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-process-pipe-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-process-pipe-"));
   const filePath = path.join(root, "process-stream-errors.log");
   const stream = new PassThrough();
   try {

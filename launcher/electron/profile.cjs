@@ -23,12 +23,12 @@ function resolveLauncherProfile({
   }
   const development = argv.includes("--dev-profile");
   if (!development) {
-    const coreHome = env.CODEX_CHATGPT_WEB_HOME?.trim()
-      ? resolveUserPath(env.CODEX_CHATGPT_WEB_HOME.trim(), homeDir)
-      : path.join(homeDir, ".codex-chatgpt-web");
-    const userData = env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim()
-      ? resolveUserPath(env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR.trim(), homeDir)
-      : path.join(appData, "Codex Web GPT");
+    const coreHome = env.FAME_CODEX_HOME?.trim()
+      ? resolveUserPath(env.FAME_CODEX_HOME.trim(), homeDir)
+      : path.join(homeDir, ".fame-codex");
+    const userData = env.FAME_CODEX_LAUNCHER_DATA_DIR?.trim()
+      ? resolveUserPath(env.FAME_CODEX_LAUNCHER_DATA_DIR.trim(), homeDir)
+      : path.join(appData, "Fame Codex");
     return {
       kind: PRODUCTION_PROFILE,
       displayName: "Fame Codex",
@@ -37,18 +37,18 @@ function resolveLauncherProfile({
         ? resolveUserPath(env.CODEX_HOME.trim(), homeDir)
         : path.join(homeDir, ".codex"),
       userData,
-      browserPartition: "persist:codex-web-gpt-chatgpt",
+      browserPartition: "persist:fame-codex-chatgpt",
     };
   }
 
-  const coreHome = env.CODEX_WEB_GPT_DEV_HOME?.trim()
-    ? resolveUserPath(env.CODEX_WEB_GPT_DEV_HOME.trim(), homeDir)
-    : path.join(homeDir, ".codex-chatgpt-web-dev");
-  const productionHome = env.CODEX_CHATGPT_WEB_HOME?.trim()
-    ? resolveUserPath(env.CODEX_CHATGPT_WEB_HOME.trim(), homeDir)
-    : path.join(homeDir, ".codex-chatgpt-web");
+  const coreHome = env.FAME_CODEX_DEV_HOME?.trim()
+    ? resolveUserPath(env.FAME_CODEX_DEV_HOME.trim(), homeDir)
+    : path.join(homeDir, ".fame-codex-dev");
+  const productionHome = env.FAME_CODEX_HOME?.trim()
+    ? resolveUserPath(env.FAME_CODEX_HOME.trim(), homeDir)
+    : path.join(homeDir, ".fame-codex");
   if (path.resolve(coreHome) === path.resolve(productionHome)) {
-    throw new Error("DEV profile home must differ from the production codex-chatgpt-web home");
+    throw new Error("DEV profile home must differ from the production Fame Codex home");
   }
   return {
     kind: DEVELOPMENT_PROFILE,
@@ -56,7 +56,7 @@ function resolveLauncherProfile({
     coreHome,
     codexHome: path.join(coreHome, "codex-home"),
     userData: path.join(coreHome, "launcher"),
-    browserPartition: "persist:codex-web-gpt-dev-chatgpt",
+    browserPartition: "persist:fame-codex-dev-chatgpt",
   };
 }
 

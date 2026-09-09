@@ -1,9 +1,9 @@
 {
-  "name": "codex-web-gpt-launcher",
+  "name": "fame-codex-launcher",
   "version": "5.0.5",
   "private": true,
-  "description": "Desktop control center for Codex ChatGPT Web",
-  "author": "miuuyy",
+  "description": "Desktop control center for Fame Codex",
+  "author": "leonelfame",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -41,9 +41,9 @@
     "fast-uri": "3.1.6"
   },
   "build": {
-    "appId": "dev.codexwebgpt.launcher",
-    "productName": "Codex Web GPT",
-    "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
+    "appId": "com.leonelfame.famecodex.launcher",
+    "productName": "Fame Codex",
+    "artifactName": "fame-codex-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
       "assets/linux-appimage-runner.sh"
@@ -84,7 +84,7 @@
       "target": ["AppImage"]
     },
     "nsis": {
-      "guid": "d1a6026a-6210-588e-9a2b-da3936f94e02",
+      "guid": "91e4f617-5ac8-4e1d-bf72-75e8e25b2f61",
       "oneClick": false,
       "perMachine": false,
       "allowElevation": false,

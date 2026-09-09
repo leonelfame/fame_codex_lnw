@@ -3,7 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
-const LINUX_DESKTOP_NAME = "dev.codexwebgpt.launcher.desktop";
+const LINUX_DESKTOP_NAME = "com.leonelfame.famecodex.launcher.desktop";
 
 function linuxDesktopPath() {
   const configHome = process.env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), ".config");
