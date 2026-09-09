@@ -5,7 +5,7 @@
 <p align="center"><img src="assets/fame-codex-ui.png" alt="Fame Codex desktop launcher" width="960"></p>
 
 > [!IMPORTANT]
-> โครงการ POC ที่พัฒนาต่อยอดจาก [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) และไม่ใช่ผลิตภัณฑ์อย่างเป็นทางการของ OpenAI
+> โครงการ Fame Codex สำหรับใช้งาน ChatGPT Web ผ่าน native Codex workflow และไม่ใช่ผลิตภัณฑ์อย่างเป็นทางการของ OpenAI
 
 ## จุดแตกต่าง
 
