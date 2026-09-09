@@ -65,7 +65,7 @@ function smokeEnvironment() {
     ...process.env,
     TMPDIR: scratch,
     CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
-    CODEX_CHATGPT_WEB_HOME: coreHome,
+    FAME_CODEX_HOME: coreHome,
     CODEX_HOME: path.join(scratch, "codex-home"),
     CODEX_WEB_GPT_SMOKE_FILE: markerPath,
   };
@@ -82,8 +82,8 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    macAppBundle = path.join(stage, "Codex Web GPT.app");
-    executable = path.join(macAppBundle, "Contents", "MacOS", "Codex Web GPT");
+    macAppBundle = path.join(stage, "Fame Codex.app");
+    executable = path.join(macAppBundle, "Contents", "MacOS", "Fame Codex");
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {
