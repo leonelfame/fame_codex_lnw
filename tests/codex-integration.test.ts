@@ -58,10 +58,49 @@ function fixture(): { root: string; codexHome: string; appHome: string } {
 afterEach(() => {
   delete process.env.CODEX_HOME;
   delete process.env.CODEX_CHATGPT_WEB_HOME;
+  delete process.env.CODEX_CHATGPT_WEB_LEGACY_HOME;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("reversible native Codex route integration", () => {
+  test("setup migrates a verified integration journal from the legacy launcher home", () => {
+    const { root, codexHome, appHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const legacyHome = join(root, "legacy-app");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+    process.env.CODEX_CHATGPT_WEB_HOME = legacyHome;
+    const config = nativeConfig("browser-only");
+    installCodexIntegration(config);
+
+    process.env.CODEX_CHATGPT_WEB_HOME = appHome;
+    process.env.CODEX_CHATGPT_WEB_LEGACY_HOME = legacyHome;
+    expect(() => preflightCodexIntegration(config, { replaceExistingRoute: true })).not.toThrow();
+    installCodexIntegration(config, { replaceExistingRoute: true });
+
+    expect(existsSync(getCodexJournalPath())).toBe(true);
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: true, errors: [] });
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  test("explicit setup repairs an unchanged orphaned interrupt hook without a journal", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+    const config = nativeConfig("browser-only");
+    installCodexIntegration(config);
+    rmSync(getCodexJournalPath());
+    rmSync(getCodexJournalRecoveryPath());
+
+    expect(() => preflightCodexIntegration(config, { replaceExistingRoute: true })).not.toThrow();
+    installCodexIntegration(config, { replaceExistingRoute: true });
+
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: true, errors: [] });
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+  });
+
   test("route install, update, switching and removal preserve a symlinked shared Codex config", () => {
     const { root, codexHome } = fixture();
     const shared = join(root, "shared");

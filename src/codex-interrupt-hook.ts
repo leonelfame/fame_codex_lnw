@@ -130,6 +130,53 @@ export function installCodexInterruptHookCommand(
   };
 }
 
+export function restoreVerifiedOrphanedCodexInterruptHook(
+  text: string,
+  configPath: string,
+): string {
+  const startCount = managedMarkerCount(text);
+  const endCount = text.split(MANAGED_INTERRUPT_HOOK_END).length - 1;
+  if (startCount === 0 && endCount === 0) return text;
+  if (startCount !== 1 || endCount !== 1) {
+    throw new Error("Codex config contains invalid codex-chatgpt-web interrupt hook markers");
+  }
+  const start = text.indexOf(MANAGED_INTERRUPT_HOOK_START);
+  const end = text.indexOf(MANAGED_INTERRUPT_HOOK_END, start) + MANAGED_INTERRUPT_HOOK_END.length;
+  const fragment = text.slice(start, end);
+  const lines = fragment.split(/\r\n|\n|\r/);
+  if (lines.length !== 11
+    || lines[0] !== MANAGED_INTERRUPT_HOOK_START
+    || lines[1] !== "[[hooks.Interrupt]]"
+    || lines[2] !== ""
+    || lines[3] !== "[[hooks.Interrupt.hooks]]"
+    || lines[4] !== 'type = "command"'
+    || !lines[5]?.startsWith("command = ")
+    || lines[6] !== "timeout = 3"
+    || lines[7] !== ""
+    || !lines[8]?.startsWith("[hooks.state.")
+    || !lines[9]?.startsWith("trusted_hash = ")
+    || lines[10] !== MANAGED_INTERRUPT_HOOK_END) {
+    throw new Error("Codex interrupt lifecycle hook changed after setup; refusing automatic repair");
+  }
+  let command: string;
+  let stateKey: string;
+  let trustedHash: string;
+  try {
+    command = JSON.parse(lines[5].slice("command = ".length)) as string;
+    stateKey = JSON.parse(lines[8].slice("[hooks.state.".length, -1)) as string;
+    trustedHash = JSON.parse(lines[9].slice("trusted_hash = ".length)) as string;
+  } catch {
+    throw new Error("Codex interrupt lifecycle hook changed after setup; refusing automatic repair");
+  }
+  const groupIndex = interruptGroupCount(text.slice(0, start));
+  const expectedStateKey = `${canonicalConfigPath(configPath)}:interrupt:${groupIndex}:0`;
+  if (typeof command !== "string" || stateKey !== expectedStateKey
+    || trustedHash !== codexInterruptHookHash(command)) {
+    throw new Error("Codex interrupt lifecycle hook ownership cannot be verified; refusing automatic repair");
+  }
+  return restoreCodexInterruptHook(text, { command, groupIndex, stateKey, trustedHash, fragment });
+}
+
 function hookTextPattern(text: string): string {
   return text.split(/\r\n|\n|\r/)
     .map(line => line.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"))

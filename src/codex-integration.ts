@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
-import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
+import {
+  installCodexInterruptHook,
+  installCodexInterruptHookCommand,
+  restoreVerifiedOrphanedCodexInterruptHook,
+} from "./codex-interrupt-hook";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   getCodexConfigPath,
@@ -174,7 +178,7 @@ export function preflightCodexIntegration(
   const configSnapshot = snapshotFile(configPath, { followSymlink: true });
   const configExists = configSnapshot.exists;
   const currentText = configSnapshot.data?.toString("utf8") ?? "";
-  const existing = readJournal();
+  const existing = readJournal({ includeLegacy: true });
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
   if (existing && existing.version !== 2) {
@@ -211,7 +215,9 @@ export function preflightCodexIntegration(
     );
     return;
   }
-  let baseline = currentText;
+  let baseline = options.replaceExistingRoute === true
+    ? restoreVerifiedOrphanedCodexInterruptHook(currentText, configPath)
+    : currentText;
   if (existing?.version === 2) {
     if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
@@ -234,7 +240,7 @@ export function installCodexIntegration(
   mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
   const configExists = existsSync(configPath);
   const currentText = configExists ? readFileSync(configPath, "utf8") : "";
-  const existing = readJournal();
+  const existing = readJournal({ includeLegacy: true });
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
 
@@ -300,7 +306,9 @@ export function installCodexIntegration(
     return updated;
   }
 
-  let baseline = currentText;
+  let baseline = options.replaceExistingRoute === true
+    ? restoreVerifiedOrphanedCodexInterruptHook(currentText, configPath)
+    : currentText;
   if (existing?.version === 2) {
     if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
