@@ -132,7 +132,13 @@ test("launcher runtime ownership rejects a different browser descriptor", () => 
 
 test("launcher runtime ownership cannot cross production and DEV profiles", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
-  const production = { ...launcherConfig(descriptorPath), solAvailable: true };
+  const production = {
+    ...launcherConfig(descriptorPath),
+    solAvailable: true,
+    astraAvailable: false,
+    accountCapabilitiesVersion: 0,
+    browserInteractionMode: "automatic",
+  };
   const development = { ...production, purpose: "dev-harness" };
   assert.equal(validateConfig(production, descriptorPath, process.platform, "production"), production);
   assert.equal(validateConfig(development, descriptorPath, process.platform, "development"), development);
@@ -251,6 +257,9 @@ test("launcher runtime validation accepts native Windows paths and a named pipe"
     headed: true,
     solAvailable: true,
     proAvailable: true,
+    astraAvailable: false,
+    accountCapabilitiesVersion: 0,
+    browserInteractionMode: "automatic",
     autoApproveToolCalls: false,
     controlToken: "runtime-supervisor-control-token-0123456789abcdef",
     runtimeCommand: ["C:\\Users\\Example\\.codex-chatgpt-web\\runtime\\bun.exe"],

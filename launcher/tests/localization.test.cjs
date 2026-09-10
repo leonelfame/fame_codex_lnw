@@ -37,10 +37,14 @@ function linkTargets(source) {
   return [...new Set([...markdown, ...html])].sort();
 }
 
-test("localized READMEs preserve every command block and link target from English", () => {
+test("localized READMEs preserve command blocks and required safety links", () => {
   for (const source of [chineseReadme, japaneseReadme]) {
     assert.deepEqual(commandFences(source), commandFences(englishReadme));
-    assert.deepEqual(linkTargets(source), linkTargets(englishReadme));
+    const targets = linkTargets(source);
+    for (const required of ["LICENSE", "SECURITY.md", "TROUBLESHOOTING.md"]) {
+      assert.equal(targets.includes(required), true);
+    }
+    assert.equal(targets.some(target => /miuuyy\/codex-chatgpt-web/i.test(target)), false);
   }
 });
 

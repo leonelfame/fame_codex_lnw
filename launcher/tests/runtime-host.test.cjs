@@ -391,7 +391,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     mode: "full",
     fromVersion: "1.1.1",
     toVersion: "1.1.3",
-    connectorMigrated: false,
+    connectorMigrated: true,
     stdout: "",
   });
 });
@@ -457,7 +457,7 @@ test("launcher update transaction leaves current and externally owned runtimes u
   const currentFull = hostFor({
     mode: "full",
     browserHost: "launcher",
-    appName: "Codex Native2",
+    appName: CURRENT_CONNECTOR_NAME,
     releaseVersion: "1.1.3",
   });
   const external = hostFor({ mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "1.1.1" });
@@ -732,13 +732,13 @@ test("integration removal rejects a command that leaves an inactive journal behi
 });
 
 test("connector verification uses the current identity and rejects a legacy local runtime", () => {
-  const full = hostFor({ mode: "full", appName: "Codex Native2" });
-  assert.equal(full.host.mcpConnectorName(), "Codex Native2");
-  assert.equal(full.host.browserConnectorName(), "Codex Native2");
+  const full = hostFor({ mode: "full", appName: CURRENT_CONNECTOR_NAME });
+  assert.equal(full.host.mcpConnectorName(), CURRENT_CONNECTOR_NAME);
+  assert.equal(full.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
   const defaultName = hostFor(null);
   assert.equal(defaultName.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
   const legacyFull = hostFor({ mode: "full", appName: "Codex Native" });
-  assert.equal(legacyFull.host.browserConnectorName(), "Codex Native2");
+  assert.equal(legacyFull.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
   assert.throws(
     () => legacyFull.host.mcpConnectorName(),
     /still targets legacy ChatGPT connector.*create that connector as a new ChatGPT plugin/,
@@ -747,7 +747,7 @@ test("connector verification uses the current identity and rejects a legacy loca
   assert.throws(() => invalidFull.host.mcpConnectorName(), /Connector name is invalid/);
   assert.throws(() => invalidFull.host.browserConnectorName(), /Connector name is invalid/);
   const browserOnly = hostFor({ mode: "browser-only", appName: "Codex Native" });
-  assert.equal(browserOnly.host.browserConnectorName(), "Codex Native2");
+  assert.equal(browserOnly.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
   assert.throws(() => browserOnly.host.mcpConnectorName(), /MCP runtime is not configured/);
   const dev = devHostFor({ mode: "full", appName: "Codex Native2" });
   assert.equal(dev.host.browserConnectorName(), DEV_CONNECTOR_NAME);
@@ -1000,7 +1000,9 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
   ]);
 });
 
-test("failed launcher update restores every mutable setup file before restarting the previous runtime", async () => {
+test("failed launcher update restores every mutable setup file before restarting the previous runtime", {
+  skip: process.platform === "win32" && "symbolic-link preservation requires Windows Developer Mode",
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
@@ -1100,7 +1102,9 @@ test("failed launcher update restores every mutable setup file before restarting
   }
 });
 
-test("failed terminal migration restores removed launchd ownership before verifying the old runtime", async () => {
+test("failed terminal migration restores removed launchd ownership before verifying the old runtime", {
+  skip: process.platform === "win32" && "launchd ownership is not available on Windows",
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-terminal-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
