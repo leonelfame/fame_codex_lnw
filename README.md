@@ -4,6 +4,8 @@
 
 <p align="center"><img src="assets/fame-codex-ui.png" alt="Fame Codex desktop launcher" width="960"></p>
 
+Copyright (c) 2026 Fame Codex. Distributed under the MIT License.
+
 > [!IMPORTANT]
 > โครงการ Fame Codex สำหรับใช้งาน ChatGPT Web ผ่าน native Codex workflow และไม่ใช่ผลิตภัณฑ์อย่างเป็นทางการของ OpenAI
 

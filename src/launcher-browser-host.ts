@@ -297,7 +297,7 @@ export async function inspectLauncherBrowserHost(
     expectedProfile?: LauncherBrowserHostProfile;
     timeoutMs?: number;
   } = {},
-): Promise<{ solAvailable?: boolean; proAvailable?: boolean; url: string }> {
+): Promise<{ solAvailable?: boolean; proAvailable?: boolean; astraAvailable?: boolean; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   if (options.expectedProfile && descriptor.profile !== options.expectedProfile) {
     throw new Error(
@@ -329,17 +329,22 @@ export async function inspectLauncherBrowserHost(
       throw new Error("Launcher returned invalid ChatGPT session evidence");
     }
     if (options.detectCapabilities
-      && (typeof body.solAvailable !== "boolean" || typeof body.proAvailable !== "boolean")) {
+      && (typeof body.solAvailable !== "boolean" || typeof body.proAvailable !== "boolean"
+        || typeof body.astraAvailable !== "boolean")) {
       throw new Error("Launcher did not return complete ChatGPT account capability evidence");
     }
     if (options.detectCapabilities && body.proAvailable === true && body.solAvailable !== true) {
       throw new Error("Launcher returned contradictory ChatGPT account capability evidence");
+    }
+    if (options.detectCapabilities && body.astraAvailable === true && body.solAvailable !== true) {
+      throw new Error("Launcher returned contradictory ChatGPT Astra capability evidence");
     }
     return {
       url: body.url,
       ...(options.detectCapabilities ? {
         solAvailable: body.solAvailable as boolean,
         proAvailable: body.proAvailable as boolean,
+        astraAvailable: body.astraAvailable as boolean,
       } : {}),
     };
   } catch (error) {

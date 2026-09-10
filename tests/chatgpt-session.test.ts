@@ -177,7 +177,7 @@ test("a complete authenticated composer with no effort selector is Luna-only", a
   await expect(detectChatGptAccountCapabilities(page as never, {
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: false, proAvailable: false });
+  })).resolves.toEqual({ solAvailable: false, proAvailable: false, astraAvailable: false });
 });
 
 test("a transient effort control does not turn a Luna-only account into Sol", async () => {
@@ -207,12 +207,19 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   await expect(detectChatGptAccountCapabilities(page as never, {
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: false, proAvailable: false });
+  })).resolves.toEqual({ solAvailable: false, proAvailable: false, astraAvailable: false });
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean } = {}) {
+function reasoningPicker(options: {
+  max?: string;
+  delay?: number;
+  missing?: boolean;
+  modelLabels?: string[];
+  selectedModel?: string;
+} = {}) {
   let value = 0;
+  let selectedModel = options.selectedModel;
   const keys: string[] = [];
   const hidden = {
     filter() { return this; }, last() { return this; }, getByText() { return this; },
@@ -242,9 +249,20 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
   const control = {
     last() { return this; }, waitFor: async () => {}, isVisible: async () => true,
     getAttribute: async (name: string) => name === "aria-expanded" ? "true" : null,
+    innerText: async () => selectedModel ?? "Thinking",
   };
   const composer = { filter() { return this; }, last() { return this; }, locator: () => ({ locator: () => control }) };
-  const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
+  const labels = options.modelLabels ?? [];
+  const modelRows = {
+    count: async () => labels.length,
+    first() { return this; },
+    waitFor: async () => {},
+    allInnerTexts: async () => labels,
+    nth: (index: number) => ({
+      getAttribute: async (name: string) => name === "aria-checked" ? String(labels[index] === selectedModel) : null,
+      click: async () => { selectedModel = labels[index]; },
+    }),
+  };
   const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
   const page = {
     locator: (selector: string) => {
@@ -255,12 +273,36 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
     },
     keyboard: { press: async () => {} },
   };
-  return { page, composer, keys, value: () => value };
+  return { page, composer, keys, value: () => value, selectedModel: () => selectedModel };
 }
+
+test("capability inspection discovers Astra from the owned model menu", async () => {
+  const fixture = reasoningPicker();
+  const fixturePage = fixture.page as { locator: (selector: string) => any };
+  const originalLocator = fixturePage.locator;
+  fixturePage.locator = (selector: string) => {
+    const located = originalLocator(selector);
+    if (selector === CHATGPT_EFFORT_MENU_SELECTOR) {
+      return {
+        ...located,
+        filter() { return this; },
+        last() { return this; },
+        isVisible: async () => true,
+        locator: () => ({ allInnerTexts: async () => ["GPT-5.6 Sol", "GPT-6 Astra"] }),
+      };
+    }
+    return located;
+  };
+  await expect(detectChatGptAccountCapabilities(fixturePage as never)).resolves.toEqual({
+    solAvailable: true,
+    proAvailable: true,
+    astraAvailable: true,
+  });
+});
 
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
-  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true });
+  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true, astraAvailable: false });
 });
 
 test("an absent effort slider cannot turn three model rows into a saved non-Pro capability", async () => {
@@ -269,7 +311,7 @@ test("an absent effort slider cannot turn three model rows into a saved non-Pro 
 });
 
 test("the authoritative three-step range is non-Pro; a malformed range fails closed", async () => {
-  await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({ solAvailable: true, proAvailable: false });
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({ solAvailable: true, proAvailable: false, astraAvailable: false });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "bad" }).page as never)).rejects.toThrow("model controls are unavailable");
 });
 
@@ -281,4 +323,42 @@ test("Pro selection changes the hidden slider through its visible owner, never t
   await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
   expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
   expect(fixture.value()).toBe(4);
+});
+
+test("Astra selection switches the owned model row and verifies its checked state", async () => {
+  const fixture = reasoningPicker({
+    modelLabels: ["GPT-5.6 Sol", "GPT-6 Astra"],
+    selectedModel: "GPT-5.6 Sol",
+  });
+  const select = (ChatGptBrowserWorker.prototype as unknown as {
+    selectModelAndEffort(...args: unknown[]): Promise<unknown>;
+  }).selectModelAndEffort;
+  await select.call(
+    { activeComposer: async () => fixture.composer },
+    fixture.page,
+    "gpt-6-astra",
+    "high",
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true, astraAvailable: true },
+  );
+  expect(fixture.selectedModel()).toBe("GPT-6 Astra");
+  expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
+});
+
+test("a later Sol turn switches back from Astra before selecting its effort", async () => {
+  const fixture = reasoningPicker({
+    modelLabels: ["GPT-5.6 Sol", "GPT-6 Astra"],
+    selectedModel: "GPT-6 Astra",
+  });
+  const select = (ChatGptBrowserWorker.prototype as unknown as {
+    selectModelAndEffort(...args: unknown[]): Promise<unknown>;
+  }).selectModelAndEffort;
+  await select.call(
+    { activeComposer: async () => fixture.composer },
+    fixture.page,
+    "gpt-5.6-sol",
+    "high",
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true, astraAvailable: true },
+  );
+  expect(fixture.selectedModel()).toBe("GPT-5.6 Sol");
+  expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
 });

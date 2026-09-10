@@ -2,7 +2,8 @@
   "name": "codex-chatgpt-web",
   "version": "5.0.7",
   "private": true,
-  "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
+  "description": "Fame Codex desktop bridge for running Codex tasks through a user-authenticated ChatGPT web session.",
+  "author": "Leonelfame (Fame Codex)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/leonelfame/fame_codex_lnw.git"
@@ -20,6 +21,7 @@
     "dist",
     "README.md",
     "LICENSE",
+    "FAME_CODEX_NOTICE.md",
     "LICENSES"
   ],
   "scripts": {

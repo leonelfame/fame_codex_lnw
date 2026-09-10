@@ -13,6 +13,8 @@ import {
   saveConfig,
   tunnelConfigForInteractionMode,
 } from "./config";
+
+const CHATGPT_ACCOUNT_CAPABILITIES_VERSION = 1;
 import {
   browserLoginStateExists,
   inspectBrowserLoginCapabilities,
@@ -100,7 +102,8 @@ export function launcherCapabilityProbeRequired(
     || existing?.browserInteractionMode === "manual"
     || existing?.browserHost !== "launcher"
     || typeof existing.solAvailable !== "boolean"
-    || typeof existing.proAvailable !== "boolean";
+    || typeof existing.proAvailable !== "boolean"
+    || existing.accountCapabilitiesVersion !== CHATGPT_ACCOUNT_CAPABILITIES_VERSION;
 }
 
 export function existingFullSetupCredentials(
@@ -141,6 +144,8 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     headed: before.headed,
     solAvailable: before.solAvailable,
     proAvailable: before.proAvailable,
+    astraAvailable: before.astraAvailable,
+    accountCapabilitiesVersion: before.accountCapabilitiesVersion,
     experimentalBiggerContext: before.experimentalBiggerContext,
     zeroRiskProEnabled: before.zeroRiskProEnabled,
     autoApproveToolCalls: before.autoApproveToolCalls,
@@ -168,6 +173,8 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     headed: after.headed,
     solAvailable: after.solAvailable,
     proAvailable: after.proAvailable,
+    astraAvailable: after.astraAvailable,
+    accountCapabilitiesVersion: after.accountCapabilitiesVersion,
     experimentalBiggerContext: after.experimentalBiggerContext,
     zeroRiskProEnabled: after.zeroRiskProEnabled,
     autoApproveToolCalls: after.autoApproveToolCalls,
@@ -303,7 +310,7 @@ async function inspectLauncherCapabilities(
   existing: AppConfig | undefined,
   refreshAccountCapabilities: boolean,
   expectedProfile: "production" | "development",
-): Promise<{ solAvailable: boolean; proAvailable: boolean }> {
+): Promise<{ solAvailable: boolean; proAvailable: boolean; astraAvailable: boolean }> {
   const detectCapabilities = launcherCapabilityProbeRequired(
     existing,
     refreshAccountCapabilities,
@@ -316,6 +323,7 @@ async function inspectLauncherCapabilities(
   return {
     solAvailable: detectCapabilities ? inspected.solAvailable === true : existing!.solAvailable,
     proAvailable: detectCapabilities ? inspected.proAvailable === true : existing!.proAvailable,
+    astraAvailable: detectCapabilities ? inspected.astraAvailable === true : existing!.astraAvailable,
   };
 }
 
@@ -490,6 +498,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   let loginCreated = false;
   let solAvailable: boolean | undefined = config.solAvailable;
   let proAvailable: boolean | undefined = config.proAvailable;
+  let astraAvailable: boolean | undefined = config.astraAvailable;
   if (config.browserInteractionMode === "manual") {
     // The generic manual route is independent of account capabilities. The launcher may open the
     // authenticated surface, but setup must not inspect its model selector or infer availability.
@@ -503,16 +512,19 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     );
     solAvailable = capabilities.solAvailable;
     proAvailable = capabilities.proAvailable;
+    astraAvailable = capabilities.astraAvailable;
   } else {
     const stored = storedBrowserLoginCapabilities(config);
     solAvailable = stored.solAvailable;
     proAvailable = stored.proAvailable;
+    astraAvailable = stored.astraAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
       && (options.refreshAccountCapabilities === true
         || existing?.browserInteractionMode === "manual"
         || solAvailable === undefined
-        || proAvailable === undefined);
+        || proAvailable === undefined
+        || astraAvailable === undefined);
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
       throw new Error(
         "Setup must verify the browser account before changing the running daemon. "
@@ -524,15 +536,21 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       const login = await loginToChatGpt(config);
       solAvailable = login.solAvailable;
       proAvailable = login.proAvailable;
+      astraAvailable = login.astraAvailable;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
       const inspected = await inspectBrowserLoginCapabilities(config);
       solAvailable = inspected.solAvailable;
       proAvailable = inspected.proAvailable;
+      astraAvailable = inspected.astraAvailable;
     }
   }
   config.solAvailable = solAvailable === true;
   config.proAvailable = config.solAvailable && proAvailable === true;
+  config.astraAvailable = config.solAvailable && astraAvailable === true;
+  if (config.browserInteractionMode === "automatic") {
+    config.accountCapabilitiesVersion = CHATGPT_ACCOUNT_CAPABILITIES_VERSION;
+  }
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
@@ -644,6 +662,8 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     );
     config.solAvailable = capabilities.solAvailable;
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
+    config.astraAvailable = capabilities.solAvailable && capabilities.astraAvailable;
+    config.accountCapabilitiesVersion = CHATGPT_ACCOUNT_CAPABILITIES_VERSION;
   }
 
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);

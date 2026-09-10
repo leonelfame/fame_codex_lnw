@@ -161,6 +161,7 @@ test("new DEV chats default to the cheapest account-supported browser model", ()
   expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: true })).toBe("chatgpt-web/light");
   expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: false })).toBe("chatgpt-web/luna");
   expect(DEV_CHAT_MODELS).toContain("chatgpt-web/think");
+  expect(DEV_CHAT_MODELS).toContain("chatgpt-web/astra");
   expect(defaultDevChatModel({
     ...defaultConfig("full"),
     browserInteractionMode: "manual",

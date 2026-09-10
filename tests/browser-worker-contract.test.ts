@@ -2861,6 +2861,22 @@ test("browser preflight separates model context from one-message transport limit
   );
   expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "medium", plus)).not.toThrow();
   expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "high", plus)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(
+    89_999,
+    81_807,
+    "gpt-6-astra",
+    "high",
+    { ...pro, astraAvailable: true },
+  )).not.toThrow();
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    89_999,
+    81_807,
+    "gpt-6-astra",
+    "high",
+    { ...pro, astraAvailable: true },
+    300_000,
+    2,
+  )).toThrow("Bigger Context is unavailable for Astra");
   expect(() => assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "high", plus)).toThrow(
     "90,000-token context window",
   );

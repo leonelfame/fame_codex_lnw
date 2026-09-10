@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import {
   availableChatGptWebModelRoutes,
+  CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+  CHATGPT_WEB_ASTRA_MODEL_ROUTE,
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
@@ -43,6 +45,7 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/high", "high", "high"],
       ["chatgpt-web/extra-high", "xhigh", "xhigh"],
       ["chatgpt-web/pro", "ultra", "max"],
+      ["chatgpt-web/astra", "high", "high"],
     ]);
     expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
   });
@@ -53,12 +56,23 @@ describe("fixed ChatGPT Web model routes", () => {
       "chatgpt-web/medium",
       "chatgpt-web/high",
     ]);
-    expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }))
+    expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true, astraAvailable: true }))
       .toEqual(CHATGPT_WEB_MODEL_ROUTES);
     expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
       .toThrow("Extra High is not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
       .toThrow("Pro is not available for this account");
+  });
+
+  test("adds Astra only when the authenticated browser exposes it", () => {
+    expect(availableChatGptWebModelRoutes({ ...pro, astraAvailable: false }))
+      .not.toContain(CHATGPT_WEB_ASTRA_MODEL_ROUTE);
+    expect(availableChatGptWebModelRoutes({ ...pro, astraAvailable: true }))
+      .toContain(CHATGPT_WEB_ASTRA_MODEL_ROUTE);
+    expect(requireChatGptWebModelRoute("chatgpt-web/astra", { ...pro, astraAvailable: true }).backendModel)
+      .toBe(CHATGPT_WEB_ASTRA_BACKEND_MODEL);
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/astra", { ...pro, astraAvailable: false }))
+      .toThrow("Astra is not available");
   });
 
   test("exposes Luna and Think when the authenticated account has no Sol selector", () => {

@@ -22,6 +22,7 @@ import {
   type ChatGptMarkdownSegment,
 } from "./markdown";
 import {
+  CHATGPT_WEB_ASTRA_MODEL_ID,
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
   resolveChatGptWebModelMode,
@@ -830,7 +831,9 @@ export function assertChatGptWebInputWithinLimits(
   capabilities: ChatGptWebCapabilities,
   promptChars?: number,
 ): void {
-  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
+  if (modelId !== CHATGPT_WEB_MODEL_ID
+    && modelId !== CHATGPT_WEB_ASTRA_MODEL_ID
+    && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error(`ChatGPT web context limit is not defined for model: ${modelId}`);
   }
   if (
@@ -891,6 +894,12 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
       "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  if (modelId === CHATGPT_WEB_ASTRA_MODEL_ID) {
+    throw new ChatGptWebAdapterError(
+      "Bigger Context is unavailable for Astra until its browser message and retained-conversation limits are measured.",
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -970,6 +979,12 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
     throw new ChatGptWebAdapterError(
       "Bigger Context staging is unavailable for a Luna-only account.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  if (modelId === CHATGPT_WEB_ASTRA_MODEL_ID) {
+    throw new ChatGptWebAdapterError(
+      "Bigger Context staging is unavailable for Astra until its browser transport limits are measured.",
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -2361,11 +2376,44 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
-    const activation = await activateChatGptEffortMenu(page, currentEffort);
+    let activation = await activateChatGptEffortMenu(page, currentEffort);
     if (activation.method === "pointerdown") {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
     }
     await captureDiagnostic?.("effort-menu-open-requested");
+    const currentModelLabel = typeof currentEffort.innerText === "function"
+      ? await currentEffort.innerText().catch(() => "")
+      : "";
+    const modelSwitchRequired = mode.baseModel === "astra" || /\bastra\b/i.test(currentModelLabel);
+    if (modelSwitchRequired) {
+      const targetPattern = mode.baseModel === "astra"
+        ? /\b(?:gpt[- ]?6\s*)?astra\b/i
+        : /\b(?:gpt[- ]?5\.6(?:\s*sol)?|sol)\b/i;
+      const modelRows = activation.menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
+      const labels = await modelRows.allInnerTexts();
+      const matchingIndexes = labels
+        .map((label, index) => targetPattern.test(label) ? index : -1)
+        .filter(index => index >= 0);
+      if (matchingIndexes.length !== 1) {
+        throw chatGptModelControlUnavailableAdapterError(
+          `ChatGPT model menu did not expose exactly one ${mode.baseModel === "astra" ? "Astra" : "Sol"} row`,
+        );
+      }
+      const targetRow = modelRows.nth(matchingIndexes[0]!);
+      if (await targetRow.getAttribute("aria-checked") !== "true") {
+        await targetRow.click();
+        await settleChatGptUi();
+      }
+      activation = await activateChatGptEffortMenu(page, currentEffort);
+      const selectedRows = activation.menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
+      const selectedLabels = await selectedRows.allInnerTexts();
+      const selectedIndex = selectedLabels.findIndex(label => targetPattern.test(label));
+      if (selectedIndex < 0 || await selectedRows.nth(selectedIndex).getAttribute("aria-checked") !== "true") {
+        throw chatGptModelControlUnavailableAdapterError(
+          `ChatGPT did not confirm the ${mode.baseModel === "astra" ? "Astra" : "Sol"} model selection`,
+        );
+      }
+    }
     const effortSlider = activation.slider;
     const sliderContainer = activation.sliderContainer;
     const waitAbort = new AbortController();

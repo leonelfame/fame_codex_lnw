@@ -26,10 +26,14 @@ test("launcher setup refreshes account capabilities only when missing or explici
     browserHost: "launcher",
     solAvailable: true,
     proAvailable: false,
+    astraAvailable: true,
+    accountCapabilitiesVersion: 1,
   };
 
   expect(launcherCapabilityProbeRequired(undefined)).toBe(true);
   expect(launcherCapabilityProbeRequired(verifiedLauncher as never)).toBe(false);
+  expect(launcherCapabilityProbeRequired({ ...verifiedLauncher, astraAvailable: false } as never)).toBe(false);
+  expect(launcherCapabilityProbeRequired({ ...verifiedLauncher, accountCapabilitiesVersion: 0 } as never)).toBe(true);
   expect(launcherCapabilityProbeRequired({
     browserHost: "launcher",
     proAvailable: false,

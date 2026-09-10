@@ -22,8 +22,8 @@ launcher-owned codex-chatgpt-web daemon
 ### `browser-only`
 
 - Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
-  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
-  the authenticated account exposes Pro.
+  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` and
+  `chatgpt-web/astra` are appended only when the authenticated account exposes those controls.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.

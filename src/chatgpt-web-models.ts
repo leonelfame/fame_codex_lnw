@@ -1,5 +1,6 @@
 export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
 export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
+export const CHATGPT_WEB_ASTRA_BACKEND_MODEL = "gpt-6-astra";
 export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
 /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
 export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
@@ -8,6 +9,7 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL = "chatgpt-web-zero-risk-pr
 
 export type ChatGptWebAutomaticBackendModel =
   | typeof CHATGPT_WEB_BACKEND_MODEL
+  | typeof CHATGPT_WEB_ASTRA_BACKEND_MODEL
   | typeof CHATGPT_WEB_LUNA_BACKEND_MODEL;
 export type ChatGptWebBackendModel =
   | ChatGptWebAutomaticBackendModel
@@ -201,7 +203,7 @@ export function resolveChatGptWebTransportLimits(
  * Bigger Context expands the transaction, never this per-message budget.
  */
 export function resolveChatGptWebMessageTokenBudget(
-  backendModel: typeof CHATGPT_WEB_BACKEND_MODEL,
+  backendModel: ChatGptWebAutomaticBackendModel,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
   imageTokens = 0,
@@ -222,6 +224,7 @@ interface ChatGptWebModelRouteBase {
   description: string;
   codexEffort: ChatGptWebCodexEffort;
   requiresPro: boolean;
+  requiresAstra?: boolean;
 }
 
 export interface ChatGptWebAutomaticModelRoute extends ChatGptWebModelRouteBase {
@@ -242,6 +245,7 @@ export type ChatGptWebModelRoute = ChatGptWebAutomaticModelRoute | ChatGptWebZer
 export interface ChatGptWebAccountCapabilities {
   solAvailable: boolean;
   proAvailable: boolean;
+  astraAvailable?: boolean;
   experimentalBiggerContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
@@ -304,7 +308,7 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
  * effort. Pro uses Codex's `ultra` protocol value but binds explicitly to ChatGPT Pro (`max`) at
  * the adapter boundary.
  */
-export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
+export const CHATGPT_WEB_SOL_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
   {
     slug: "chatgpt-web/light",
     displayName: "ChatGPT Web — Instant",
@@ -357,6 +361,23 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
 ];
 
+export const CHATGPT_WEB_ASTRA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
+  slug: "chatgpt-web/astra",
+  displayName: "ChatGPT Web — Astra",
+  description: "Account-gated GPT-6 Astra through the native Codex harness.",
+  interactionMode: "automatic",
+  backendModel: CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+  codexEffort: "high",
+  adapterEffort: "high",
+  requiresPro: false,
+  requiresAstra: true,
+};
+
+export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
+  ...CHATGPT_WEB_SOL_MODEL_ROUTES,
+  CHATGPT_WEB_ASTRA_MODEL_ROUTE,
+];
+
 const routesBySlug = new Map(
   [
     CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
@@ -383,9 +404,10 @@ export function availableChatGptWebModelRoutes(
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
   if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
-  return capabilities.proAvailable
+  const routes = capabilities.proAvailable
     ? CHATGPT_WEB_MODEL_ROUTES
     : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+  return routes.filter(route => !route.requiresAstra || capabilities.astraAvailable === true);
 }
 
 export function requireChatGptWebModelRoute(
@@ -419,6 +441,9 @@ export function requireChatGptWebModelRoute(
     throw new Error(`${route.displayName} is not available for this Luna-only account`);
   }
   if (route.requiresPro && !capabilities.proAvailable) {
+    throw new Error(`${route.displayName} is not available for this account`);
+  }
+  if (route.requiresAstra && capabilities.astraAvailable !== true) {
     throw new Error(`${route.displayName} is not available for this account`);
   }
   return route;

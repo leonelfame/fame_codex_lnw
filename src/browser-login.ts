@@ -17,6 +17,7 @@ export interface BrowserLoginResult {
   accountSurfaceUrl: string;
   solAvailable: boolean;
   proAvailable: boolean;
+  astraAvailable: boolean;
 }
 
 export type BrowserLoginStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
@@ -44,6 +45,7 @@ interface LoginVerificationMarker {
   verifiedAt: string;
   solAvailable?: boolean;
   proAvailable?: boolean;
+  astraAvailable?: boolean;
 }
 
 const SYSTEM_LOGIN_TIMEOUT_MS = 10 * 60_000;
@@ -181,7 +183,7 @@ export async function inspectBrowserLoginCapabilities(config: AppConfig): Promis
   if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
   const inspected = await inspectStoredState(config, config.storageStatePath);
   writeVerificationMarker(config.storageStatePath, inspected);
-  return { solAvailable: inspected.solAvailable, proAvailable: inspected.proAvailable };
+  return { solAvailable: inspected.solAvailable, proAvailable: inspected.proAvailable, astraAvailable: inspected.astraAvailable === true };
 }
 
 export function storedBrowserLoginCapabilities(
@@ -193,6 +195,7 @@ export function storedBrowserLoginCapabilities(
     return {
       ...(typeof marker.solAvailable === "boolean" ? { solAvailable: marker.solAvailable } : {}),
       ...(typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {}),
+      ...(typeof marker.astraAvailable === "boolean" ? { astraAvailable: marker.astraAvailable } : {}),
     };
   } catch {
     return {};
@@ -427,6 +430,7 @@ export async function loginToChatGpt(
       accountSurfaceUrl: page.url(),
       solAvailable: inspected.solAvailable,
       proAvailable: inspected.proAvailable,
+      astraAvailable: inspected.astraAvailable === true,
     };
   } finally {
     await context.close();
