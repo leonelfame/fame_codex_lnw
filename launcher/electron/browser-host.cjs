@@ -2807,11 +2807,15 @@ class BrowserHost {
       throw new Error("Browser helper returned invalid ChatGPT session evidence");
     }
     if (detectCapabilities
-      && (typeof inspected.solAvailable !== "boolean" || typeof inspected.proAvailable !== "boolean")) {
+      && (typeof inspected.solAvailable !== "boolean" || typeof inspected.proAvailable !== "boolean"
+        || typeof inspected.astraAvailable !== "boolean")) {
       throw new Error("Browser helper returned incomplete ChatGPT capability evidence");
     }
     if (detectCapabilities && inspected.proAvailable && !inspected.solAvailable) {
       throw new Error("Browser helper returned contradictory ChatGPT capability evidence");
+    }
+    if (detectCapabilities && inspected.astraAvailable && !inspected.solAvailable) {
+      throw new Error("Browser helper returned contradictory ChatGPT Astra capability evidence");
     }
     if (startedIdle) await this.returnToIdle();
     return inspected;

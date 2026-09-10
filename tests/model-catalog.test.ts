@@ -52,6 +52,7 @@ describe("native /models augmentation", () => {
     const config = defaultConfig("full");
     config.subagentProtocol = "native";
     config.proAvailable = true;
+    config.astraAvailable = true;
     const result = augmentNativeModelCatalog(native, config);
     const models = result.models as Array<Record<string, unknown>>;
     const originalModels = nativeSnapshot.models as Array<Record<string, unknown>>;
@@ -115,7 +116,7 @@ describe("native /models augmentation", () => {
 
     expect(spawnOverrides).toEqual([
       "gpt-5.6-sol",
-      ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+      ...CHATGPT_WEB_MODEL_ROUTES.slice(1, 5).map(route => route.slug),
     ]);
     expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
   });
@@ -164,7 +165,7 @@ describe("native /models augmentation", () => {
     const models = second.models as Array<Record<string, unknown>>;
     const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
     expect(web.map(model => model.slug)).toEqual(
-      CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro).map(route => route.slug),
+      CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro && !route.requiresAstra).map(route => route.slug),
     );
     expect(web.every(model => model.tool_mode === null)).toBe(true);
     expect(web.every(model => model.multi_agent_version === "v2")).toBe(true);

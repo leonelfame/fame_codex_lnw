@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_WEB_ASTRA_MODEL_ID, CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 
 test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
@@ -54,6 +54,26 @@ test("capabilities gate tools and Pro-only efforts explicitly without changing t
   })).toThrow("effort is not supported");
 });
 
+test("Astra resolves as an explicit account-gated browser model", () => {
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_ASTRA_MODEL_ID, "high", {
+    localToolsEnabled: true,
+    solAvailable: true,
+    proAvailable: true,
+    astraAvailable: true,
+  })).toMatchObject({
+    modelId: CHATGPT_WEB_ASTRA_MODEL_ID,
+    baseModel: "astra",
+    displayLabel: "Astra",
+    uiEffortIndex: 2,
+  });
+  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_ASTRA_MODEL_ID, "high", {
+    localToolsEnabled: true,
+    solAvailable: true,
+    proAvailable: true,
+    astraAvailable: false,
+  })).toThrow("Astra is not available");
+});
+
 test("Luna-only capability binds the default model without a UI effort selector", () => {
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_LUNA_MODEL_ID, "low", {
     localToolsEnabled: true,
@@ -63,6 +83,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
     modelId: CHATGPT_WEB_LUNA_MODEL_ID,
     effort: "low",
     displayLabel: "Luna",
+    baseModel: "luna",
     uiEffortIndex: null,
     thinkEnabled: false,
     localTools: true,
@@ -75,6 +96,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
     modelId: CHATGPT_WEB_LUNA_MODEL_ID,
     effort: "medium",
     displayLabel: "Think",
+    baseModel: "luna",
     uiEffortIndex: null,
     thinkEnabled: true,
     localTools: true,

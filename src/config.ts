@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  CHATGPT_WEB_ASTRA_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
@@ -83,6 +84,8 @@ export interface AppConfig {
   headed: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
+  astraAvailable: boolean;
+  accountCapabilitiesVersion: number;
   experimentalBiggerContext: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -211,6 +214,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     headed: true,
     solAvailable: true,
     proAvailable: false,
+    astraAvailable: false,
+    accountCapabilitiesVersion: 0,
     experimentalBiggerContext: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
@@ -486,6 +491,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
     throw new Error(`Invalid solAvailable in ${path}`);
   }
+  if (parsed.astraAvailable !== undefined && typeof parsed.astraAvailable !== "boolean") {
+    throw new Error(`Invalid astraAvailable in ${path}`);
+  }
+  if (parsed.accountCapabilitiesVersion !== undefined
+    && (!Number.isSafeInteger(parsed.accountCapabilitiesVersion) || parsed.accountCapabilitiesVersion < 0)) {
+    throw new Error(`Invalid accountCapabilitiesVersion in ${path}`);
+  }
   if (parsed.experimentalBiggerContext !== undefined
     && typeof parsed.experimentalBiggerContext !== "boolean") {
     throw new Error(`Invalid experimentalBiggerContext in ${path}`);
@@ -499,6 +511,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
   }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;
+  const astraAvailable = parsed.astraAvailable === true;
+  const accountCapabilitiesVersion = typeof parsed.accountCapabilitiesVersion === "number"
+    ? parsed.accountCapabilitiesVersion
+    : 0;
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
@@ -506,6 +522,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   }
   if (proAvailable && !solAvailable) {
     throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
+  }
+  if (astraAvailable && !solAvailable) {
+    throw new Error(`Invalid ChatGPT account capabilities in ${path}: Astra requires the model selector`);
   }
   return {
     ...parsed,
@@ -516,6 +535,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
     subagentProtocol,
     solAvailable,
     proAvailable,
+    astraAvailable,
+    accountCapabilitiesVersion,
     experimentalBiggerContext,
     zeroRiskProEnabled,
   } as AppConfig;
@@ -537,7 +558,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
       ...(config.zeroRiskProEnabled ? [CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL] : []),
     ]
-    : [model];
+    : [
+      model,
+      ...(config.astraAvailable ? [CHATGPT_WEB_ASTRA_BACKEND_MODEL] : []),
+    ];
   const efforts = manual
     ? ["low"]
     : config.solAvailable
@@ -551,7 +575,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     defaultModel: model,
     contextWindow: config.contextWindow,
     modelInputModalities: Object.fromEntries(models.map(model => [model, manual ? ["text"] : ["text", "image"]])),
-    modelReasoningEfforts: Object.fromEntries(models.map(modelId => [modelId, efforts])),
+    modelReasoningEfforts: Object.fromEntries(models.map(modelId => [
+      modelId,
+      modelId === CHATGPT_WEB_ASTRA_BACKEND_MODEL ? ["high"] : efforts,
+    ])),
     modelDefaultReasoningEfforts: Object.fromEntries(
       models.map(modelId => [modelId, manual ? "low" : config.solAvailable ? "high" : "low"]),
     ),
@@ -570,6 +597,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      astraAvailable: manual ? false : config.astraAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,

@@ -197,6 +197,8 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
     throw new Error("Production launcher refuses a DEV harness configuration");
   }
   if (config.solAvailable === undefined) config = { ...config, solAvailable: true };
+  if (config.astraAvailable === undefined) config = { ...config, astraAvailable: false };
+  if (config.accountCapabilitiesVersion === undefined) config = { ...config, accountCapabilitiesVersion: 0 };
   if (config.browserInteractionMode === undefined) {
     config.browserInteractionMode = "automatic";
   }
@@ -246,7 +248,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   } else if (!absolutePath(config.brokerSocketPath, platform) || windowsPipeEndpoint(config.brokerSocketPath)) {
     throw new Error("Runtime configuration has an invalid Unix broker socket");
   }
-  for (const key of ["headed", "solAvailable", "proAvailable", "autoApproveToolCalls"]) {
+  for (const key of ["headed", "solAvailable", "proAvailable", "astraAvailable", "autoApproveToolCalls"]) {
     if (typeof config[key] !== "boolean") {
       throw new Error(`Runtime configuration has an invalid ${key}`);
     }
@@ -261,6 +263,12 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   }
   if (config.proAvailable && !config.solAvailable) {
     throw new Error("Runtime configuration cannot enable Pro without Sol");
+  }
+  if (!Number.isSafeInteger(config.accountCapabilitiesVersion) || config.accountCapabilitiesVersion < 0) {
+    throw new Error("Runtime configuration has an invalid accountCapabilitiesVersion");
+  }
+  if (config.astraAvailable && !config.solAvailable) {
+    throw new Error("Runtime configuration cannot enable Astra without the model selector");
   }
   if (!Array.isArray(config.runtimeCommand)
     || config.runtimeCommand.length === 0
