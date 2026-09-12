@@ -35,7 +35,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       sessionRefreshReminderAt: null,
     });
     store.update({
-      language: "zh-CN",
+      language: "th",
       onboardingComplete: true,
       keepRunningOnClose: false,
       browserSmokePassed: true,
@@ -43,7 +43,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
     });
     assert.deepEqual(createStateStore(file).read(), {
       version: 1,
-      language: "zh-CN",
+      language: "th",
       onboardingComplete: true,
       githubOpened: false,
       xOpened: false,
@@ -77,12 +77,14 @@ test("sidebar state accepts only bounded native shell dimensions", () => {
   assert.throws(() => validateSidebarState({ open: true, width: 900 }), /between 240 and 420/);
 });
 
-test("Japanese is preserved as a supported persisted launcher language", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-ja-state-"));
+test("legacy launcher languages reset to an unselected language", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fame-codex-legacy-language-state-"));
   const file = path.join(root, "state.json");
   try {
-    fs.writeFileSync(file, JSON.stringify({ version: 1, language: "ja" }));
-    assert.equal(createStateStore(file).read().language, "ja");
+    for (const language of ["zh-CN", "ja"]) {
+      fs.writeFileSync(file, JSON.stringify({ version: 1, language }));
+      assert.equal(createStateStore(file).read().language, null);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -94,7 +96,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
   try {
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
-      language: "zh-CN",
+      language: "th",
       onboardingComplete: "yes",
       autoStart: "yes",
       bridgeEnabled: false,
@@ -108,7 +110,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
     }));
     assert.deepEqual(createStateStore(file).read(), {
       version: 1,
-      language: "zh-CN",
+      language: "th",
       onboardingComplete: false,
       githubOpened: false,
       xOpened: false,

@@ -234,18 +234,11 @@ function Onboarding({
                 onClick={() => setSelectedLanguage("en")}
               />
               <WelcomeOption
-                active={selectedLanguage === "zh-CN"}
-                detail={localized.chinese}
-                label={localized.chinese}
-                marker="简"
-                onClick={() => setSelectedLanguage("zh-CN")}
-              />
-              <WelcomeOption
-                active={selectedLanguage === "ja"}
-                detail={localized.japanese}
-                label={localized.japanese}
-                marker="日"
-                onClick={() => setSelectedLanguage("ja")}
+                active={selectedLanguage === "th"}
+                detail={localized.thai}
+                label={localized.thai}
+                marker="TH"
+                onClick={() => setSelectedLanguage("th")}
               />
             </div>
           ) : (
@@ -2257,8 +2250,7 @@ function LanguageMenu({ copy, language, onChange }: { copy: Copy; language: Lang
   const [open, setOpen] = useState(false);
   const options: Array<{ label: string; value: Language }> = [
     { label: copy.english, value: "en" },
-    { label: copy.chinese, value: "zh-CN" },
-    { label: copy.japanese, value: "ja" },
+    { label: copy.thai, value: "th" },
   ];
   const selected = options.find((option) => option.value === language) ?? options[0];
 
@@ -2514,7 +2506,7 @@ function formatTime(value: string, language: Language): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value
-    : date.toLocaleTimeString(language === "ja" ? "ja-JP" : language === "zh-CN" ? "zh-CN" : "en", {
+    : date.toLocaleTimeString(language === "th" ? "th-TH" : "en", {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
