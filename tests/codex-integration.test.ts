@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -63,6 +63,36 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("explicit reinstall repairs a shifted hook with missing markers and preserves unrelated settings", () => {
+    const { codexHome, appHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const other = '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = "other-hook"\n';
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n' + other);
+    const config = nativeConfig("full");
+    const installed = installCodexIntegration(config);
+    const changed = readFileSync(configPath, "utf8").replace(other, "")
+      .replace(/^#.*interrupt.*\n/gm, "")
+      .replace('timeout = 3', 'timeout=3 # reformatted')
+      + '\n[notice]\nhide_rate_limit_model_nudge = true\n';
+    writeFileSync(configPath, changed);
+    expect(() => installCodexIntegration(config)).toThrow();
+    expect(() => preflightCodexIntegration(config, { replaceExistingRoute: true })).not.toThrow();
+    expect(readFileSync(configPath, "utf8")).toBe(changed);
+    expect(existsSync(join(appHome, "codex", "repair-backups"))).toBe(false);
+    const repaired = installCodexIntegration(config, { replaceExistingRoute: true });
+    const backups = join(appHome, "codex", "repair-backups");
+    const backup = join(backups, readdirSync(backups)[0]!);
+    expect(readFileSync(join(backup, "config.toml"), "utf8")).toBe(changed);
+    expect(JSON.parse(readFileSync(join(backup, "integration-journal.json"), "utf8")).interruptHook).toEqual(installed.interruptHook);
+    expect(repaired.interruptHook.groupIndex).toBe(0);
+    const parsed = Bun.TOML.parse(readFileSync(configPath, "utf8")) as any;
+    expect(parsed.hooks.Interrupt).toHaveLength(1);
+    expect(parsed.hooks.state[installed.interruptHook.stateKey]).toBeUndefined();
+    expect(parsed.notice.hide_rate_limit_model_nudge).toBe(true);
+    expect(inspectCodexIntegration().errors).toEqual([]);
+    uninstallCodexIntegration();
+    expect((Bun.TOML.parse(readFileSync(configPath, "utf8")) as any).notice.hide_rate_limit_model_nudge).toBe(true);
+  });
   test("setup migrates a verified integration journal from the legacy launcher home", () => {
     const { root, codexHome, appHome } = fixture();
     const configPath = join(codexHome, "config.toml");
@@ -769,7 +799,8 @@ describe("reversible native Codex route integration", () => {
     const recovery = readFileSync(getCodexJournalRecoveryPath(), "utf8");
     for (const current of [
       active.replace("timeout = 3", "timeout = 2"),
-      active.replace(/^#.*interrupt.*\n/gm, ""),
+      active.replace(installed.interruptHook.trustedHash, "sha256:" + "0".repeat(64)),
+      active + '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = ' + JSON.stringify(installed.interruptHook.command) + '\ntimeout = 3\n',
       withoutHook + installed.interruptHook.fragment.split("[[hooks.Interrupt]]")[0],
       withoutHook + `\n[hooks.state.${JSON.stringify(installed.interruptHook.stateKey)}]\ntrusted_hash = ${JSON.stringify(installed.interruptHook.trustedHash)}\n`,
       withoutHook + '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = "user-modified-hook"\n',

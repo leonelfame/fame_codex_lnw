@@ -99,7 +99,7 @@ try {
   }
   if (!health?.ok) throw new Error("relocated daemon did not become healthy");
   const payload = await health.json() as Record<string, unknown>;
-  if (payload.service !== "codex-chatgpt-web" || payload.mode !== "browser-only") {
+  if (payload.service !== "fame-codex" || payload.mode !== "browser-only") {
     throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
   }
 
