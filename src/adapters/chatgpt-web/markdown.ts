@@ -186,6 +186,11 @@ export class ChatGptMarkdownConsistencyError extends Error {
 export class ChatGptMarkdownBuffer {
   private readonly candidates = new Map<string, ChatGptMarkdownCandidate>();
   private readonly committed: CommittedChatGptMarkdownSegment[] = [];
+  private readonly committedBySource = new Map<string | undefined, Map<number, number>>();
+  private readonly committedByKey = new Map<string, number>();
+  private readonly unrangedCommittedByKey = new Map<string, number>();
+  private readonly committedByText = new Map<string, Map<string, number | null>>();
+  private lastRangedCommitted: CommittedChatGptMarkdownSegment | undefined;
   private latest: ChatGptMarkdownSegment[] = [];
   private markdown = "";
   private lastGroup: string | undefined;
@@ -245,7 +250,7 @@ export class ChatGptMarkdownBuffer {
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
       delta += this.commit(candidate);
-      this.committed.push(this.committedSegment(candidate));
+      this.recordCommitted(candidate);
       this.candidates.delete(candidateId);
       committedCount += 1;
     }
@@ -258,7 +263,7 @@ export class ChatGptMarkdownBuffer {
     let delta = "";
     for (const segment of this.latest) {
       delta += this.commit(segment);
-      this.committed.push(this.committedSegment(segment));
+      this.recordCommitted(segment);
     }
     this.candidates.clear();
     this.latest = [];
@@ -275,9 +280,7 @@ export class ChatGptMarkdownBuffer {
     if (this.committed.length === 0 || segments.length === 0) return segments;
 
     const pending: ChatGptMarkdownSegment[] = [];
-    const lastRangedCommitted = this.committed
-      .filter(segment => segment.sourceEnd !== undefined)
-      .at(-1);
+    const lastRangedCommitted = this.lastRangedCommitted;
     const lastCommittedEnd = lastRangedCommitted?.sourceEnd;
     let highestCommittedIndex = -1;
     let sawPending = false;
@@ -329,19 +332,42 @@ export class ChatGptMarkdownBuffer {
   }
 
   private committedIndex(segment: ChatGptMarkdownSegment): number | undefined {
-    const exact = this.committed.findIndex(committed => (
-      segment.sourceStart !== undefined && committed.sourceStart !== undefined
-        ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
-        : segment.key === committed.key
-    ));
-    if (exact >= 0) return exact;
-
-    if (segment.sourceStart !== undefined) return undefined;
+    if (segment.sourceStart !== undefined) {
+      // A ranged observation can match an earlier unranged key OR a ranged identity.
+      // Preserve findIndex's earliest-match rule when both exist.
+      const ranged = Number.isNaN(segment.sourceStart)
+        ? undefined
+        : this.committedBySource.get(segment.tag)?.get(segment.sourceStart);
+      const unranged = this.unrangedCommittedByKey.get(segment.key);
+      if (ranged === undefined) return unranged;
+      return unranged === undefined ? ranged : Math.min(ranged, unranged);
+    }
+    const exact = this.committedByKey.get(segment.key);
+    if (exact !== undefined) return exact;
     if (!segment.tag) return undefined;
-    const semanticMatches = this.committed
-      .map((committed, index) => ({ committed, index }))
-      .filter(({ committed }) => committed.tag === segment.tag && committed.text === segment.text);
-    return semanticMatches.length === 1 ? semanticMatches[0]!.index : undefined;
+    return this.committedByText.get(segment.tag)?.get(segment.text) ?? undefined;
+  }
+
+  private recordCommitted(segment: ChatGptMarkdownSegment): void {
+    const committed = this.committedSegment(segment);
+    const index = this.committed.length;
+    this.committed.push(committed);
+    if (!this.committedByKey.has(committed.key)) this.committedByKey.set(committed.key, index);
+    if (committed.sourceStart === undefined) {
+      if (!this.unrangedCommittedByKey.has(committed.key)) this.unrangedCommittedByKey.set(committed.key, index);
+    } else {
+      // Group by tag so a long answer does not allocate a separate Map for every block.
+      let sources = this.committedBySource.get(committed.tag);
+      if (!sources) this.committedBySource.set(committed.tag, sources = new Map());
+      if (!sources.has(committed.sourceStart)) sources.set(committed.sourceStart, index);
+    }
+    if (committed.tag) {
+      let texts = this.committedByText.get(committed.tag);
+      if (!texts) this.committedByText.set(committed.tag, texts = new Map());
+      // null means ambiguous: identical prose at two positions must never bind arbitrarily.
+      texts.set(committed.text, texts.has(committed.text) ? null : index);
+    }
+    if (committed.sourceEnd !== undefined) this.lastRangedCommitted = committed;
   }
 
   private matchesLatestPending(segment: ChatGptMarkdownSegment): boolean {

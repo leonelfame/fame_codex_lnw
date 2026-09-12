@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web",
-  "version": "5.0.8",
+  "version": "5.0.9",
   "private": true,
   "description": "Fame Codex desktop bridge for running Codex tasks through a user-authenticated ChatGPT web session.",
   "author": "Leonelfame (Fame Codex)",
