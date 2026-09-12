@@ -51,7 +51,7 @@ export interface InstalledCodexInterruptHook {
 }
 
 export interface CodexIntegrationJournal {
-  version: 10;
+  version: 11;
   active: boolean;
   configPath: string;
   installed: {
@@ -59,7 +59,10 @@ export interface CodexIntegrationJournal {
     experimental_realtime_webrtc_call_base_url: string;
     subagent_protocol: SubagentProtocol;
     agent_max_depth?: number;
+    model_catalog_json: string;
   };
+  catalogPath: string;
+  catalogSha256: string;
   previous: Record<ManagedAssignmentKey, PreviousAssignment>;
   previousRealtimeWebrtcCallBaseUrl: PreviousAssignment;
   interruptHook: InstalledCodexInterruptHook;
@@ -70,6 +73,11 @@ export interface CodexIntegrationJournal {
     lineEnding: "\n" | "\r\n" | "\r";
     trailingNewline: boolean;
   };
+}
+
+export interface LegacyCodexIntegrationJournalV10 extends Omit<CodexIntegrationJournal, "version" | "catalogPath" | "catalogSha256" | "installed"> {
+  version: 10;
+  installed: Omit<CodexIntegrationJournal["installed"], "model_catalog_json">;
 }
 
 export interface LegacyCodexIntegrationJournalV9 {
@@ -209,6 +217,7 @@ export interface LegacyCodexIntegrationJournal {
 
 export type ManagedRouteJournal =
   | CodexIntegrationJournal
+  | LegacyCodexIntegrationJournalV10
   | LegacyCodexIntegrationJournalV9
   | LegacyCodexIntegrationJournalV8
   | LegacyCodexIntegrationJournalV7
@@ -227,6 +236,7 @@ export interface FileSnapshot {
 
 export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
+  sourceCatalogPath?: string;
 }
 
 export interface UninstallCodexIntegrationResult {
@@ -253,6 +263,10 @@ export function getCodexConfigPath(): string {
 
 export function getCodexModelsCachePath(): string {
   return join(getCodexHome(), "models_cache.json");
+}
+
+export function getManagedCatalogPath(): string {
+  return join(getConfigDir(), "codex", "model-catalog.json");
 }
 
 export function getCodexJournalPath(): string {
@@ -351,12 +365,14 @@ export function writeIntegrationState(
   journal: AnyCodexIntegrationJournal,
   configWrite?: { path: string; data: string },
   removals: string[] = [],
+  additionalWrites: Array<{ path: string; data: string | Uint8Array }> = [],
 ): void {
   const data = serializeJournal(journal);
   // The recovery copy records intent and the primary copy records commit. If the process stops
   // between those writes, the physical config unambiguously selects the completed state.
   writeFilesWithCompensation([
     { path: getCodexJournalRecoveryPath(), data },
+    ...additionalWrites,
     ...(configWrite ? [{ ...configWrite, followSymlink: true }] : []),
     { path: getCodexJournalPath(), data },
   ], removals);
