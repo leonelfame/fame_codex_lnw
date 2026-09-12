@@ -48,6 +48,47 @@ test("trusts the canonical Codex config path before a new config file exists", (
   }
 });
 
+test("explicit repair accepts formatting, missing comments, reordered groups and legacy markers", () => {
+  const original = 'model = "gpt-5.6-sol"\n';
+  const installed = installCodexInterruptHook(original, "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const other = '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = "other"\n';
+  const notice = '\n[notice]\nhide_rate_limit_model_nudge = true\n';
+  for (const text of [
+    installed.text.replace(MANAGED_INTERRUPT_HOOK_END, ""),
+    installed.text.replace(/^#.*interrupt.*\n?/gm, ""),
+    installed.text.replace('timeout = 3', 'timeout=3 # unchanged'),
+    original + other + installed.installed.fragment,
+    installed.text + other,
+    installed.text.replaceAll("codex-chatgpt-web:", "fame-codex-gpt:").replace("End codex-chatgpt-web", "End fame-codex-gpt"),
+  ]) {
+    const journal = text.includes("fame-codex-gpt:") ? {
+      ...installed.installed,
+      fragment: installed.installed.fragment.replaceAll("codex-chatgpt-web:", "fame-codex-gpt:").replace("End codex-chatgpt-web", "End fame-codex-gpt"),
+    } : installed.installed;
+    const repaired = restoreCodexInterruptHook(text + notice, journal, { repairUnchanged: true });
+    const parsed = Bun.TOML.parse(repaired) as any;
+    expect(parsed.model).toBe("gpt-5.6-sol");
+    expect(parsed.notice.hide_rate_limit_model_nudge).toBe(true);
+    expect(parsed.hooks?.Interrupt?.flatMap((group: any) => group.hooks).map((hook: any) => hook.command) ?? []).toEqual(text.includes('command = "other"') ? ["other"] : []);
+    expect(repaired).not.toContain("interrupt lifecycle hook.");
+  }
+});
+
+test("explicit repair rejects command changes, added behavior, ambiguous identity and trust collisions", () => {
+  const installed = installCodexInterruptHook('model = "gpt-5.6-sol"\n', "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const changed = installed.text.replace(MANAGED_INTERRUPT_HOOK_END, "");
+  for (const text of [
+    changed.replace("/opt/runtime", "/opt/changed"),
+    changed.replace("timeout = 3", "timeout = 2"),
+    changed.replace("timeout = 3", "timeout = 3\nasync = true"),
+    changed.replace(installed.installed.trustedHash, "sha256:" + "0".repeat(64)),
+    changed + '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = ' + JSON.stringify(installed.installed.command) + '\ntimeout = 3\n',
+    changed + '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = "other"\n' + `[hooks.state.${JSON.stringify(installed.installed.stateKey.replace(":interrupt:0:0", ":interrupt:1:0"))}]\ntrusted_hash = "other"\n`,
+  ]) {
+    expect(() => restoreCodexInterruptHook(text, installed.installed, { repairUnchanged: true })).toThrow();
+  }
+});
+
 test("Interrupt hook command is absolute, quoted, and bound to the exact application home", () => {
   expect(codexInterruptHookCommand(
     { runtimeCommand: ["/Applications/Codex Web GPT.app/runtime/bun", "/Applications/Codex Web GPT.app/app/cli.js"] },
@@ -62,9 +103,13 @@ test("Interrupt hook command is absolute, quoted, and bound to the exact applica
     "C:\\Users\\test\\Codex Web GPT",
     "win32",
   )).toBe(
-    '"C:\\Program Files\\Codex Web GPT\\bun.exe" "C:\\Program Files\\Codex Web GPT\\cli.js"'
-      + ' "--home" "C:\\Users\\test\\Codex Web GPT" "hook" "interrupt"',
+    "& 'C:\\Program Files\\Codex Web GPT\\bun.exe' 'C:\\Program Files\\Codex Web GPT\\cli.js'"
+      + " '--home' 'C:\\Users\\test\\Codex Web GPT' 'hook' 'interrupt'",
   );
+  expect(codexInterruptHookCommand(
+    { runtimeCommand: ["C:\\User's Files\\$runtime\\bun.exe"] },
+    "C:\\User's Files\\app", "win32",
+  )).toBe("& 'C:\\User''s Files\\$runtime\\bun.exe' '--home' 'C:\\User''s Files\\app' 'hook' 'interrupt'");
 });
 
 test("Interrupt hook trust hash is deterministic and changes with its exact command", () => {

@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
 import {
@@ -302,6 +302,16 @@ export function installCodexIntegration(
       } : {}),
       ...(existing.format ? { format: existing.format } : {}),
     };
+    if (!preservePrevious && existing.version === 10 && configExists) {
+      // Keep a durable pre-repair snapshot as well as the transaction's rollback snapshots.
+      const backupRoot = join(dirname(getCodexJournalPath()), "repair-backups");
+      mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+      const backup = mkdtempSync(join(backupRoot, "reinstall-"));
+      writeFileSync(join(backup, "config.toml"), currentText, { flag: "wx", mode: 0o600 });
+      for (const path of [getCodexJournalPath(), getCodexJournalRecoveryPath()]) {
+        if (existsSync(path)) writeFileSync(join(backup, basename(path)), readFileSync(path), { flag: "wx", mode: 0o600 });
+      }
+    }
     writeIntegrationState(updated, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
     return updated;
   }

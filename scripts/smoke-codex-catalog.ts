@@ -32,6 +32,7 @@ process.env.CODEX_CHATGPT_WEB_HOME = join(root, "app");
 mkdirSync(process.env.CODEX_HOME, { recursive: true });
 const config = defaultConfig("browser-only");
 config.proAvailable = true;
+config.astraAvailable = true;
 config.subagentProtocol = "compatibility-v1";
 const catalogPath = join(root, "augmented-models.json");
 writeFileSync(catalogPath, `${JSON.stringify(augmentNativeModelCatalog(sourceCatalog, config))}\n`);
@@ -85,8 +86,10 @@ try {
     .slice(0, 5)
     .map(model => model.slug);
   const expectedSpawnOverrides = [
-    "gpt-5.6-sol",
-    ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+    (sourceCatalog.models as Array<{ slug: string; supported_in_api?: boolean; visibility?: string; priority?: number }>)
+      .filter(model => model.supported_in_api === true && model.visibility === "list")
+      .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))[0]?.slug,
+    ...CHATGPT_WEB_MODEL_ROUTES.slice(1, 5).map(route => route.slug),
   ];
   if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {
     throw new Error(`Codex did not preserve the bounded V1 subagent roster: ${JSON.stringify(spawnOverrides)}`);

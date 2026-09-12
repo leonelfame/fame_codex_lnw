@@ -38,13 +38,13 @@ function posixShellArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function cmdShellArgument(value: string): string {
+function powerShellArgument(value: string): string {
   if (value.includes('"') || /[\r\n]/.test(value)) {
     throw new Error("Codex interrupt hook command contains an invalid Windows path character");
   }
-  // Codex executes command hooks through cmd.exe /C on Windows. Quoting every argument preserves
-  // spaces and shell metacharacters in the installed runtime path.
-  return `"${value}"`;
+  // Native Codex uses PowerShell on Windows. Single quotes prevent interpolation, and doubling
+  // embedded apostrophes preserves literal paths. The caller supplies PowerShell's call operator.
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 export function codexInterruptHookCommand(
@@ -54,7 +54,8 @@ export function codexInterruptHookCommand(
 ): string {
   const absoluteHome = platform === "win32" ? win32.resolve(home) : posix.resolve(home);
   const args = [...config.runtimeCommand, "--home", absoluteHome, "hook", "interrupt"];
-  return args.map(platform === "win32" ? cmdShellArgument : posixShellArgument).join(" ");
+  return (platform === "win32" ? "& " : "")
+    + args.map(platform === "win32" ? powerShellArgument : posixShellArgument).join(" ");
 }
 
 function lineEnding(text: string): "\n" | "\r\n" | "\r" {
@@ -186,6 +187,12 @@ function hookTextPattern(text: string): string {
 function locateCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): Array<{
   start: number; end: number;
 }> {
+  const parsed = Bun.TOML.parse(text.replace(/\r\n?/g, "\n")) as { hooks?: { Interrupt?: Array<{ hooks?: Array<{ command?: string }> }> } };
+  const matchingCommands = parsed.hooks?.Interrupt?.flatMap(group => group.hooks ?? [])
+    .filter(hook => hook.command === installed.command).length ?? 0;
+  if (matchingCommands > 1) {
+    throw new Error("Codex interrupt lifecycle hook has duplicate commands; refusing to overwrite it");
+  }
   const marker = installed.fragment.indexOf(MANAGED_INTERRUPT_HOOK_END);
   if (marker < 0) throw new Error("Codex interrupt lifecycle hook journal fragment is invalid");
   const ownedPrefix = installed.fragment.slice(0, marker);
@@ -259,10 +266,85 @@ export function verifyCodexInterruptHook(text: string, installed: InstalledCodex
   locateCodexInterruptHook(text, installed);
 }
 
+/** Explicit reinstall only: remove semantically unchanged definitions, preserving all other TOML. */
+function restoreSemanticallyVerifiedHook(text: string, installed: InstalledCodexInterruptHook): string {
+  const refuse = (detail: string): never => {
+    throw new Error(`Codex interrupt lifecycle hook cannot be repaired: ${detail}; compare config.toml with the integration journal before reinstalling`);
+  };
+  const same = (a: unknown, b: unknown) => JSON.stringify(canonicalJson(a)) === JSON.stringify(canonicalJson(b));
+  type HookDocument = { hooks?: { Interrupt?: Array<{ hooks?: Array<{ command?: string }> }>; state?: Record<string, unknown> } };
+  const expected = Bun.TOML.parse(installed.fragment) as HookDocument;
+  const actual = Bun.TOML.parse(text) as HookDocument;
+  if (codexInterruptHookHash(installed.command) !== installed.trustedHash
+    || expected.hooks?.Interrupt?.length !== 1
+    || !same(expected.hooks.Interrupt[0], { hooks: [{ type: "command", command: installed.command, timeout: 3 }] })
+    || !installed.stateKey.endsWith(`:interrupt:${installed.groupIndex}:0`)
+    || !same(expected.hooks.state?.[installed.stateKey], { trusted_hash: installed.trustedHash })) {
+    return refuse("journal identity or trusted hash is invalid");
+  }
+  const groups = actual.hooks?.Interrupt;
+  if (!Array.isArray(groups)) return refuse("managed hook is missing or invalid");
+  const candidates = groups.flatMap((group, index) =>
+    group.hooks?.some(hook => hook.command === installed.command) ? [index] : []);
+  if (candidates.length !== 1) return refuse("expected exactly one hook with the installed command");
+  const index = candidates[0]!;
+  if (!same(groups[index], expected.hooks.Interrupt[0])) return refuse("hook settings changed");
+  if (!same(actual.hooks?.state?.[installed.stateKey], expected.hooks.state?.[installed.stateKey])) {
+    return refuse("trusted hash or trust settings changed");
+  }
+  const nextStateKey = installed.stateKey.replace(/:interrupt:\d+:0$/, `:interrupt:${groups.length - 1}:0`);
+  if (nextStateKey !== installed.stateKey && Object.hasOwn(actual.hooks?.state ?? {}, nextStateKey)) {
+    return refuse("the new hook position already has unrelated trust settings");
+  }
+
+  // Locate conservative table spans, then prove the complete parsed document lost only our fields.
+  // Unusual TOML layouts fail closed if they cannot be removed without touching other definitions.
+  const headers = [...text.matchAll(/^[ \t]*(\[.+\])[ \t]*(?:#.*)?\r?$/gm)];
+  const ranges: Array<{ start: number; end: number }> = [];
+  let groupIndex = -1;
+  let inGroup = false;
+  for (let i = 0; i < headers.length; i++) {
+    const header = headers[i]!;
+    const name = header[1]!;
+    if (/^\[\[hooks\.Interrupt\]\]$/.test(name)) {
+      groupIndex++;
+      inGroup = groupIndex === index;
+    } else if (!/^\[\[?hooks\.Interrupt\./.test(name)) {
+      inGroup = false;
+    }
+    let ownedState = false;
+    if (name.startsWith("[hooks.state.")) {
+      try {
+        const table = Bun.TOML.parse(name) as HookDocument;
+        ownedState = Object.hasOwn(table.hooks?.state ?? {}, installed.stateKey);
+      } catch { /* The final semantic comparison rejects unsupported table layouts. */ }
+    }
+    if (inGroup || ownedState) ranges.push({ start: header.index!, end: headers[i + 1]?.index ?? text.length });
+  }
+  let result = text;
+  for (const range of ranges.reverse()) result = result.slice(0, range.start) + result.slice(range.end);
+  const markers = installed.fragment.split(/\r\n|\n|\r/).filter(line => /^# (Managed by .+: release the exact Responses request|End .+ interrupt lifecycle hook\.)/.test(line));
+  for (const marker of markers) {
+    result = result.replace(new RegExp(`^[ \\t]*${hookTextPattern(marker)}[ \\t]*(?:\\r?\\n|$)`, "gm"), "");
+  }
+  groups.splice(index, 1);
+  delete actual.hooks!.state![installed.stateKey];
+  const normalize = (doc: HookDocument) => {
+    if (doc.hooks?.Interrupt?.length === 0) delete doc.hooks.Interrupt;
+    if (doc.hooks?.state && Object.keys(doc.hooks.state).length === 0) delete doc.hooks.state;
+    if (doc.hooks && Object.keys(doc.hooks).length === 0) delete doc.hooks;
+    return doc;
+  };
+  if (!same(normalize(actual), normalize(Bun.TOML.parse(result) as HookDocument))) {
+    return refuse("table layout cannot be safely repaired without changing unrelated settings");
+  }
+  return result;
+}
+
 export function restoreCodexInterruptHook(
   text: string,
   installed: InstalledCodexInterruptHook,
-  options: { allowAbsent?: boolean } = {},
+  options: { allowAbsent?: boolean; repairUnchanged?: boolean } = {},
 ): string {
   // Explicit Setup can reinstall a fully removed hook. A stale journal alone does not mean
   // there is still a definition to remove; partial edits must retain the strict checks below.
@@ -275,7 +357,13 @@ export function restoreCodexInterruptHook(
         && !Object.hasOwn(state, installed.stateKey))) return text;
     }
   }
-  const owned = locateCodexInterruptHook(text, installed).sort((left, right) => right.start - left.start);
+  let owned: Array<{ start: number; end: number }>;
+  try {
+    owned = locateCodexInterruptHook(text, installed).sort((left, right) => right.start - left.start);
+  } catch (error) {
+    if (!options.repairUnchanged) throw error;
+    return restoreSemanticallyVerifiedHook(text, installed);
+  }
   for (const range of owned) text = text.slice(0, range.start) + text.slice(range.end);
   return text;
 }
