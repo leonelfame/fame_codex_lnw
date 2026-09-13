@@ -135,6 +135,36 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
+export const CHATGPT_RESPONSE_CRITICAL_POLL_MS = 250;
+export const CHATGPT_RESPONSE_STREAMING_POLL_MS = 400;
+export const CHATGPT_RESPONSE_LONG_STREAMING_POLL_MS = 500;
+const CHATGPT_LONG_STREAMING_RESPONSE_CHARS = 16_000;
+
+export function chatGptResponsePollIntervalMs({
+  responsePresent,
+  running,
+  completionActionVisible,
+  externalToolCallsInFlight,
+  visibleTextChars,
+}: {
+  responsePresent: boolean;
+  running: boolean;
+  completionActionVisible: boolean;
+  externalToolCallsInFlight: boolean;
+  visibleTextChars: number;
+}): number {
+  // Preserve the established cadence while acquiring the answer and around completion/tool
+  // boundaries. Only an ordinary, visibly streaming answer can trade a small display delay for
+  // fewer cross-process DOM projections; long answers get the largest bounded reduction.
+  if (!responsePresent
+    || !running
+    || completionActionVisible
+    || externalToolCallsInFlight
+    || visibleTextChars === 0) return CHATGPT_RESPONSE_CRITICAL_POLL_MS;
+  return visibleTextChars >= CHATGPT_LONG_STREAMING_RESPONSE_CHARS
+    ? CHATGPT_RESPONSE_LONG_STREAMING_POLL_MS
+    : CHATGPT_RESPONSE_STREAMING_POLL_MS;
+}
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
@@ -5036,7 +5066,13 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        await new Promise(resolveSleep => setTimeout(resolveSleep, chatGptResponsePollIntervalMs({
+          responsePresent: snapshot.responsePresent,
+          running,
+          completionActionVisible: snapshot.completionActionVisible,
+          externalToolCallsInFlight,
+          visibleTextChars: snapshot.visibleText.length,
+        })));
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
