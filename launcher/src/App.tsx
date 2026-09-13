@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -24,6 +25,7 @@ import type {
 } from "./types";
 
 const api = window.codexWebLauncher;
+const galaxyMark = new URL("./assets/astra-nebula-f.png", import.meta.url).href;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
 const MCP_GUIDE_MEDIA = [
@@ -1741,6 +1743,7 @@ function ContentSurface({
           {eyebrow ? <span>{eyebrow}</span> : null}
           <h1>{title}</h1>
           {subtitle ? <p>{subtitle}</p> : null}
+          <div className="surface-brand-art" aria-hidden="true"><BrandMark /></div>
         </header>
         {children}
       </div>
@@ -2312,12 +2315,20 @@ function ActionDot({ pulse = false, tone }: { pulse?: boolean; tone: "required" 
 }
 
 function BrandMark({ small = false }: { small?: boolean }) {
+  const matteId = useId();
   return (
     <span className={`brand-mark${small ? " is-small" : ""}`}>
-      <svg aria-hidden="true" viewBox="0 0 24 24">
-        <rect height="22" rx="7" width="22" x="1" y="1" />
-        <path d="M8 6.5h9v3H11v2h5v3h-5v4H8z" fill="currentColor" />
-        <path d="M17.5 5.5 19 7l-1.5 1.5L16 7z" fill="currentColor" />
+      <svg aria-hidden="true" viewBox="330 110 790 820">
+        <defs>
+          {/* Remove the draft's dark navy matte while retaining the original artwork. */}
+          <filter id={matteId} colorInterpolationFilters="sRGB">
+            <feColorMatrix type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 4 0 -0.65" />
+          </filter>
+        </defs>
+        {/* Crop the approved nebula F, excluding the heading and small wordmark. */}
+        <svg x="330" y="110" width="790" height="820" viewBox="330 110 790 820" filter={`url(#${matteId})`}>
+          <image href={galaxyMark} width="1374" height="1145" />
+        </svg>
       </svg>
     </span>
   );
