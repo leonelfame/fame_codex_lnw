@@ -6,6 +6,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_RESPONSE_CRITICAL_POLL_MS, CHATGPT_RESPONSE_LONG_STREAMING_POLL_MS, CHATGPT_RESPONSE_STREAMING_POLL_MS, chatGptResponsePollIntervalMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -16,6 +17,43 @@ import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGpt
 import { estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
+
+test("response polling relaxes only during ordinary active streaming", () => {
+  const ordinaryStreaming = {
+    responsePresent: true,
+    running: true,
+    completionActionVisible: false,
+    externalToolCallsInFlight: false,
+    visibleTextChars: 1_000,
+  };
+
+  expect(chatGptResponsePollIntervalMs(ordinaryStreaming)).toBe(CHATGPT_RESPONSE_STREAMING_POLL_MS);
+  expect(chatGptResponsePollIntervalMs({
+    ...ordinaryStreaming,
+    visibleTextChars: 16_000,
+  })).toBe(CHATGPT_RESPONSE_LONG_STREAMING_POLL_MS);
+});
+
+test("response polling preserves the critical cadence around turn boundaries and tools", () => {
+  const ordinaryStreaming = {
+    responsePresent: true,
+    running: true,
+    completionActionVisible: false,
+    externalToolCallsInFlight: false,
+    visibleTextChars: 1_000,
+  };
+
+  expect(chatGptResponsePollIntervalMs({ ...ordinaryStreaming, responsePresent: false }))
+    .toBe(CHATGPT_RESPONSE_CRITICAL_POLL_MS);
+  expect(chatGptResponsePollIntervalMs({ ...ordinaryStreaming, visibleTextChars: 0 }))
+    .toBe(CHATGPT_RESPONSE_CRITICAL_POLL_MS);
+  expect(chatGptResponsePollIntervalMs({ ...ordinaryStreaming, running: false }))
+    .toBe(CHATGPT_RESPONSE_CRITICAL_POLL_MS);
+  expect(chatGptResponsePollIntervalMs({ ...ordinaryStreaming, completionActionVisible: true }))
+    .toBe(CHATGPT_RESPONSE_CRITICAL_POLL_MS);
+  expect(chatGptResponsePollIntervalMs({ ...ordinaryStreaming, externalToolCallsInFlight: true }))
+    .toBe(CHATGPT_RESPONSE_CRITICAL_POLL_MS);
+});
 
 function personalizedTemporaryChatRole(
   _role: string,
