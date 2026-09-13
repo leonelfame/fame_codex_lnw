@@ -619,6 +619,30 @@ function registerIpc({ logger, stateStore }) {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
     return runtimeHost.cancelActiveTurns();
   });
+  handle("launcher:bridge-status", () => {
+    if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex bridge route");
+    return runtimeHost.bridgeStatus();
+  });
+  handle("launcher:bridge-active", async (_event, active) => {
+    if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex bridge route");
+    if (typeof active !== "boolean") throw new Error("Codex bridge state must be a boolean");
+    let route;
+    if (active === true) {
+      const runtime = await runtimeSupervisor.startIfConfigured();
+      if (runtime.status !== "ready") {
+        throw new Error(runtime.detail || "Fame Codex runtime is not ready");
+      }
+      route = await runtimeHost.connectBridgeRoute();
+    } else {
+      route = await runtimeHost.restoreBridgeRoute("bridge-sleep");
+    }
+    const state = stateStore.update({
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
+    return { route, state };
+  });
   handle("launcher:uninstall-integration", async () => {
     if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex integration to remove");
     const copy = nativeCopyFor(stateStore.read().language);
@@ -1114,7 +1138,11 @@ async function start() {
     }
   } else void (async () => {
     await startupAuthenticationRefresh;
+    const startupBridgeRoute = await runtimeHost.bridgeStatus("startup-bridge-status");
     const upgrade = await runtimeHost.upgradeManagedRuntime();
+    if (upgrade.updated && startupBridgeRoute.installed && !startupBridgeRoute.active) {
+      await runtimeHost.restoreBridgeRoute("startup-sleep-restore");
+    }
     if (upgrade.updated) {
       const state = stateStore.update({
         coreSetupComplete: true,
@@ -1153,8 +1181,7 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    return { ...runtime, bridgeRouteChanged: false };
   })().then(async (runtime) => {
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();

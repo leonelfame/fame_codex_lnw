@@ -244,11 +244,11 @@ test("saved ChatGPT authentication is refreshed before setup is presented", () =
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
-  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
+  const routeStatus = electronMain.indexOf('runtimeHost.bridgeStatus("startup-bridge-status")', refreshBarrier);
   assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
-  assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
+  assert.ok(routeStatus > refreshBarrier, "Codex route status must be read after saved-session refresh");
+  assert.ok(upgrade > routeStatus, "runtime upgrade must preserve the route state observed at startup");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
-  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 
@@ -259,4 +259,26 @@ test("completed model setup remains a repeatable capability probe", () => {
     electronMain,
     /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
   );
+});
+
+test("Sleep mode restores and reconnects only the managed Codex route", () => {
+  assert.match(preloadSource, /bridgeStatus:\s*\(\) => ipcRenderer\.invoke\("launcher:bridge-status"\)/);
+  assert.match(preloadSource, /setBridgeActive:\s*\(active\) => ipcRenderer\.invoke\("launcher:bridge-active", active\)/);
+  assert.match(electronMain, /handle\("launcher:bridge-status"[\s\S]*?runtimeHost\.bridgeStatus\(\)/);
+  assert.match(
+    electronMain,
+    /handle\("launcher:bridge-active"[\s\S]*?active === true[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?runtimeHost\.connectBridgeRoute\(\)[\s\S]*?runtimeHost\.restoreBridgeRoute\("bridge-sleep"\)/,
+  );
+  assert.match(appSource, /copy\.sleepMode/);
+  assert.match(appSource, /checked=\{bridgeRoute\?\.installed === true && bridgeRoute\.active === false\}/);
+  assert.match(appSource, /api!\.setBridgeActive\(!enabled\)/);
+});
+
+test("normal launcher startup preserves an intentional Sleep mode route", () => {
+  const startupStart = electronMain.indexOf("const startupBridgeRoute");
+  const startupEnd = electronMain.indexOf("})().then(async (runtime)", startupStart);
+  const startup = electronMain.slice(startupStart, startupEnd);
+  assert.match(startup, /runtimeHost\.bridgeStatus\("startup-bridge-status"\)/);
+  assert.doesNotMatch(startup, /runtimeHost\.connectBridgeRoute\(\)/);
+  assert.match(startup, /upgrade\.updated && startupBridgeRoute\.installed && !startupBridgeRoute\.active[\s\S]*?restoreBridgeRoute\("startup-sleep-restore"\)/);
 });

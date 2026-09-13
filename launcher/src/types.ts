@@ -80,6 +80,13 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+export interface BridgeRouteState {
+  installed: boolean;
+  active: boolean;
+  changed?: boolean;
+  errors?: string[];
+}
+
 export interface OperationState {
   name: string;
   status: "running" | "completed" | "failed";
@@ -144,6 +151,8 @@ export interface LauncherApi {
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
+  bridgeStatus(): Promise<BridgeRouteState>;
+  setBridgeActive(active: boolean): Promise<{ route: BridgeRouteState; state: LauncherState }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   setupMcp(input: {
