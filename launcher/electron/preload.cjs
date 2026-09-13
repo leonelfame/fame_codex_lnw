@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   verifyMcp: () => ipcRenderer.invoke("launcher:mcp-verify"),
   doctor: () => ipcRenderer.invoke("launcher:doctor"),
   cancelTurns: () => ipcRenderer.invoke("launcher:cancel-turns"),
+  bridgeStatus: () => ipcRenderer.invoke("launcher:bridge-status"),
+  setBridgeActive: (active) => ipcRenderer.invoke("launcher:bridge-active", active),
   uninstallIntegration: () => ipcRenderer.invoke("launcher:uninstall-integration"),
   setupCore: () => ipcRenderer.invoke("launcher:setup-core"),
   setupMcp: (input) => ipcRenderer.invoke("launcher:setup-mcp", input),

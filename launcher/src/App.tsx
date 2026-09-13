@@ -15,6 +15,7 @@ import { Icon, type IconName } from "./icons";
 import type {
   BrowserInteractionMode,
   BrowserState,
+  BridgeRouteState,
   DoctorReport,
   Language,
   LauncherSnapshot,
@@ -1550,6 +1551,16 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const [bridgeRoute, setBridgeRoute] = useState<BridgeRouteState | null>(null);
+
+  useEffect(() => {
+    if (devProfile || snapshot.state.coreSetupComplete !== true) return;
+    let current = true;
+    void api!.bridgeStatus()
+      .then((route) => { if (current) setBridgeRoute(route); })
+      .catch((cause) => { if (current) setError(messageOf(cause)); });
+    return () => { current = false; };
+  }, [devProfile, setError, snapshot.state.coreSetupComplete]);
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1598,6 +1609,19 @@ function SettingsSurface({
       const result = await api!.setBrowserInteractionMode(mode);
       updateState(result.state);
       if (result.credentialsRequired) configureInteractionMode(result.targetMode);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setSleepMode = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api!.setBridgeActive(!enabled);
+      setBridgeRoute(result.route);
+      updateState(result.state);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1672,6 +1696,15 @@ function SettingsSurface({
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
+        {!devProfile && snapshot.state.coreSetupComplete === true
+          ? <SettingRow body={copy.sleepModeBody} label={copy.sleepMode}>
+          <Switch
+            checked={bridgeRoute?.installed === true && bridgeRoute.active === false}
+            disabled={busy || bridgeRoute?.installed !== true}
+            onChange={(enabled) => void setSleepMode(enabled)}
+          />
+          </SettingRow>
+          : null}
       </div>
 
       {!devProfile && snapshot.state.codexRestartRequired ? (
