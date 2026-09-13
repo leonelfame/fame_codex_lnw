@@ -1,9 +1,9 @@
 :root {
   color-scheme: dark;
 
-  --blue-100: #c9c4ff;
-  --blue-200: #a99eff;
-  --blue-300: #8b7cff;
+  --blue-100: #d5cfff;
+  --blue-200: #b9adff;
+  --blue-300: #9b8cff;
   --blue-900: #251b5c;
   --gray-0: #ffffff;
   --gray-100: #ededed;
@@ -20,10 +20,10 @@
   --red-300: #ff6764;
   --red-400: #fa423e;
 
-  --color-background-surface-under: #070611;
-  --color-background-surface: #0d0b19;
-  --color-background-sidebar: #110e20;
-  --color-background-elevated: #18142a;
+  --color-background-surface-under: #070a13;
+  --color-background-surface: #0c111e;
+  --color-background-sidebar: #0b101c;
+  --color-background-elevated: #151c2c;
   --color-background-control: rgb(255 255 255 / 3%);
   --color-background-control-hover: rgb(255 255 255 / 7%);
   --color-background-control-active: rgb(255 255 255 / 10%);
@@ -33,9 +33,9 @@
   --color-background-status-warning: rgb(255 133 73 / 12%);
   --color-background-status-error: rgb(250 66 62 / 13%);
 
-  --color-text-primary: var(--gray-0);
-  --color-text-secondary: rgb(255 255 255 / 70%);
-  --color-text-tertiary: rgb(255 255 255 / 50%);
+  --color-text-primary: #eeeefe;
+  --color-text-secondary: #b5bfd8;
+  --color-text-tertiary: #919fbc;
   --color-text-disabled: rgb(255 255 255 / 32%);
   --color-text-accent: var(--blue-100);
   --color-text-success: var(--green-300);
@@ -45,7 +45,7 @@
   --color-icon-primary: rgb(255 255 255 / 90%);
   --color-icon-secondary: rgb(255 255 255 / 70%);
   --color-icon-tertiary: rgb(255 255 255 / 50%);
-  --color-border: rgb(255 255 255 / 8%);
+  --color-border: rgb(160 178 225 / 18%);
   --color-border-light: rgb(255 255 255 / 4%);
   --color-border-heavy: rgb(255 255 255 / 16%);
   --color-border-focus: rgb(139 124 255 / 78%);
@@ -56,13 +56,13 @@
   --text-sm: 12px;
   --text-base: 14px;
   --text-lg: 16px;
-  --text-title: 24px;
+  --text-title: 30px;
 
   --height-titlebar: 46px;
-  --height-row: 30px;
+  --height-row: 38px;
   --height-control: 32px;
   --sidebar-width: 252px;
-  --content-width: 720px;
+  --content-width: 840px;
   --settings-width: 672px;
 
   --radius-xs: 4px;
