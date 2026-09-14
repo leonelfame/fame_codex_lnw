@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
@@ -55,7 +56,7 @@ import {
   verifyManagedJournalState,
   verifyRestoredRoute,
 } from "./codex-integration-route";
-import { augmentNativeModelCatalog } from "./model-catalog";
+import { augmentNativeModelCatalog, enrichBundledModelCatalog } from "./model-catalog";
 
 function readCatalogSource(path: string): Record<string, unknown> {
   const value = JSON.parse(readFileSync(path, "utf8"));
@@ -65,20 +66,23 @@ function readCatalogSource(path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function bundledCatalog(configuredPath?: string): Record<string, unknown> {
-  const sourceOverride = configuredPath ?? process.env.CODEX_CHATGPT_WEB_SOURCE_CATALOG?.trim();
-  if (sourceOverride) return readCatalogSource(resolve(sourceOverride));
+function codexBinaryCandidates(): string[] {
   const localAppData = process.env.LOCALAPPDATA?.trim();
   const configured = process.env.CODEX_CHATGPT_WEB_CODEX_BINARY?.trim();
-  const candidates = [...new Set([
+  return [...new Set([
     ...(configured ? [configured] : []),
     ...(localAppData ? [join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex.exe")] : []),
     "/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
     "codex",
   ])];
+}
+
+function bundledCatalog(configuredPath?: string): Record<string, unknown> {
+  const sourceOverride = configuredPath ?? process.env.CODEX_CHATGPT_WEB_SOURCE_CATALOG?.trim();
+  if (sourceOverride) return readCatalogSource(resolve(sourceOverride));
   const errors: string[] = [];
-  for (const command of candidates) {
+  for (const command of codexBinaryCandidates()) {
     const result = spawnSync(command, ["debug", "models", "--bundled"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -100,9 +104,76 @@ function bundledCatalog(configuredPath?: string): Record<string, unknown> {
   throw new Error(`Could not read Codex's bundled model catalog. Attempts: ${errors.join("; ")}`);
 }
 
+function validateManagedCatalogWithCodex(data: string, explicitSource: boolean): void {
+  // Explicit catalog fixtures are used by tests and offline development. Production setup always
+  // validates against the same installed Codex binary that supplied the bundled catalog.
+  if (explicitSource) return;
+  const root = mkdtempSync(join(tmpdir(), "fame-codex-catalog-"));
+  const path = join(root, "model-catalog.json");
+  const errors: string[] = [];
+  try {
+    writeFileSync(path, data, { flag: "wx", mode: 0o600 });
+    for (const command of codexBinaryCandidates()) {
+      const result = spawnSync(command, [
+        "debug",
+        "models",
+        "-c",
+        `model_catalog_json=${JSON.stringify(path)}`,
+      ], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15_000,
+      });
+      if (result.status !== 0) {
+        errors.push(`${command}: ${result.error?.message || result.stderr.trim() || result.signal || `exit ${result.status}`}`);
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(result.stdout);
+        if (parsed && typeof parsed === "object" && Array.isArray((parsed as { models?: unknown }).models)) return;
+        errors.push(`${command}: validation output has no models array`);
+      } catch (error) {
+        errors.push(`${command}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  throw new Error(`Generated model catalog is incompatible with the installed Codex: ${errors.join("; ")}`);
+}
+
+function effectiveCatalogCache(): Record<string, unknown> | undefined {
+  const path = getCodexModelsCachePath();
+  if (!existsSync(path)) return undefined;
+  try {
+    return readCatalogSource(path);
+  } catch {
+    // Codex owns this cache and can leave a stale or partial file during refresh. Setup remains
+    // deterministic by falling back to the bundled catalog plus compatibility normalization.
+    return undefined;
+  }
+}
+
+function runtimeConfigForCatalogRefresh(): AppConfig | undefined {
+  try {
+    return loadConfig();
+  } catch {
+    // Older managed journals can outlive the runtime configuration. Preserve their verified
+    // catalog on reconnect; normal launcher-owned installations always have a runtime config.
+    return undefined;
+  }
+}
+
 function managedCatalog(config: AppConfig, sourceCatalogPath?: string): { path: string; data: string; sha256: string } {
   const path = getManagedCatalogPath();
-  const data = `${JSON.stringify(augmentNativeModelCatalog(bundledCatalog(sourceCatalogPath), config), null, 2)}\n`;
+  const bundled = bundledCatalog(sourceCatalogPath);
+  const effective = effectiveCatalogCache();
+  const official = effective ? enrichBundledModelCatalog(bundled, effective) : bundled;
+  const data = `${JSON.stringify(augmentNativeModelCatalog(official, config), null, 2)}\n`;
+  validateManagedCatalogWithCodex(
+    data,
+    Boolean(sourceCatalogPath || process.env.CODEX_CHATGPT_WEB_SOURCE_CATALOG?.trim()),
+  );
   return { path, data, sha256: sha256(data) };
 }
 
@@ -509,9 +580,17 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     );
   }
   const existingCatalog = existing.version === 11 ? verifiedManagedCatalog(existing) : undefined;
-  const catalog = existing.version === 11
-    ? { path: existing.catalogPath, data: existingCatalog!, sha256: existing.catalogSha256 }
-    : managedCatalog(loadConfig());
+  // Rebuild from the currently installed Codex catalog whenever Sleep mode reconnects. Reusing the
+  // old bytes can make a valid bridge unloadable after Codex introduces a required model field.
+  const reconnectConfig = runtimeConfigForCatalogRefresh();
+  let catalog: { path: string; data: string; sha256: string };
+  if (reconnectConfig) {
+    catalog = managedCatalog(reconnectConfig);
+  } else if (existing.version === 11 && existingCatalog !== undefined) {
+    catalog = { path: existing.catalogPath, data: existingCatalog, sha256: existing.catalogSha256 };
+  } else {
+    throw new Error("Cannot regenerate the Codex model catalog without runtime configuration");
+  }
   const connected: CodexIntegrationJournal = {
     version: 11,
     active: true,

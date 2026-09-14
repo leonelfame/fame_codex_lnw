@@ -89,9 +89,52 @@ function useCompatibilityV1SubagentSurface(model: JsonObject): void {
   if (model.multi_agent_version !== "disabled") model.multi_agent_version = "v1";
 }
 
+function normalizeParallelToolCapability(model: JsonObject): void {
+  const value = model.supports_parallel_tool_calls;
+  if (value === undefined) {
+    // Codex 0.154 requires this field in external catalogs even though its bundled catalog omits
+    // it. Preserve an explicit official value and supply the capability advertised by Codex's
+    // effective model cache only when the bundled row is incomplete.
+    model.supports_parallel_tool_calls = true;
+    return;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error("Native Codex model supports_parallel_tool_calls must be a boolean");
+  }
+}
+
 function routedSubagentVersion(template: JsonObject, config: AppConfig): string | undefined {
   if (config.subagentProtocol === "compatibility-v1") return "v1";
   return typeof template.multi_agent_version === "string" ? template.multi_agent_version : undefined;
+}
+
+export function enrichBundledModelCatalog(bundledValue: unknown, effectiveValue: unknown): JsonObject {
+  const bundled = object(bundledValue, "bundled Codex models response");
+  const effective = object(effectiveValue, "effective Codex models response");
+  if (!Array.isArray(bundled.models) || !Array.isArray(effective.models)) {
+    throw new Error("Official Codex model catalogs must contain models arrays");
+  }
+  const effectiveBySlug = new Map<string, JsonObject>();
+  for (const candidate of effective.models) {
+    const modelSlug = slug(candidate);
+    if (modelSlug && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      effectiveBySlug.set(modelSlug, candidate as JsonObject);
+    }
+  }
+  return {
+    ...structuredClone(bundled),
+    models: bundled.models.map(candidate => {
+      const modelSlug = slug(candidate);
+      const effectiveModel = modelSlug ? effectiveBySlug.get(modelSlug) : undefined;
+      if (!effectiveModel || !candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return structuredClone(candidate);
+      }
+      return {
+        ...structuredClone(candidate as JsonObject),
+        ...structuredClone(effectiveModel),
+      };
+    }),
+  };
 }
 
 export function buildChatGptWebModel(
@@ -162,9 +205,10 @@ export function augmentNativeModelCatalog(
   const nativeModels = structuredClone(
     catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)),
   );
-  if (config.subagentProtocol === "compatibility-v1") {
-    for (const candidate of nativeModels) {
-      if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+  for (const candidate of nativeModels) {
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      normalizeParallelToolCapability(candidate as JsonObject);
+      if (config.subagentProtocol === "compatibility-v1") {
         useCompatibilityV1SubagentSurface(candidate as JsonObject);
       }
     }

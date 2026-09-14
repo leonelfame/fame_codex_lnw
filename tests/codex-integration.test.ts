@@ -88,6 +88,51 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("uses official effective model fields when installing the managed catalog", () => {
+    const { codexHome } = fixture();
+    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n');
+    writeFileSync(getCodexModelsCachePath(), JSON.stringify({
+      models: [{
+        slug: "gpt-5.6-sol",
+        supports_parallel_tool_calls: false,
+        future_official_capability: "from-effective-cache",
+      }],
+    }));
+
+    installCodexIntegration(nativeConfig("browser-only"));
+    const models = JSON.parse(readFileSync(getManagedCatalogPath(), "utf8")).models as
+      Array<Record<string, unknown>>;
+    expect(models.find(model => model.slug === "gpt-5.6-sol")).toMatchObject({
+      supports_parallel_tool_calls: false,
+      future_official_capability: "from-effective-cache",
+    });
+    expect(models.filter(model => String(model.slug).startsWith("chatgpt-web/"))
+      .every(model => model.supports_parallel_tool_calls === false)).toBe(true);
+    expect(existsSync(getCodexModelsCachePath())).toBe(false);
+  });
+
+  test("regenerates the managed catalog from the current Codex source when reconnecting", () => {
+    const { codexHome } = fixture();
+    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n');
+    const config = nativeConfig("browser-only");
+    saveConfig(config);
+    installCodexIntegration(config);
+    deactivateCodexIntegration();
+
+    const sourcePath = process.env.CODEX_CHATGPT_WEB_SOURCE_CATALOG!;
+    const current = JSON.parse(readFileSync(sourcePath, "utf8"));
+    current.models[0].future_official_capability = "after-codex-upgrade";
+    writeFileSync(sourcePath, JSON.stringify(current));
+
+    activateCodexIntegration();
+    const models = JSON.parse(readFileSync(getManagedCatalogPath(), "utf8")).models as
+      Array<Record<string, unknown>>;
+    expect(models.find(model => model.slug === "gpt-5.6-sol")).toMatchObject({
+      supports_parallel_tool_calls: true,
+      future_official_capability: "after-codex-upgrade",
+    });
+  });
+
   test("installs a static augmented catalog for Codex versions that do not request /v1/models", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");
