@@ -6,11 +6,12 @@ const path = require("node:path");
 const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
 const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
+const cockpitStylesSource = fs.readFileSync(path.join(launcherRoot, "src", "astra.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
-test("embedded ChatGPT is measured only after its animated surface mounts", () => {
+test("embedded ChatGPT is measured only after its surface is acknowledged", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);
   assert.match(appSource, /observer\.observe\(browserSlot\)/);
@@ -18,10 +19,22 @@ test("embedded ChatGPT is measured only after its animated surface mounts", () =
 });
 
 test("native clicks reach browser tabs instead of the window drag region", () => {
-  assert.match(appSource, /draggable=\{surface !== "browser"\}/);
-  assert.match(appSource, /className=\{`app-titlebar\$\{draggable \? " draggable" : ""\}`\}/);
+  assert.match(appSource, /className="cockpit-header draggable"/);
+  assert.match(appSource, /className="cockpit-header-actions no-drag"/);
   assert.match(stylesSource, /\.browser-tab\s*\{[^}]*-webkit-app-region:\s*no-drag;/s);
   assert.match(appSource, /className="browser-tab-drag draggable"/);
+});
+
+test("cockpit header keeps Fame Codex branding centered without animated chrome", () => {
+  assert.match(appSource, /<strong>FAME CODEX<\/strong>/);
+  assert.doesNotMatch(appSource, /<strong>ASTRA<\/strong>/);
+  assert.match(appSource, /className="cockpit-header-emblem"[\s\S]*?<BrandMark \/>/);
+  assert.match(cockpitStylesSource, /\.cockpit-header\s*\{[^}]*min-height:\s*72px;/s);
+  assert.match(cockpitStylesSource, /\.cockpit-header-emblem\s*\{[^}]*left:\s*50%;[^}]*width:\s*56px;[^}]*height:\s*56px;/s);
+  assert.match(cockpitStylesSource, /\.cockpit-header-emblem > \.brand-mark\s*\{[^}]*width:\s*52px;[^}]*height:\s*52px;/s);
+  assert.match(cockpitStylesSource, /@media \(max-width: 760px\)[\s\S]*?\.cockpit-header-emblem > \.brand-mark\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;/s);
+  assert.doesNotMatch(cockpitStylesSource, /\.cockpit-header-emblem[^}]*animation:/s);
+  assert.doesNotMatch(cockpitStylesSource, /\.cockpit-header-emblem[^}]*filter:\s*blur/s);
 });
 
 test("renderer zoom scales the shell without moving or zooming the native ChatGPT surface", () => {

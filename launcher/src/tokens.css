@@ -61,7 +61,7 @@
   --height-titlebar: 46px;
   --height-row: 38px;
   --height-control: 32px;
-  --sidebar-width: 252px;
+  --sidebar-width: 224px;
   --content-width: 840px;
   --settings-width: 672px;
 
@@ -74,5 +74,7 @@
   --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
   --duration-micro: 140ms;
-  --duration-panel: 300ms;
+  --duration-panel: 180ms;
+  --color-accent-soft: rgb(155 140 255 / 12%);
+  --color-accent-line: rgb(185 173 255 / 38%);
 }

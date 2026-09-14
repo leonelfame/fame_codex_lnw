@@ -2,16 +2,20 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   useCallback,
   useEffect,
+  forwardRef,
   useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
+  type RefObject,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { createActivityStore, type ActivityStore } from "./activity-store";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -20,7 +24,6 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
-  LogRecord,
   OperationState,
   Surface,
 } from "./types";
@@ -28,7 +31,7 @@ import type {
 const api = window.codexWebLauncher;
 const galaxyMark = new URL("./assets/astra-nebula-f.png", import.meta.url).href;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
-const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
+const COCKPIT_NARROW_QUERY = "(max-width: 760px)";
 const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-create-tunnel.mp4", import.meta.url).href,
   new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
@@ -39,7 +42,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
-  const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [activityStore] = useState(createActivityStore);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
@@ -54,7 +57,7 @@ export function App() {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
-      setLogs(next.logs);
+      activityStore.initialize(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
@@ -75,7 +78,7 @@ export function App() {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });
-    const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
+    const unsubscribeLog = api.onLog(activityStore.append);
     const unsubscribeUpdate = api.onUpdateState((update) => {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
@@ -87,7 +90,7 @@ export function App() {
       unsubscribeLog();
       unsubscribeUpdate();
     };
-  }, []);
+  }, [activityStore]);
 
   const updateState = useCallback((state: LauncherState) => {
     setSnapshot((current) => current
@@ -129,7 +132,7 @@ export function App() {
             copy={copy}
             key="launcher"
             language={language}
-            logs={logs}
+            activityStore={activityStore}
             operation={operation}
             setError={setError}
             snapshot={snapshot}
@@ -293,7 +296,7 @@ function LauncherShell({
   browser,
   copy,
   language,
-  logs,
+  activityStore,
   operation,
   setError,
   snapshot,
@@ -302,7 +305,7 @@ function LauncherShell({
   browser: BrowserState | null;
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
+  activityStore: ActivityStore;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -317,10 +320,13 @@ function LauncherShell({
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
   const devProfile = snapshot.profile === "development";
-  const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
-  const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
-  const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
+  const narrowAtMount = useRef(window.matchMedia(COCKPIT_NARROW_QUERY).matches).current;
+  const [narrowCockpit, setNarrowCockpit] = useState(narrowAtMount);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activityMode, setActivityMode] = useState<"closed" | "tray" | "full">("closed");
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const activityTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
@@ -332,7 +338,8 @@ function LauncherShell({
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser"
-    && !(compactSidebar && sidebarOpen)
+    && activityMode !== "full"
+    && !(narrowCockpit && settingsOpen)
     && !biggerContextRecommendationOpen;
   const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
     && browser?.authenticated !== true;
@@ -354,10 +361,10 @@ function LauncherShell({
   useEffect(() => {
     if (!selectedManualTab) return;
     setSurface("browser");
-    setSidebarOpen(false);
+    setSettingsOpen(false);
+    setActivityMode("closed");
     setBiggerContextRecommendationOpen(false);
-    void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
-  }, [selectedManualTab?.id, selectedManualTab?.manualState, setError]);
+  }, [selectedManualTab?.id, selectedManualTab?.manualState]);
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -392,18 +399,33 @@ function LauncherShell({
       observer?.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [browserSlot, browserSurfaceActive, setError]);
+  }, [activityMode, browserSlot, browserSurfaceActive, narrowCockpit, sessionReminderDue, settingsOpen, setError]);
 
   useEffect(() => {
-    const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
-    const apply = () => {
-      setCompactSidebar(media.matches);
-      setSidebarOpen(!media.matches);
-    };
+    const media = window.matchMedia(COCKPIT_NARROW_QUERY);
+    const apply = () => setNarrowCockpit(media.matches);
     apply();
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.querySelector(".guide-media.is-expanded")) return;
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        requestAnimationFrame(() => settingsTriggerRef.current?.focus());
+        return;
+      }
+      if (activityMode !== "closed") {
+        setActivityMode("closed");
+        requestAnimationFrame(() => activityTriggerRef.current?.focus());
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activityMode, settingsOpen]);
 
   useEffect(() => {
     const reminderAt = snapshot.state.sessionRefreshReminderAt;
@@ -424,24 +446,26 @@ function LauncherShell({
 
   const activateBrowser = useCallback(async (show = false) => {
     setSurface("browser");
+    setSettingsOpen(false);
+    setActivityMode("closed");
     await api!.setBrowserSurfaceActive(true);
     if (show) await api!.showBrowser();
   }, []);
 
-  const toggleSidebar = () => {
-    const next = !sidebarOpen;
-    if (compactSidebar && next && surface === "browser") {
-      void api!.setBrowserSurfaceActive(false)
-        .then(() => setSidebarOpen(true))
-        .catch((cause) => setError(messageOf(cause)));
-      return;
-    }
-    setSidebarOpen(next);
-  };
-
   const navigateSurface = (next: Surface) => {
     setSurface(next);
-    if (compactSidebar) setSidebarOpen(false);
+    setSettingsOpen(false);
+    if (next !== "browser") setActivityMode("closed");
+  };
+
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    requestAnimationFrame(() => settingsTriggerRef.current?.focus());
+  };
+
+  const closeActivity = () => {
+    setActivityMode("closed");
+    requestAnimationFrame(() => activityTriggerRef.current?.focus());
   };
 
   const installUpdate = async () => {
@@ -498,113 +522,47 @@ function LauncherShell({
   return (
     <motion.main
       animate={{ opacity: 1 }}
-      className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}`}
+      className="app-shell cockpit-shell"
       initial={{ opacity: 0 }}
     >
-      <TitleBar
+      <CockpitHeader
+        browser={browser}
         copy={copy}
         devProfile={devProfile}
-        draggable={surface !== "browser"}
-        sidebarOpen={sidebarOpen}
-        toggleSidebar={toggleSidebar}
+        operation={operation}
+        settingsOpen={settingsOpen}
+        settingsTriggerRef={settingsTriggerRef}
+        snapshot={snapshot}
+        updateBusy={updateBusy}
+        updateVersion={updateVersion}
+        updateVisible={updateVisible}
+        onInstallUpdate={() => void installUpdate()}
+        onSettings={() => {
+          setSettingsOpen((open) => !open);
+          if (!settingsOpen) setActivityMode("closed");
+        }}
       />
-
-      {compactSidebar && sidebarOpen ? (
-        <button
-          aria-label={copy.hideSidebar}
-          className="sidebar-backdrop"
-          onClick={() => setSidebarOpen(false)}
-          type="button"
-        />
-      ) : null}
-
-      <motion.aside
-        animate={{ width: sidebarOpen ? "var(--sidebar-width)" : 0 }}
-        className="app-sidebar"
-        initial={false}
-        transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
-      >
-        <div className="sidebar-clip">
-          <div className="sidebar-content">
-            <div className="sidebar-brand-row">
-              <div className="sidebar-brand-identity">
-                <BrandMark small />
-                <strong>{copy.product}</strong>
-                {devProfile ? <em className="dev-profile-badge">{copy.devBadge}</em> : null}
-              </div>
-            </div>
-
-            <nav className="sidebar-nav" aria-label={copy.workspace}>
-              <SidebarGroup label={copy.workspace}>
-                <SidebarItem
-                  active={surface === "browser"}
-                  badge={needsBrowser
-                    ? <ActionDot pulse tone="required" />
-                    : browser?.status === "error"
-                      ? <ActionDot tone="error" />
-                      : null}
-                  icon="browser"
-                  label={copy.browser}
-                  onClick={() => navigateSurface("browser")}
-                />
-              </SidebarGroup>
-              <SidebarGroup label={copy.configuration}>
-                <SidebarItem
-                  active={surface === "setup"}
-                  badge={needsSetup ? <ActionDot pulse tone="required" /> : null}
-                  icon="setup"
-                  label={copy.setup}
-                  onClick={() => navigateSurface("setup")}
-                />
-                <SidebarItem
-                  active={surface === "mcp"}
-                  badge={mcpOptional ? <ActionDot tone="optional" /> : null}
-                  icon="mcp"
-                  label="MCP"
-                  onClick={() => {
-                    setMcpTargetMode(null);
-                    navigateSurface("mcp");
-                  }}
-                />
-              </SidebarGroup>
-              <SidebarGroup label={copy.runtime}>
-                <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
-              </SidebarGroup>
-            </nav>
-
-            <div className="sidebar-footer">
-              {updateVisible ? (
-                <SidebarItem
-                  active={false}
-                  disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
-                  icon="update"
-                  label={updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
-                  onClick={() => void installUpdate()}
-                  tone="update"
-                />
-              ) : null}
-              <SidebarItem
-                active={surface === "settings"}
-                icon="settings"
-                label={copy.settings}
-                onClick={() => navigateSurface("settings")}
-              />
-            </div>
+      <div className="cockpit-main">
+        {sessionReminderDue && !biggerContextRecommendationOpen ? (
+          <div className="cockpit-reminder-row">
+            <SessionRefreshReminder
+              busy={sessionReminderBusy}
+              copy={copy}
+              onDismiss={() => void dismissSessionReminder()}
+              onLogout={() => void logoutChatGpt()}
+            />
           </div>
-        </div>
-      </motion.aside>
+        ) : null}
 
-      <section className="workspace">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.div
-            animate={{ opacity: 1 }}
-            className="surface-transition"
-            exit={{ opacity: 0 }}
-            initial={{ opacity: 0 }}
-            key={surface}
-            transition={{ duration: 0.16 }}
+        <div className="cockpit-row">
+          <section
+            aria-label={copy.workspace}
+            className={`workspace cockpit-workspace${narrowCockpit && settingsOpen ? " is-replaced" : ""}`}
           >
-            {surface === "browser" ? (
+            <div
+              aria-hidden={surface !== "browser" || activityMode === "full"}
+              className={`cockpit-browser${surface === "browser" && activityMode !== "full" ? " is-active" : ""}`}
+            >
               <BrowserSurface
                 browser={browser}
                 browserSlotRef={browserSlotRef}
@@ -614,47 +572,68 @@ function LauncherShell({
                 platform={snapshot.platform}
                 setError={setError}
               />
-            ) : null}
-            {surface === "setup" ? (
-              <SetupSurface
+            </div>
+
+            {surface === "setup" || surface === "mcp" ? (
+              <ConnectionsWorkspace
                 activateBrowser={activateBrowser}
                 browser={browser}
                 copy={copy}
                 devProfile={devProfile}
-                operation={operation}
-                setError={setError}
-                showMcp={() => {
+                hidden={activityMode === "full"}
+                interactionMode={mcpTargetMode ?? snapshot.state.browserInteractionMode}
+                language={language}
+                mcpOptional={mcpOptional}
+                needsSetup={needsSetup}
+                onMcp={() => {
                   setMcpTargetMode(null);
                   setSurface("mcp");
                 }}
-                snapshot={snapshot}
-                updateState={updateState}
-              />
-            ) : null}
-            {surface === "mcp" ? (
-              <McpSurface
-                copy={copy}
-                devProfile={devProfile}
-                interactionMode={mcpTargetMode ?? snapshot.state.browserInteractionMode}
-                language={language}
-                onDone={() => {
-                  setMcpTargetMode(null);
-                  setSurface("browser");
-                }}
+                onSetup={() => setSurface("setup")}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
+                surface={surface}
                 updateState={updateState}
               />
             ) : null}
-            {surface === "activity" ? (
-              <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+
+            {activityMode === "full" ? (
+              <section className="cockpit-activity is-full" aria-label={copy.activity}>
+                <div className="cockpit-panel-heading">
+                  <div>
+                    <span>{copy.runtime}</span>
+                    <strong>{copy.activity}</strong>
+                  </div>
+                  <div className="cockpit-panel-actions">
+                    <button
+                      className="cockpit-text-action"
+                      onClick={() => setActivityMode("tray")}
+                      type="button"
+                    >
+                      {copy.collapseActivity}
+                    </button>
+                    <IconButton icon="close" label={copy.closeActivity} onClick={closeActivity} />
+                  </div>
+                </div>
+                <ActivitySurface copy={copy} language={language} activityStore={activityStore} setError={setError} />
+              </section>
             ) : null}
-            {surface === "settings" ? (
+          </section>
+
+          {settingsOpen ? (
+            <aside className="cockpit-settings" aria-label={copy.settings}>
+              <div className="cockpit-panel-heading">
+                <div>
+                  <strong>{copy.settings}</strong>
+                </div>
+                <IconButton icon="close" label={copy.close} onClick={closeSettings} />
+              </div>
               <SettingsSurface
                 configureInteractionMode={(mode) => {
                   setMcpTargetMode(mode);
                   setSurface("mcp");
+                  setSettingsOpen(false);
                 }}
                 copy={copy}
                 devProfile={devProfile}
@@ -663,10 +642,60 @@ function LauncherShell({
                 snapshot={snapshot}
                 updateState={updateState}
               />
-            ) : null}
-          </motion.div>
-        </AnimatePresence>
-      </section>
+            </aside>
+          ) : null}
+        </div>
+
+        {activityMode === "tray" ? (
+          <section className="cockpit-activity" aria-label={copy.activity}>
+            <div className="cockpit-panel-heading">
+              <div>
+                <span>{copy.runtime}</span>
+                <strong>{copy.activity}</strong>
+              </div>
+              <div className="cockpit-panel-actions">
+                <button
+                  className="cockpit-text-action"
+                  onClick={() => setActivityMode("full")}
+                  type="button"
+                >
+                  {copy.expandActivity}
+                </button>
+                <IconButton icon="close" label={copy.closeActivity} onClick={closeActivity} />
+              </div>
+            </div>
+            <ActivitySurface copy={copy} language={language} activityStore={activityStore} setError={setError} />
+          </section>
+        ) : null}
+      </div>
+
+      <CockpitDock
+        activityMode={activityMode}
+        activityTriggerRef={activityTriggerRef}
+        browser={browser}
+        copy={copy}
+        mcpOptional={mcpOptional}
+        needsBrowser={needsBrowser}
+        needsSetup={needsSetup}
+        surface={surface}
+        onActivity={() => {
+          setSettingsOpen(false);
+          setActivityMode((mode) => mode === "closed" ? "tray" : mode === "full" ? "tray" : "closed");
+        }}
+        onConnections={() => {
+          setSettingsOpen(false);
+          setActivityMode("closed");
+          if (surface !== "setup" && surface !== "mcp") {
+            setMcpTargetMode(null);
+            setSurface(needsSetup ? "setup" : "mcp");
+          }
+        }}
+        onWorkspace={() => {
+          setSettingsOpen(false);
+          setActivityMode("closed");
+          setSurface("browser");
+        }}
+      />
 
       <AnimatePresence>
         {biggerContextRecommendationOpen ? (
@@ -680,85 +709,273 @@ function LauncherShell({
         ) : null}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {sessionReminderDue && !biggerContextRecommendationOpen ? (
-          <SessionRefreshReminder
-            busy={sessionReminderBusy}
-            copy={copy}
-            onDismiss={() => void dismissSessionReminder()}
-            onLogout={() => void logoutChatGpt()}
-          />
-        ) : null}
-      </AnimatePresence>
     </motion.main>
   );
 }
 
-function TitleBar({
+function CockpitHeader({
+  browser,
   copy,
   devProfile,
-  draggable,
-  sidebarOpen,
-  toggleSidebar,
+  operation,
+  settingsOpen,
+  settingsTriggerRef,
+  snapshot,
+  updateBusy,
+  updateVersion,
+  updateVisible,
+  onInstallUpdate,
+  onSettings,
 }: {
+  browser: BrowserState | null;
   copy: Copy;
   devProfile: boolean;
-  draggable: boolean;
-  sidebarOpen: boolean;
-  toggleSidebar: () => void;
+  operation: OperationState | null;
+  settingsOpen: boolean;
+  settingsTriggerRef: RefObject<HTMLButtonElement | null>;
+  snapshot: LauncherSnapshot;
+  updateBusy: boolean;
+  updateVersion: string | null;
+  updateVisible: boolean;
+  onInstallUpdate: () => void;
+  onSettings: () => void;
 }) {
+  const runtimeBusy = operation?.status === "running" || browser?.status === "running" || browser?.status === "testing";
+  const statusTone = browser?.status === "error" ? "error" : runtimeBusy || browser?.loading ? "busy" : browser?.authenticated ? "ready" : "idle";
+  const statusLabel = browser?.status === "error" ? copy.needsAttention : runtimeBusy ? copy.running : browser?.loading ? copy.loading : browser?.authenticated ? copy.signedIn : copy.signIn;
   return (
-    <header className={`app-titlebar${draggable ? " draggable" : ""}`}>
-      <div className="titlebar-left no-drag">
-        <IconButton
-          icon="sidebar"
-          label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
-          onClick={toggleSidebar}
-        />
+    <header className="cockpit-header draggable">
+      <div className="cockpit-header-identity no-drag">
+        <div>
+          <strong>FAME CODEX</strong>
+        </div>
         {devProfile ? <span className="titlebar-dev-profile">{copy.devBadge}</span> : null}
+      </div>
+      <div className="cockpit-header-emblem" aria-hidden="true">
+        <BrandMark />
+      </div>
+      <div className="cockpit-header-drag" aria-hidden="true" />
+      <div className="cockpit-header-actions no-drag">
+        <div className="cockpit-live-status" role="status">
+          <StateDot state={statusTone} />
+          <span>{statusLabel}</span>
+        </div>
+        {updateVisible ? (
+          <button
+            className="cockpit-update"
+            disabled={updateBusy || runtimeBusy}
+            onClick={onInstallUpdate}
+            type="button"
+          >
+            <Icon name="update" />
+            <span>{updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}</span>
+          </button>
+        ) : null}
+        <button
+          aria-expanded={settingsOpen}
+          className={`cockpit-settings-button${settingsOpen ? " is-active" : ""}`}
+          onClick={onSettings}
+          ref={settingsTriggerRef}
+          type="button"
+        >
+          <Icon name="settings" />
+          <span>{copy.settings}</span>
+        </button>
+        <span className="cockpit-version">v{snapshot.version}</span>
       </div>
     </header>
   );
 }
 
-function SidebarGroup({ children, label }: { children: ReactNode; label: string }) {
+function CockpitDock({
+  activityMode,
+  activityTriggerRef,
+  browser,
+  copy,
+  mcpOptional,
+  needsBrowser,
+  needsSetup,
+  surface,
+  onActivity,
+  onConnections,
+  onWorkspace,
+}: {
+  activityMode: "closed" | "tray" | "full";
+  activityTriggerRef: RefObject<HTMLButtonElement | null>;
+  browser: BrowserState | null;
+  copy: Copy;
+  mcpOptional: boolean;
+  needsBrowser: boolean;
+  needsSetup: boolean;
+  surface: Surface;
+  onActivity: () => void;
+  onConnections: () => void;
+  onWorkspace: () => void;
+}) {
   return (
-    <section className="sidebar-group">
-      <h2>{label}</h2>
-      <div>{children}</div>
-    </section>
+    <nav className="cockpit-dock" aria-label={copy.workspace}>
+      <CockpitDockButton
+        active={surface === "browser" && activityMode !== "full"}
+        badge={needsBrowser ? "required" : browser?.status === "error" ? "error" : undefined}
+        icon="browser"
+        label={copy.workspace}
+        onClick={onWorkspace}
+      />
+      <CockpitDockButton
+        active={surface === "setup" || surface === "mcp"}
+        badge={needsSetup ? "required" : mcpOptional ? "optional" : undefined}
+        icon="mcp"
+        label={copy.connections}
+        onClick={onConnections}
+      />
+      <CockpitDockButton
+        active={activityMode !== "closed"}
+        expanded={activityMode !== "closed"}
+        icon="activity"
+        label={copy.activity}
+        onClick={onActivity}
+        ref={activityTriggerRef}
+      />
+    </nav>
   );
 }
 
-function SidebarItem({
-  active,
-  badge,
-  disabled = false,
-  icon,
-  label,
-  onClick,
-  tone,
-}: {
+const CockpitDockButton = forwardRef<HTMLButtonElement, {
   active: boolean;
-  badge?: ReactNode;
-  disabled?: boolean;
+  expanded?: boolean;
+  badge?: "required" | "optional" | "error";
   icon: IconName;
   label: string;
   onClick: () => void;
-  tone?: "update";
-}) {
+}>(function CockpitDockButton({ active, expanded, badge, icon, label, onClick }, ref) {
   return (
     <button
-      aria-current={active ? "page" : undefined}
-      className={`sidebar-item${active ? " is-active" : ""}${tone === "update" ? " is-update" : ""}`}
-      disabled={disabled}
+      aria-current={active && expanded === undefined ? "page" : undefined}
+      aria-expanded={expanded}
+      className={`cockpit-dock-button${active ? " is-active" : ""}`}
       onClick={onClick}
+      ref={ref}
       type="button"
     >
       {icon === "mcp" ? <McpMark /> : <Icon name={icon} />}
       <span>{label}</span>
-      {badge ? <i className="sidebar-item-badge">{badge}</i> : null}
+      {badge ? <ActionDot pulse={badge === "required"} tone={badge} /> : null}
     </button>
+  );
+});
+
+function ConnectionsWorkspace({
+  activateBrowser,
+  browser,
+  copy,
+  devProfile,
+  hidden,
+  interactionMode,
+  language,
+  mcpOptional,
+  needsSetup,
+  onMcp,
+  onSetup,
+  operation,
+  setError,
+  snapshot,
+  surface,
+  updateState,
+}: {
+  activateBrowser: (show?: boolean) => Promise<void>;
+  browser: BrowserState | null;
+  copy: Copy;
+  devProfile: boolean;
+  hidden: boolean;
+  interactionMode: BrowserInteractionMode;
+  language: Language;
+  mcpOptional: boolean;
+  needsSetup: boolean;
+  onMcp: () => void;
+  onSetup: () => void;
+  operation: OperationState | null;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  surface: Surface;
+  updateState: (state: LauncherState) => void;
+}) {
+  const accountReady = browser?.authenticated === true;
+  const codexReady = snapshot.state.coreSetupComplete === true
+    && (snapshot.state.browserInteractionMode === "manual" || snapshot.state.codexCatalogVerified === true);
+  const mcpReady = snapshot.state.mcpSetupComplete === true;
+  return (
+    <div className="cockpit-connections" hidden={hidden} style={hidden ? { display: "none" } : undefined}>
+      <header className="connections-header">
+        <div>
+          <h1>{copy.connections}</h1>
+        </div>
+        <div className="connections-local-nav" aria-label={copy.connections}>
+          <button
+            aria-current={surface === "setup" ? "page" : undefined}
+            className={surface === "setup" ? "is-active" : ""}
+            onClick={onSetup}
+            type="button"
+          >
+            <Icon name="setup" />
+            <span>{copy.setup}</span>
+            {needsSetup ? <ActionDot pulse tone="required" /> : null}
+          </button>
+          <button
+            aria-current={surface === "mcp" ? "page" : undefined}
+            className={surface === "mcp" ? "is-active" : ""}
+            onClick={onMcp}
+            type="button"
+          >
+            <McpMark />
+            <span>MCP</span>
+            {mcpOptional ? <ActionDot tone="optional" /> : null}
+          </button>
+        </div>
+      </header>
+      <div className="connections-step-strip" aria-label={copy.connectionFlow}>
+        <ConnectionStep complete={accountReady} label={copy.account} />
+        <span aria-hidden="true">→</span>
+        <ConnectionStep complete={codexReady} label="Codex" />
+        <span aria-hidden="true">→</span>
+        <ConnectionStep complete={mcpReady} label="MCP" />
+      </div>
+      <div className="connections-surface">
+        {surface === "setup" ? (
+          <SetupSurface
+            activateBrowser={activateBrowser}
+            browser={browser}
+            copy={copy}
+            devProfile={devProfile}
+            operation={operation}
+            setError={setError}
+            showMcp={onMcp}
+            snapshot={snapshot}
+            updateState={updateState}
+          />
+        ) : (
+          <McpSurface
+            copy={copy}
+            devProfile={devProfile}
+            interactionMode={interactionMode}
+            language={language}
+            onDone={() => void activateBrowser().catch(cause => setError(messageOf(cause)))}
+            operation={operation}
+            setError={setError}
+            snapshot={snapshot}
+            updateState={updateState}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ConnectionStep({ complete, label }: { complete: boolean; label: string }) {
+  return (
+    <span className={`connection-step${complete ? " is-complete" : ""}`}>
+      <StateDot state={complete ? "ready" : "idle"} />
+      {label}
+    </span>
   );
 }
 
@@ -787,6 +1004,13 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const browserStatusTone = browser?.status === "error" ? "error"
+    : navigationLocked || browser?.loading ? "busy"
+    : browser?.authenticated ? "ready" : "idle";
+  const browserStatusLabel = browser?.status === "error" ? copy.needsAttention
+    : navigationLocked ? copy.running
+    : browser?.loading ? copy.loading
+    : browser?.authenticated ? copy.signedIn : copy.signIn;
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -863,7 +1087,7 @@ function BrowserSurface({
 
   return (
     <section className="browser-surface">
-      <div className="browser-tab-strip" title={copy.browserTabLimit}>
+      <div className="browser-tab-strip" role="tablist" aria-label={copy.browser} title={copy.browserTabLimit}>
         {(browser?.tabs ?? []).map((tab) => (
           <div
             className={`browser-tab${tab.active ? " is-active" : ""}`}
@@ -871,6 +1095,21 @@ function BrowserSurface({
             onClick={() => void selectTab(tab.id)}
             role="tab"
             aria-selected={tab.active}
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                void selectTab(tab.id);
+              } else if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+                event.preventDefault();
+                const tabs = Array.from(event.currentTarget.parentElement!.querySelectorAll<HTMLElement>('[role="tab"]'));
+                const index = tabs.indexOf(event.currentTarget);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+                  : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+                tabs[next]?.focus();
+              }
+            }}
           >
             <BrandMark small />
             <span title={tab.traceId ? `${tab.title} · ${tab.traceId}` : tab.title}>
@@ -943,6 +1182,12 @@ function BrowserSurface({
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
         {browser?.loading ? <i className="browser-loading-line" /> : null}
+      </div>
+      <div className="browser-status-bar" role="status">
+        <span><StateDot state={browserStatusTone} />
+          {browserStatusLabel}
+        </span>
+        <span>{copy.browser} <b>{browser?.tabs.length ?? 0} / {browser?.maxTabs ?? 5}</b></span>
       </div>
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
@@ -1489,14 +1734,16 @@ function McpSurface({
 function ActivitySurface({
   copy,
   language,
-  logs,
+  activityStore,
   setError,
 }: {
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
+  activityStore: ActivityStore;
   setError: (error: string | null) => void;
 }) {
+  const logs = useSyncExternalStore(activityStore.subscribe, activityStore.getSnapshot);
+  const newestFirst = useMemo(() => [...logs].reverse(), [logs]);
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
       <div className="section-heading activity-heading">
@@ -1515,7 +1762,7 @@ function ActivitySurface({
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record, index) => (
+        {newestFirst.map((record, index) => (
           <div className="activity-row" key={`${record.at}-${record.event}-${index}`}>
             <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
             <div>
@@ -1856,7 +2103,12 @@ function ZeroRiskModelMenu({
     <div
       className={`zero-risk-model-menu${open ? " is-open" : ""}`}
       onKeyDown={(event) => {
-        if (event.key === "Escape") setOpen(false);
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+          event.currentTarget.querySelector<HTMLButtonElement>(".zero-risk-model-trigger")?.focus();
+        }
       }}
     >
       <button
@@ -2294,7 +2546,12 @@ function LanguageMenu({ copy, language, onChange }: { copy: Copy; language: Lang
     <div
       className={`language-menu${open ? " is-open" : ""}`}
       onKeyDown={(event) => {
-        if (event.key === "Escape") setOpen(false);
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+          event.currentTarget.querySelector<HTMLButtonElement>(".language-menu-trigger")?.focus();
+        }
       }}
     >
       <button
