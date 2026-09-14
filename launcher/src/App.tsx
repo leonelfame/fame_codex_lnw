@@ -1136,7 +1136,7 @@ function SetupSurface({
           action={snapshot.state.coreSetupComplete
             ? devProfile ? copy.devReinstall : copy.reinstall
             : devProfile ? copy.devInstall : copy.install}
-          complete={snapshot.state.codexCatalogVerified === true}
+          complete={snapshot.state.coreSetupComplete === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
           disabled={busy || (!snapshot.smokePassed && snapshot.state.coreSetupComplete !== true)}
           index={manualInteraction ? 1 : 3}
@@ -1163,7 +1163,7 @@ function SetupSurface({
       <SectionHeading label="MCP" meta={manualInteraction ? copy.required : copy.optional} spaced />
       <button
         className="next-surface-row"
-        disabled={!manualInteraction && !snapshot.state.codexCatalogVerified}
+        disabled={snapshot.state.coreSetupComplete !== true}
         onClick={showMcp}
         type="button"
       >
@@ -1454,7 +1454,7 @@ function McpSurface({
           <PrimaryButton
             disabled={
               busy
-              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
+              || (!manualInteraction && !configuringInactiveMode && snapshot.state.coreSetupComplete !== true)
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
             onClick={() => void install()}
