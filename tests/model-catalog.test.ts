@@ -9,12 +9,18 @@ import {
   CHATGPT_WEB_MODEL_ROUTES,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
-import { augmentNativeModelCatalog } from "../src/model-catalog";
+import { augmentNativeModelCatalog, enrichBundledModelCatalog } from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
   return {
     models: [
-      { slug: "gpt-5.5", display_name: "5.5", priority: 1, multi_agent_version: "disabled" },
+      {
+        slug: "gpt-5.5",
+        display_name: "5.5",
+        priority: 1,
+        multi_agent_version: "disabled",
+        supports_parallel_tool_calls: true,
+      },
       {
         slug: "gpt-5.6-sol",
         display_name: "5.6 Sol",
@@ -24,6 +30,7 @@ function source(): Record<string, unknown> {
         visibility: "list",
         supported_in_api: true,
         multi_agent_version: "v2",
+        supports_parallel_tool_calls: true,
         base_instructions: "native harness",
         supported_reasoning_levels: [
           { effort: "low", description: "Low" },
@@ -40,12 +47,69 @@ function source(): Record<string, unknown> {
         service_tiers: [{ id: "fast", name: "Fast" }],
         default_service_tier: "fast",
       },
-      { slug: "gpt-5.6-terra", display_name: "5.6 Terra", priority: 3, multi_agent_version: "v2" },
+      {
+        slug: "gpt-5.6-terra",
+        display_name: "5.6 Terra",
+        priority: 3,
+        multi_agent_version: "v2",
+        supports_parallel_tool_calls: true,
+      },
     ],
   };
 }
 
 describe("native /models augmentation", () => {
+  test("enriches bundled rows from the official effective cache without dropping bundled fields", () => {
+    const bundled = source();
+    const enriched = enrichBundledModelCatalog(bundled, {
+      models: [{
+        slug: "gpt-5.6-sol",
+        supports_parallel_tool_calls: false,
+        future_official_capability: "effective",
+      }],
+    });
+    const sol = (enriched.models as Array<Record<string, unknown>>)
+      .find(model => model.slug === "gpt-5.6-sol");
+
+    expect(sol).toMatchObject({
+      slug: "gpt-5.6-sol",
+      display_name: "5.6 Sol",
+      base_instructions: "native harness",
+      supports_parallel_tool_calls: false,
+      future_official_capability: "effective",
+    });
+    expect((enriched.models as unknown[])).toHaveLength(3);
+  });
+
+  test("emits Codex-required parallel tool capability without overwriting official values", () => {
+    const native = source();
+    const nativeModels = native.models as Array<Record<string, unknown>>;
+    delete nativeModels[0]!.supports_parallel_tool_calls;
+    delete nativeModels[1]!.supports_parallel_tool_calls;
+    nativeModels[1]!.future_official_capability = { version: 1 };
+    nativeModels[2]!.supports_parallel_tool_calls = false;
+
+    const models = augmentNativeModelCatalog(native, defaultConfig("browser-only")).models as
+      Array<Record<string, unknown>>;
+
+    expect(models.every(model => typeof model.supports_parallel_tool_calls === "boolean")).toBe(true);
+    expect(models.find(model => model.slug === "gpt-5.6-sol")).toMatchObject({
+      supports_parallel_tool_calls: true,
+      future_official_capability: { version: 1 },
+    });
+    expect(models.find(model => model.slug === "gpt-5.6-terra")?.supports_parallel_tool_calls).toBe(false);
+    expect(models.filter(model => String(model.slug).startsWith("chatgpt-web/"))
+      .every(model => model.supports_parallel_tool_calls === true)).toBe(true);
+  });
+
+  test("rejects a malformed official parallel tool capability instead of guessing", () => {
+    const native = source();
+    (native.models as Array<Record<string, unknown>>)[1]!.supports_parallel_tool_calls = "yes";
+
+    expect(() => augmentNativeModelCatalog(native, defaultConfig("browser-only")))
+      .toThrow("supports_parallel_tool_calls must be a boolean");
+  });
+
   test("preserves every native model in order and appends one fixed model per ChatGPT Web mode", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
