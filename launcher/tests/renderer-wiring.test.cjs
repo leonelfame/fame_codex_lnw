@@ -183,12 +183,25 @@ test("Zero Risk setup commits state after the runtime transaction and preserves 
 
 });
 
-test("MCP connection remains unavailable until the model catalog is verified", () => {
+test("MCP setup remains available while model catalog verification is pending", () => {
   assert.match(
     appSource,
     /manualInteraction \|\| configuringInactiveMode \|\| snapshot\.state\.codexCatalogVerified[\s\S]*?copy\.mcpStepTwoHint[\s\S]*?copy\.mcpCatalogRequired/,
   );
-  assert.match(appSource, /!manualInteraction && !configuringInactiveMode && !snapshot\.state\.codexCatalogVerified/);
+  assert.match(appSource, /complete=\{snapshot\.state\.coreSetupComplete === true\}/);
+  assert.match(appSource, /disabled=\{snapshot\.state\.coreSetupComplete !== true\}/);
+  assert.match(
+    appSource,
+    /!manualInteraction && !configuringInactiveMode && snapshot\.state\.coreSetupComplete !== true/,
+  );
+  assert.doesNotMatch(
+    appSource,
+    /disabled=\{[\s\S]{0,180}!manualInteraction && !snapshot\.state\.codexCatalogVerified[\s\S]{0,180}\}\s*onClick=\{showMcp\}/,
+  );
+  assert.doesNotMatch(
+    appSource,
+    /<PrimaryButton\s+disabled=\{[\s\S]{0,260}!manualInteraction && !configuringInactiveMode && !snapshot\.state\.codexCatalogVerified/,
+  );
 });
 
 test("MCP navigation remains locked while an operation is active", () => {
