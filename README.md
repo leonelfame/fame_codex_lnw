@@ -2,12 +2,10 @@
 
 <p align="center"><strong>Personal Codex launcher สำหรับใช้งาน ChatGPT Web ผ่าน native Codex workflow</strong></p>
 
-<p align="center"><img src="assets/fame-codex-ui.png" alt="Fame Codex desktop launcher" width="960"></p>
 
-Copyright (c) 2026 Fame Codex. Distributed under the MIT License.
 
 > [!IMPORTANT]
-> โครงการ Fame Codex สำหรับใช้งาน ChatGPT Web ผ่าน native Codex workflow และไม่ใช่ผลิตภัณฑ์อย่างเป็นทางการของ OpenAI
+> โครงการ Fame Codex สำหรับใช้งาน ChatGPT Web ผ่าน native Codex workflow
 
 ## จุดแตกต่าง
 
@@ -99,21 +97,6 @@ Invoke-RestMethod http://127.0.0.1:17842/v1/models
 
 เก็บ Master connector `Codex Native2` ไว้โดยไม่ rename หรือ refresh
 
-## ใช้ร่วมกับ Master
-
-สองแอปติดตั้งพร้อมกันได้ แต่ Codex integration ใน `%USERPROFILE%\.codex\config.toml` ใช้งานได้ทีละตัว
-
-1. เปิดแอปที่เป็นเจ้าของ route แล้วกด **Remove Codex integration**
-2. เปิดอีกแอปแล้วกด **Install models**
-3. ปิด Codex ทุก process แล้วเปิดใหม่
-
-อย่าคอมเมนต์เฉพาะ `openai_base_url` เพราะ journal, model settings และ Interrupt hook ต้อง restore พร้อมกัน
-
-| Launcher | Connector | Responses URL |
-| --- | --- | --- |
-| Codex Web GPT Master | `Codex Native2` | `http://127.0.0.1:17841/v1` |
-| Fame Codex | `Fame Codex Native2` | `http://127.0.0.1:17842/v1` |
-
 ## Development
 
 ```powershell
@@ -129,4 +112,3 @@ bun run launcher:build
 
 ห้าม commit API keys, Tunnel keys, cookies หรือ browser profile ดู [SECURITY.md](SECURITY.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md) และ [docs/security-model.md](docs/security-model.md)
 
-พัฒนาต่อยอดภายใต้ MIT License: [LICENSE](LICENSE), [FAME_CODEX_NOTICE.md](FAME_CODEX_NOTICE.md), [Third-party notices](LICENSES/)
