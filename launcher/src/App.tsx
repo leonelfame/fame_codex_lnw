@@ -12,7 +12,6 @@ import {
   type RefObject,
   type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { createActivityStore, type ActivityStore } from "./activity-store";
@@ -32,11 +31,6 @@ const api = window.codexWebLauncher;
 const galaxyMark = new URL("./assets/astra-nebula-f.png", import.meta.url).href;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COCKPIT_NARROW_QUERY = "(max-width: 760px)";
-const MCP_GUIDE_MEDIA = [
-  new URL("./assets/mcp-create-tunnel.mp4", import.meta.url).href,
-  new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
-  new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
-] as const;
 
 export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
@@ -412,7 +406,6 @@ function LauncherShell({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (document.querySelector(".guide-media.is-expanded")) return;
       if (settingsOpen) {
         setSettingsOpen(false);
         requestAnimationFrame(() => settingsTriggerRef.current?.focus());
@@ -1470,7 +1463,6 @@ function McpSurface({
       body: manualInteraction ? copy.manualMcpStepThreeBody : copy.mcpStepThreeBody,
     },
   ], [copy, manualInteraction]);
-  const guideMedia = MCP_GUIDE_MEDIA[step];
 
   const move = async (next: number) => {
     setStep(next);
@@ -1557,14 +1549,6 @@ function McpSurface({
       </div>
 
       <div className="mcp-stage">
-        {guideMedia ? (
-          <TutorialVideo
-            copy={copy}
-            label={`${copy.guideVideo}: ${steps[step]!.title}`}
-            src={guideMedia}
-          />
-        ) : null}
-
         <AnimatePresence mode="wait" initial={false}>
           <motion.section
             animate={{ opacity: 1, x: 0 }}
@@ -2182,80 +2166,6 @@ function ZeroRiskModelMenu({
         </>
       ) : null}
     </div>
-  );
-}
-
-function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const inlineVideo = useRef<HTMLVideoElement>(null);
-  const expandedVideo = useRef<HTMLVideoElement>(null);
-  const expandedAt = useRef(0);
-
-  const closeExpanded = () => {
-    const currentTime = expandedVideo.current?.currentTime;
-    if (inlineVideo.current && Number.isFinite(currentTime)) {
-      inlineVideo.current.currentTime = currentTime ?? 0;
-    }
-    setExpanded(false);
-  };
-
-  useEffect(() => {
-    if (!expanded) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeExpanded();
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [expanded]);
-
-  return (
-    <>
-      <div className="guide-media">
-        <video aria-label={label} autoPlay loop muted playsInline ref={inlineVideo} src={src} />
-        <button
-          aria-label={copy.expandGuideVideo}
-          className="guide-media-expand"
-          onClick={() => {
-            expandedAt.current = inlineVideo.current?.currentTime ?? 0;
-            setExpanded(true);
-          }}
-          type="button"
-        >
-          <Icon name="expand" />
-        </button>
-      </div>
-      {expanded ? createPortal(
-        <div
-          aria-label={label}
-          aria-modal="true"
-          className="guide-media is-expanded"
-          role="dialog"
-        >
-          <video
-            aria-label={label}
-            autoPlay
-            loop
-            muted
-            onLoadedMetadata={(event) => {
-              event.currentTarget.currentTime = expandedAt.current;
-            }}
-            playsInline
-            ref={expandedVideo}
-            src={src}
-          />
-          <button
-            aria-label={copy.closeGuideVideo}
-            autoFocus
-            className="guide-media-close"
-            onClick={closeExpanded}
-            type="button"
-          >
-            <Icon name="close" />
-          </button>
-        </div>,
-        document.body,
-      ) : null}
-    </>
   );
 }
 

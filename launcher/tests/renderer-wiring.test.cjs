@@ -37,6 +37,12 @@ test("cockpit header keeps Fame Codex branding centered without animated chrome"
   assert.doesNotMatch(cockpitStylesSource, /\.cockpit-header-emblem[^}]*filter:\s*blur/s);
 });
 
+test("MCP setup does not load or autoplay tutorial media", () => {
+  assert.doesNotMatch(appSource, /mcp-(?:create-tunnel|connect-connector)\.mp4/);
+  assert.doesNotMatch(appSource, /<video\b|autoPlay\b|TutorialVideo/);
+  assert.doesNotMatch(stylesSource, /\.guide-media\b/);
+});
+
 test("renderer zoom scales the shell without moving or zooming the native ChatGPT surface", () => {
   assert.match(
     electronMain,
